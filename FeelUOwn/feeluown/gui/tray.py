@@ -1,0 +1,208 @@
+import logging
+import sys
+from typing import Optional
+
+from PyQt6.QtCore import Qt, QEvent
+from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
+
+from feeluown.player import State
+from feeluown.gui.helpers import elided_text, get_qapp
+from feeluown.i18n import t
+
+
+IS_MACOS = sys.platform == "darwin"
+
+logger = logging.getLogger(__name__)
+
+
+class Tray(QSystemTrayIcon):
+    def __init__(self, app):
+        """
+        type app: feeluown.app.App
+        """
+        super().__init__()
+        self._app = app
+        self._lyric_window = app.ui.lyric_window
+        self._app_old_state = None  #: app window state before minimized
+        qapp = get_qapp()
+        self._application_state = qapp.applicationState()
+
+        # setup context menu
+        self._menu = QMenu()
+        self._status_action = QAction("...")
+        self._toggle_player_action = QAction(
+            QIcon.fromTheme("media-play"), t("tray-toggle-playpause", action="play")
+        )
+        self._next_action = QAction(
+            QIcon.fromTheme("media-skip-forward"), t("tray-skip-track-next")
+        )
+        self._prev_action = QAction(
+            QIcon.fromTheme("media-skip-backward"), t("tray-skip-track-prev")
+        )
+        self._toggle_lyric_action = QAction(t("tray-desktop-lyrics"))
+        self._toggle_lyric_action.setCheckable(True)
+        self._toggle_lyric_action.setChecked(self._lyric_window.isVisible())
+        self._quit_action = QAction(QIcon.fromTheme("exit"), t("tray-quit-application"))
+        # add toggle_app action for macOS, on other platforms, user
+        # can click the tray icon to toggle_app
+        if IS_MACOS:
+            self._toggle_app_action: Optional[QAction] = QAction(
+                QIcon.fromTheme("window"), t("tray-main-window-action", action="hide")
+            )
+        else:
+            self._toggle_app_action = None
+            self.activated.connect(self._on_activated)  # noqa
+
+        # bind signals
+        self._quit_action.triggered.connect(self._app.exit)
+        self._toggle_player_action.triggered.connect(self._app.player.toggle)
+        self._prev_action.triggered.connect(self._app.playlist.previous)
+        self._next_action.triggered.connect(self._app.playlist.next)
+        self._toggle_lyric_action.triggered.connect(self._lyric_window.setVisible)
+        if self._toggle_app_action is not None:
+            self._toggle_app_action.triggered.connect(self._toggle_app_state)
+        self._app.player.state_changed.connect(
+            self.on_player_state_changed, aioqueue=True
+        )
+        self._app.playlist.song_changed.connect(self.on_player_song_changed)
+        self._app.theme_mgr.theme_changed.connect(self.on_theme_changed)
+        qapp.applicationStateChanged.connect(self.on_app_state_changed)
+
+        self._app.installEventFilter(self)
+        self._lyric_window.installEventFilter(self)
+        self.setContextMenu(self._menu)
+        self.setup_ui()
+
+    def initialize(self):
+        self._set_icon()
+        self._status_action.setIcon(self.icon())
+
+    def setup_ui(self):
+        self._menu.addAction(self._status_action)
+        self._menu.addAction(self._toggle_player_action)
+        self._menu.addAction(self._prev_action)
+        self._menu.addAction(self._next_action)
+        self._menu.addSeparator()
+        if self._toggle_app_action is not None:
+            self._menu.addAction(self._toggle_app_action)
+        self._menu.addAction(self._toggle_lyric_action)
+        self._menu.addAction(self._quit_action)
+        self._status_action.setEnabled(False)
+
+    def _on_activated(self, reason=QSystemTrayIcon.ActivationReason.Unknown):
+        """
+        NOTE(cosven): Theoretically, we need not give default value for param reason.
+        However, we connect activated signal with `_toggle_app_state method` before,
+        and as you can see, `_toggle_app_state` does not accepts other parameters and it
+        works well. So we give an default value to avoid potential strange errors.
+        """
+        # On Ubuntu 18.04, when we double left click the tray icon, the activated
+        # signal is emitted and the reason is `QSystemTrayIcon.ActivationReason.Trigger`.
+        if reason not in (QSystemTrayIcon.ActivationReason.Context,):
+            self._toggle_app_state()
+        logger.info(f"tray icon activated, reason:{reason}")
+
+    def _toggle_app_state(self):
+        """activate/deactivate app"""
+        if self._app.isHidden():
+            self._app.show()
+            self._app.activateWindow()
+        elif self._app.isMinimized():
+            self._app.setWindowState(self._app_old_state)
+        else:
+            self._app.hide()
+
+    def _set_icon(self):
+        # respect system icon
+        icon = QIcon.fromTheme(
+            "feeluown-tray", QIcon(self._app.theme_mgr.get_icon("tray"))
+        )
+        self.setIcon(icon)
+
+    def on_theme_changed(self, _):
+        self._set_icon()
+
+    def on_player_song_changed(self, song):
+        if song is not None:
+            status = f"{song.title_display} - {song.artists_name_display}"
+            if self._app.config.NOTIFY_ON_TRACK_CHANGED:
+                # TODO: show song cover if possible
+                self.showMessage(
+                    song.title_display,
+                    song.artists_name_display,
+                    msecs=self._app.config.NOTIFY_DURATION,
+                )
+            self._status_action.setText(elided_text(status, 120))
+            self._status_action.setToolTip(status)
+            self.setToolTip(status)
+
+    def on_player_state_changed(self, state):
+        if state == State.playing:
+            self._toggle_player_action.setText(
+                t("tray-toggle-playpause", action="pause")
+            )
+            self._toggle_player_action.setIcon(QIcon.fromTheme("media-pause"))
+            self._toggle_player_action.setEnabled(True)
+        else:
+            self._toggle_player_action.setText(
+                t("tray-toggle-playpause", action="play")
+            )
+            self._toggle_player_action.setIcon(QIcon.fromTheme("media-play"))
+            if state == State.stopped:
+                self._toggle_player_action.setEnabled(False)
+            else:
+                self._toggle_player_action.setEnabled(True)
+
+    def on_app_state_changed(self, state):
+        previous_state = self._application_state
+        self._application_state = state
+        if state == Qt.ApplicationState.ApplicationActive:
+            # On macOS, clicking the floating lyrics can activate the app.
+            # Qt also emits ApplicationActive again for Dock reopen events.
+            if IS_MACOS and (
+                previous_state == state or not self._lyric_window.isVisible()
+            ):
+                self._app.show()
+                self._app.activateWindow()
+        elif state == Qt.ApplicationState.ApplicationInactive:
+            # when app window is not the top window, it changes to inactive
+            if self._toggle_app_action is not None:
+                self._toggle_app_action.setText(
+                    t("tray-main-window-action", action="show")
+                )
+
+    def eventFilter(self, obj, event):
+        if obj is self._lyric_window:
+            if event.type() == QEvent.Type.Show:
+                self._toggle_lyric_action.setChecked(True)
+            elif event.type() == QEvent.Type.Hide:
+                self._toggle_lyric_action.setChecked(False)
+            return False
+
+        app_action = None
+        if event.type() == QEvent.Type.WindowStateChange:
+            # when window is maximized before minimized, the window state will
+            # be Qt.WindowMinimized | Qt.WindowMaximized
+            if obj.windowState() & Qt.WindowState.WindowMinimized:
+                self._app_old_state = event.oldState()
+                app_action = "show"
+            else:
+                app_action = "hide"
+        elif event.type() == QEvent.Type.Hide:
+            app_action = "show"
+        elif event.type() == QEvent.Type.Show:
+            app_action = "hide"
+        else:
+            # Only handle known event. When QApplication is quiting,
+            # some unknown event is emitted.
+            #
+            # For exmaple, `_toggle_app_action.setText` may raise this error when
+            # app is quiting.
+            # RuntimeError: wrapped C/C++ object of type QAction has been deleted
+            return False
+        if app_action is not None and self._toggle_app_action is not None:
+            self._toggle_app_action.setText(
+                t("tray-main-window-action", action=app_action)
+            )
+        return False

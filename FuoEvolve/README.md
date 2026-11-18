@@ -1,0 +1,95 @@
+# FuoEvolve
+
+[![Stable release](https://img.shields.io/github/v/release/feeluown/FuoEvolve?label=stable)](https://github.com/feeluown/FuoEvolve/releases/latest)
+[![Master Canary](https://github.com/feeluown/FuoEvolve/actions/workflows/master-canary.yml/badge.svg?branch=master)](https://github.com/feeluown/FuoEvolve/actions/workflows/master-canary.yml?query=branch%3Amaster)
+[![Downloads](https://img.shields.io/github/downloads/feeluown/FuoEvolve/total?label=downloads)](https://github.com/feeluown/FuoEvolve/releases)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Compose Multiplatform](https://img.shields.io/badge/Compose-Multiplatform-4285F4?logo=jetpackcompose&logoColor=white)](https://www.jetbrains.com/compose-multiplatform/)
+
+[中文](README.zh-CN.md) | English
+
+FuoEvolve is an open-source, cross-platform music player built around the [FeelUOwn](https://github.com/feeluown/FeelUOwn) ecosystem. It brings online music services, local music, lyrics, downloads, and video into one modern app.
+
+## Download
+
+| Platform | Distribution channel | Stable | Canary / Preview |
+| --- | --- | --- | --- |
+| **Android** | GitHub Releases | [Signed APK](https://github.com/feeluown/FuoEvolve/releases/latest) | [Latest master build](https://github.com/feeluown/FuoEvolve/actions/workflows/master-canary.yml?query=branch%3Amaster) |
+| **Android** | F-Droid | [F-Droid repository](https://feeluown.github.io/FuoEvolve/fdroid/repo?fingerprint=8D8BE45A04CF3242C13B43361C9FFA1CA8FB2F39D1A43CE35BEADFA8DBFEFB74) | — |
+| **Windows x64** | GitHub Releases | [NSIS installer](https://github.com/feeluown/FuoEvolve/releases/latest) | [Master Canary (NSIS)](https://github.com/feeluown/FuoEvolve/actions/workflows/master-canary.yml?query=branch%3Amaster) |
+| **macOS arm64 / x64** | GitHub Releases | [DMG](https://github.com/feeluown/FuoEvolve/releases/latest) | [Master Canary (DMG)](https://github.com/feeluown/FuoEvolve/actions/workflows/master-canary.yml?query=branch%3Amaster) |
+| **Linux x64** | GitHub Releases | [AppImage / DEB / RPM / Arch package](https://github.com/feeluown/FuoEvolve/releases/latest) | [Master Canary (AppImage / DEB / RPM / Arch)](https://github.com/feeluown/FuoEvolve/actions/workflows/master-canary.yml?query=branch%3Amaster) |
+| **Linux x64 (Arch)** | AUR · build from source | [`fuoevolve`](https://aur.archlinux.org/packages/fuoevolve) | — |
+| **Linux x64 (Arch)** | AUR · prebuilt binary | [`fuoevolve-bin`](https://aur.archlinux.org/packages/fuoevolve-bin) | — |
+
+The AUR packages are alternatives: `fuoevolve` compiles the application from the release's source archive, while `fuoevolve-bin` downloads and repackages the corresponding GitHub Release Arch binary. They cannot be installed together. **AUR listings will be available after the first successful release with AUR publishing configured**; see [AUR publishing](docs/aur-publishing.md) for details.
+
+> Desktop releases are GraalVM Native Image applications and do not bundle a JVM. Windows and macOS packages are not yet production-signed/notarized.
+
+## Features
+
+- 🎵 **Multiple music sources** — use NetEase Cloud Music, QQ Music, Bilibili, and YouTube Music in one app.
+- 🧭 **Discover and search** — browse recommendations, charts, playlists, artists, albums, videos, and search across enabled sources.
+- ▶️ **Music and video playback** — queue management, shuffle/repeat, seeking, sleep timer, MV/video playback, and multipart Bilibili content.
+- 🎤 **Rich lyrics** — synchronized lyrics, translations, romanization, word-level timing where available, plus manual lyric matching.
+- 🔁 **Smart source replacement** — automatically look for a suitable alternative when the current track cannot be played.
+- 💽 **Local and offline music** — scan local files, edit metadata, create local playlists, download supported tracks, and resume interrupted downloads.
+- ❤️ **Library management** — manage favorites, playlists, albums, and artists where the music service supports it.
+- 🎙️ **Audio recognition** — identify nearby music and jump directly to search or song details.
+- 🔐 **Portable account credentials** — securely store provider logins and move supported credentials between devices when needed.
+- 🎨 **Material 3 Expressive UI** — adaptive layouts, light/dark themes, dynamic color, and cover-inspired player colors.
+
+## Desktop
+
+The desktop app shares the Compose experience with mobile and is available for Windows, macOS, and Linux. `desktopApp` is the only desktop host and is distributed through Nucleus/Tao + GraalVM Native Image; the legacy JVM desktop application has been removed.
+
+- **Windows:** SMTC system media controls and NSIS packaging.
+- **macOS:** Now Playing / Remote Command Center integration with Apple Silicon and Intel DMGs.
+- **Linux:** MPRIS media controls, native Wayland/Tao support, AppImage, DEB, RPM and Arch packages (also available via AUR). The Linux Native Image build uses the pinned Ubuntu 24.04 LTS compatibility baseline.
+- **Audio and video:** direct JNI libmpv playback with GPU video presentation and software fallback.
+- **Tray lifecycle:** closing the window keeps playback and downloads running; the tray/status item can restore or exit the app.
+- **Secure login storage:** Windows Credential Manager, macOS Keychain, and Linux Secret Service/Libsecret.
+
+Stable release tags publish the complete desktop package matrix alongside Android and include SHA-256 checksums. Desktop self-update is intentionally not enabled yet; install newer desktop builds from GitHub Releases or Canary artifacts, or update the Arch package through AUR once available.
+
+## Music Sources
+
+| Source | Main content |
+| --- | --- |
+| **NetEase Cloud Music** | Recommendations, private FM, charts, playlists, artists, albums, MV, favorites, and cloud music |
+| **QQ Music** | Recommendations, private FM, charts, playlists, artists, albums, MV, favorites, and library content |
+| **Bilibili** | Music/video search, recommendations, followed creators, favorites, history, watch later, and multipart video |
+| **YouTube Music** | Search, recommendations, library, playlists, artists, albums, radio, lyrics, and video |
+
+Available content depends on the source, region, login state, and upstream service behavior. Sources can be enabled, disabled, reordered, and signed in from Settings.
+
+## Platform Status
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| Android | **Stable** | Signed APK and F-Droid distribution |
+| Windows | **Stable** | x64 Native Image NSIS installer; production signing is pending |
+| macOS | **Stable** | Native Image DMGs for Apple Silicon and Intel; signing/notarization is pending |
+| Linux | **Stable** | Native Image AppImage, DEB, RPM and Arch packages; AUR source/binary publishing is being introduced; build baseline is Ubuntu 24.04 LTS compatibility |
+
+## Development
+
+FuoEvolve uses [Compose Multiplatform](https://www.jetbrains.com/compose-multiplatform/) across supported platforms.
+
+```bash
+# Android debug build
+./gradlew :androidApp:assembleDebug
+
+# Run the native desktop app
+./gradlew :desktopApp:run
+```
+
+Desktop development also requires a Rust/Cargo toolchain and the native dependencies for the target platform. See [desktopApp/README.md](desktopApp/README.md), [docs/desktop-foundation.md](docs/desktop-foundation.md), and [docs/desktop-packaging.md](docs/desktop-packaging.md) for runtime and packaging details.
+
+## Contributing
+
+Bug reports, feature discussions, and pull requests are welcome. See [Issues](https://github.com/feeluown/FuoEvolve/issues) and [Pull Requests](https://github.com/feeluown/FuoEvolve/pulls).
+
+## License
+
+FuoEvolve is licensed under the [GNU General Public License v3.0](LICENSE).

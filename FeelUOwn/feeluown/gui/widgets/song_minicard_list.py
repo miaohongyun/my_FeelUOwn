@@ -1,0 +1,399 @@
+import logging
+import random
+from typing import TYPE_CHECKING
+
+from PyQt6.QtCore import (
+    pyqtSignal,
+    Qt,
+    QSize,
+    QRect,
+    QRectF,
+    QAbstractListModel,
+    QModelIndex,
+)
+from PyQt6.QtGui import (
+    QPainter,
+    QImage,
+    QColor,
+    QPalette,
+    QBrush,
+    QFontMetrics,
+    QTextOption,
+    QGuiApplication,
+)
+from PyQt6.QtWidgets import QFrame, QListView, QStyle, QStyledItemDelegate
+
+from feeluown.utils import aio
+from feeluown.utils.reader import create_reader
+from feeluown.library import reverse
+from feeluown.gui.helpers import (
+    ItemViewNoScrollMixin,
+    ReaderFetchMoreMixin,
+    resize_font,
+    SOLARIZED_COLORS,
+    fetch_cover_wrapper,
+    painter_save,
+)
+from feeluown.gui.thumbnail_cache import ThumbnailImageCache, scale_image
+
+if TYPE_CHECKING:
+    from feeluown.gui import GuiApp
+
+
+logger = logging.getLogger(__name__)
+Fetching = object()
+
+
+class BaseSongMiniCardListModel(QAbstractListModel):
+    _max_cache_edge = 256
+
+    def __init__(self, fetch_image, parent=None):
+        super().__init__(parent)
+
+        self._items = []
+        self.fetch_image = fetch_image
+        self.image_cache = ThumbnailImageCache()
+        self._image_colors = {}
+        self._image_fetching = set()
+        self.rowsAboutToBeRemoved.connect(self.on_rows_about_to_be_removed)
+
+    def rowCount(self, _=QModelIndex()):
+        return len(self._items)
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+        return flags
+
+    def _fetch_image_callback(self, item):
+        # TODO: duplicate code with ImgListModel
+        def cb(content):
+            uri = reverse(item)
+            try:
+                row = self._items.index(item)
+            except ValueError:
+                self._image_fetching.discard(uri)
+                self.image_cache.remove(uri)
+                self._image_colors.pop(uri, None)
+                return
+
+            if content is None:
+                self._image_fetching.discard(uri)
+                self.image_cache.set(uri, None)
+                return
+
+            img = QImage()
+            img.loadFromData(content)
+            img = self._scale_image_for_cache(img)
+            self._image_fetching.discard(uri)
+            self.image_cache.set(uri, img)
+            top_left = self.createIndex(row, 0)
+            bottom_right = self.createIndex(row, 0)
+            self.dataChanged.emit(top_left, bottom_right)
+
+        return cb
+
+    def _scale_image_for_cache(self, img: QImage) -> QImage:
+        """Keep only a bounded thumbnail in the model cache."""
+        if img.isNull():
+            return img
+        max_edge = self._max_cache_edge
+        if img.width() <= max_edge and img.height() <= max_edge:
+            return img
+        return scale_image(img, max_edge)
+
+    def get_image_unblocking(self, song):
+        """Return a cached image/color or schedule cover loading without blocking."""
+        uri = reverse(song)
+        cached, image = self.image_cache.get(uri)
+        if cached:
+            if image is None:
+                return self._image_colors.get(uri)
+            return image
+        if uri in self._image_fetching:
+            return self._image_colors.get(uri)
+        aio.run_afn(self.fetch_image, song, self._fetch_image_callback(song))
+        color = QColor(random.choice(list(SOLARIZED_COLORS.values())))
+        color.setAlphaF(0.8)
+        self._image_colors[uri] = color
+        self._image_fetching.add(uri)
+        return color
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        offset = index.row()
+        if not index.isValid() or offset >= len(self._items):
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            return self._items[offset].title_display
+        elif role == Qt.ItemDataRole.UserRole:
+            song = self._items[offset]
+            image = self.get_image_unblocking(song)
+            return (song, image)
+        return None
+
+    def on_rows_about_to_be_removed(self, _, first, last):
+        last = min(last, len(self._items) - 1)
+        for i in range(first, last + 1):
+            item = self._items[i]
+            uri = reverse(item)
+            # clear image cache
+            self.image_cache.remove(uri)
+            self._image_colors.pop(uri, None)
+            self._image_fetching.discard(uri)
+
+
+class SongMiniCardListModel(ReaderFetchMoreMixin, BaseSongMiniCardListModel):
+    def __init__(self, reader, fetch_image, parent=None):
+        super().__init__(fetch_image, parent)
+
+        self._reader = reader
+        self._fetch_more_step = 10
+        self._is_fetching = False
+
+    @classmethod
+    def create(cls, reader, app: "GuiApp"):
+        return cls(create_reader(reader), fetch_image=fetch_cover_wrapper(app))
+
+
+class SongMiniCardListDelegate(QStyledItemDelegate):
+    img_padding = 2
+
+    def __init__(
+        self,
+        view,
+        card_min_width=200,
+        card_height=40,
+        card_right_spacing=10,
+        card_padding=(3, 3, 3, 0),
+        hover_color_role=QPalette.ColorRole.Window,
+    ):
+        """
+        QListView.setSpacing set spacing around the item, however, sometimes
+        the left spacing is unneeded. `card_left_padding` is used to customize
+        the behaviour.
+        """
+        super().__init__(parent=view)
+
+        self.view: ItemViewNoScrollMixin = view
+        self.card_min_width = card_min_width
+        self.card_height = card_height
+        self.card_right_spacing = card_right_spacing
+        self.hover_color_role = hover_color_role
+        self.card_top_padding = card_padding[1]
+        self.card_bottom_padding = card_padding[3]
+        self.card_left_padding = card_padding[0]
+        self.view.set_row_height(card_height + card_padding[1] + card_padding[3])
+
+        self._device_pixel_ratio = QGuiApplication.instance().devicePixelRatio()
+
+    def item_sizehint(self) -> tuple:
+        # HELP: listview needs about 20 spacing left on macOS
+        width = max(self.view.width() - 20, self.card_min_width)
+
+        # according to our algorithm, when the widget width is:
+        #   2(card_min_width + card_right_spacing) + card_right_spacing - 1,
+        # the card width can take the maximum width, it will be:
+        #   CardMaxWidth = 2 * card_min_width + card_right_spacing - 1
+
+        # calculate max column count
+        count = (width - self.card_right_spacing) // (
+            self.card_min_width + self.card_right_spacing
+        )
+        count = max(count, 1)
+        item_width = (width - ((count + 1) * self.card_right_spacing)) // count
+        return (
+            item_width,
+            self.card_height + self.card_top_padding + self.card_bottom_padding,
+        )
+
+    def paint(self, painter, option, index):
+        card_top_padding = self.card_top_padding
+        card_right_spacing = self.card_right_spacing
+        card_height = self.card_height
+        card_left_padding = self.card_left_padding
+        border_radius = 8
+
+        rect = option.rect
+        # HACK(cosven): from the QFontMetrics doc, there is usually a small spacing
+        # between a character and the font rect highest/lowest position.
+        # Assume the spacing is 2px here.
+        img_padding = self.img_padding
+        cover_height = card_height - 2 * img_padding
+        cover_width = cover_height
+        data = index.data(Qt.ItemDataRole.UserRole)
+        if data is None:
+            return
+        song, obj = data
+        if obj is None:
+            return
+
+        selected = option.state & QStyle.StateFlag.State_Selected
+        item_width, _ = self.item_sizehint()
+        bg_rect = QRectF(
+            rect.x() + card_left_padding,
+            rect.y() + card_top_padding,
+            min(rect.width() - card_left_padding - card_right_spacing, item_width),
+            card_height,
+        )
+        if selected:
+            with painter_save(painter):
+                painter.setPen(Qt.PenStyle.NoPen)
+                color = option.palette.color(QPalette.ColorRole.Highlight)
+                color.setAlpha(55)
+                painter.setBrush(color)
+                painter.drawRoundedRect(bg_rect, border_radius, border_radius)
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            with painter_save(painter):
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(option.palette.color(self.hover_color_role))
+                painter.drawRoundedRect(bg_rect, border_radius, border_radius)
+
+        with painter_save(painter):
+            painter.translate(rect.x() + card_left_padding, rect.y() + card_top_padding)
+
+            if selected:
+                text_color = option.palette.color(QPalette.ColorRole.Text)
+                non_text_color = QColor(text_color)
+                non_text_color.setAlpha(140)
+            else:
+                text_color = option.palette.color(QPalette.ColorRole.Text)
+                if text_color.lightness() > 150:
+                    non_text_color = text_color.darker(140)
+                else:
+                    non_text_color = text_color.lighter(150)
+                non_text_color.setAlpha(100)
+
+            # Draw image.
+            with painter_save(painter):
+                painter.translate(0, img_padding)
+                self.paint_pixmap(
+                    painter,
+                    non_text_color,
+                    obj,
+                    cover_width,
+                    cover_height,
+                    border_radius
+                )
+
+            # Draw text.
+            with painter_save(painter):
+                text_width = (
+                    rect.width() -
+                    cover_width -
+                    card_left_padding * 2 -
+                    card_right_spacing
+                )
+                painter.translate(cover_width + card_left_padding, 0)
+                title = index.data(Qt.ItemDataRole.DisplayRole)
+                subtitle = f"{song.artists_name_display} • {song.album_name_display}"
+                # Note this is not a bool object.
+                is_enabled = option.state & QStyle.StateFlag.State_Enabled
+                self.paint_text(
+                    painter,
+                    is_enabled,
+                    title,
+                    subtitle,
+                    text_color,
+                    non_text_color,
+                    text_width,
+                    card_height,
+                )
+
+    def paint_text(
+        self,
+        painter,
+        is_enabled,
+        title,
+        subtitle,
+        text_color,
+        non_text_color,
+        text_width,
+        text_height,
+    ):
+        each_height = text_height // 2
+        text_option = QTextOption()
+        text_option.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        # Draw title.
+        title_rect = QRectF(0, 0, text_width, each_height)
+        fm = QFontMetrics(painter.font())
+        if is_enabled:
+            painter.setPen(text_color)
+        else:
+            painter.setPen(non_text_color)
+        elided_title = fm.elidedText(
+            title, Qt.TextElideMode.ElideRight, int(text_width)
+        )
+        painter.drawText(title_rect, elided_title, text_option)
+
+        # Draw subtitle.
+        painter.translate(0, each_height)
+        subtitle_rect = QRectF(0, 0, text_width, each_height)
+        elided_title = fm.elidedText(
+            subtitle, Qt.TextElideMode.ElideRight, int(text_width)
+        )
+        font = painter.font()
+        resize_font(font, -1)
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        painter.setPen(non_text_color)
+        painter.drawText(subtitle_rect, elided_title, text_option)
+
+    def paint_pixmap(
+        self, painter, border_color, decoration, width, height, border_radius
+    ):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = painter.pen()
+        pen.setColor(border_color)
+        painter.setPen(pen)
+        if isinstance(decoration, QColor):
+            color = decoration
+            brush = QBrush(color)
+            painter.setBrush(brush)
+        else:  # QImage
+            if decoration.height() < decoration.width():
+                pixmap = decoration.scaledToHeight(
+                    int(height * self._device_pixel_ratio),
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            else:
+                pixmap = decoration.scaledToWidth(
+                    int(width * self._device_pixel_ratio),
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            pixmap.setDevicePixelRatio(self._device_pixel_ratio)
+            brush = QBrush(pixmap)
+            painter.setBrush(brush)
+        cover_rect = QRect(0, 0, width, height)
+        painter.drawRoundedRect(cover_rect, border_radius, border_radius)
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        if index.isValid():
+            return QSize(*self.item_sizehint())
+        return size
+
+
+class SongMiniCardListView(ItemViewNoScrollMixin, QListView):
+    play_song_needed = pyqtSignal([object])
+
+    def __init__(self, parent=None, **kwargs):
+        super().__init__(parent=parent, **kwargs)
+
+        self.setSelectionMode(QListView.SelectionMode.ContiguousSelection)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setMouseTracking(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setViewMode(QListView.ViewMode.IconMode)
+        self.setResizeMode(QListView.ResizeMode.Adjust)
+        self.setWrapping(True)
+        self.initialize()
+
+        self.activated.connect(self._on_activated)
+
+    def _on_activated(self, index):
+        self.play_song_needed.emit(index.data(Qt.ItemDataRole.UserRole)[0])

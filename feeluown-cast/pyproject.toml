@@ -1,0 +1,26 @@
+[project]
+name = "fuo-cast"
+authors = [{name = "miaohongyun"}]
+license = "GPL-3.0-or-later"
+dynamic = ["version", "description"]
+requires-python = ">=3.10"
+
+# 插件本身只用标准库；PyQt6 由 feeluown 提供，不在这里重复声明。
+dependencies = [
+    "feeluown",
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.entry-points."fuo.plugins_v1"]
+cast = "fuo_cast"
+
+[build-system]
+requires = ["flit_core >=3.11,<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.black]
+line-length = 89

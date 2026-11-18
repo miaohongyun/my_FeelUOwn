@@ -1,0 +1,271 @@
+import logging
+from typing import TYPE_CHECKING, Optional
+
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QGridLayout, QSizePolicy
+from feeluown.library.provider_protocol import SupportsToplist
+
+from feeluown.library import (
+    CollectionType,
+    SupportsRecListDailyPlaylists,
+    SupportsRecListDailySongs,
+    SupportsRecListCollections,
+    SupportsCurrentUserDislikeSongsReader,
+    SupportsCurrentUserListRadioSongs,
+)
+
+from feeluown.gui.widgets import CalendarButton, RankButton, EmojiButton
+from feeluown.gui.helpers import BgTransparentMixin
+from feeluown.gui.components.recommendation_panel import (
+    Panel,
+    RecAlbumsCollectionPanel,
+    RecPlaylistsPanel,
+    RecPlaylistsCollectionPanel,
+    RecSongsCollectionPanel,
+    RecVideosCollectionPanel,
+)
+from feeluown.gui.pages.template import render_scroll_area_view
+from feeluown.utils.aio import run_fn
+from feeluown.i18n import t
+
+
+if TYPE_CHECKING:
+    from feeluown.app.gui_app import GuiApp
+
+
+logger = logging.getLogger(__name__)
+
+# Keep action controls visually comparable with the recommendation panel title/content.
+ActionButtonHeight = 34
+ActionButtonMinWidth = 170
+ActionButtonSpacing = 10
+RecCollectionsLimit = 12
+
+
+async def render(req, **kwargs):
+    await render_scroll_area_view(req, View)
+
+
+class View(QWidget, BgTransparentMixin):
+    def __init__(self, app: "GuiApp"):
+        super().__init__(parent=None)
+        self._app = app
+        self._heart_radar_provider: Optional[SupportsCurrentUserListRadioSongs] = None
+        self._playlist_panel: Optional[RecPlaylistsPanel] = None
+        self._collection_panels: list[Panel] = []
+
+        self.daily_songs_btn = CalendarButton(
+            t("recommended-daily-playlist"),
+            height=ActionButtonHeight,
+            parent=self,
+        )
+        self.rank_btn = RankButton(height=ActionButtonHeight, parent=self)
+        # FIXME: design a new button for dislike
+        self.dislike_btn = EmojiButton(
+            "🚫", t("music-blacklisted"), height=ActionButtonHeight, parent=self
+        )
+        self.heart_radar_btn = EmojiButton(
+            "📻", t("music-radio-radar"), height=ActionButtonHeight, parent=self
+        )
+        # Buttons should have comparable visual weight with the panel title/body.
+        self.daily_songs_btn.setMinimumWidth(ActionButtonMinWidth)
+        self.rank_btn.setMinimumWidth(ActionButtonMinWidth)
+        self.dislike_btn.setMinimumWidth(ActionButtonMinWidth)
+        self.heart_radar_btn.setMinimumWidth(ActionButtonMinWidth)
+        self._action_btns = [
+            self.daily_songs_btn,
+            self.rank_btn,
+            self.heart_radar_btn,
+            self.dislike_btn,
+        ]
+        # Preserve semantic order when wrapping to 2/1 columns.
+        for btn in self._action_btns:
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._action_cols = 0
+
+        self._recommendation_section = QWidget(self)
+        self._recommendation_section_layout = QVBoxLayout(self._recommendation_section)
+        self._recommendation_section_layout.setContentsMargins(0, 0, 0, 0)
+        self._recommendation_section_layout.setSpacing(0)
+        self._recommendation_section.hide()
+
+        self._layout = QVBoxLayout(self)
+        self._setup_ui()
+
+        self.daily_songs_btn.clicked.connect(
+            lambda: self._app.browser.goto(page="/rec/daily_songs")
+        )
+        self.rank_btn.clicked.connect(lambda: self._app.browser.goto(page="/toplist"))
+        self.heart_radar_btn.clicked.connect(self._on_heart_radar_clicked)
+        self.dislike_btn.clicked.connect(
+            lambda: self._app.browser.goto(page="/my_dislike")
+        )
+
+    def _setup_ui(self):
+        self._action_layout = QGridLayout()
+        self._action_layout.setContentsMargins(0, 0, 0, 0)
+        self._action_layout.setHorizontalSpacing(ActionButtonSpacing)
+        self._action_layout.setVerticalSpacing(ActionButtonSpacing)
+
+        self._layout.setContentsMargins(20, 10, 20, 0)
+        self._layout.setSpacing(0)
+        # Keep discovery action buttons as the topmost section to reduce noise.
+        self._layout.addLayout(self._action_layout)
+        self._layout.addSpacing(20)
+        self._layout.addWidget(self._recommendation_section)
+        self._layout.addStretch(0)
+        self._reflow_action_buttons()
+
+    def _calc_action_button_columns(self) -> int:
+        margins = self._layout.contentsMargins()
+        available = max(1, self.width() - margins.left() - margins.right())
+        # cols ~= available width / button footprint, then clamp to [1, button_count].
+        unit = ActionButtonMinWidth + ActionButtonSpacing
+        cols = (available + ActionButtonSpacing) // unit
+        return max(1, min(len(self._action_btns), cols))
+
+    def _reflow_action_buttons(self):
+        cols = self._calc_action_button_columns()
+        # Avoid unnecessary teardown/rebuild when only height changed.
+        if cols == self._action_cols:
+            return
+        self._action_cols = cols
+
+        while self._action_layout.count():
+            item = self._action_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                self._action_layout.removeWidget(widget)
+
+        for i, btn in enumerate(self._action_btns):
+            row, col = divmod(i, cols)
+            self._action_layout.addWidget(btn, row, col)
+
+        for col in range(len(self._action_btns)):
+            self._action_layout.setColumnStretch(col, 1 if col < cols else 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reflow_action_buttons()
+
+    def _clear_recommendation_panels(self):
+        while self._recommendation_section_layout.count():
+            item = self._recommendation_section_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._playlist_panel = None
+        self._collection_panels = []
+
+    def _create_panel_from_collection(self, provider, collection) -> Optional[Panel]:
+        if not collection.models:
+            return None
+        if collection.type_ == CollectionType.only_playlists:
+            return RecPlaylistsCollectionPanel(
+                self._app,
+                provider.identifier,
+                collection,
+                initial_row_count=1,
+            )
+        if collection.type_ == CollectionType.only_songs:
+            return RecSongsCollectionPanel(
+                self._app,
+                provider.identifier,
+                collection,
+                initial_row_count=3,
+            )
+        if collection.type_ == CollectionType.only_albums:
+            return RecAlbumsCollectionPanel(
+                self._app,
+                provider.identifier,
+                collection,
+                initial_row_count=2,
+            )
+        if collection.type_ == CollectionType.only_videos:
+            return RecVideosCollectionPanel(
+                self._app,
+                provider.identifier,
+                collection,
+                initial_row_count=2,
+            )
+        logger.warning(
+            "skip unsupported recommendation collection type: %s",
+            collection.type_,
+        )
+        return None
+
+    async def render(self):
+        pvd_ui = self._app.current_pvd_ui_mgr.get()
+        if pvd_ui is None:
+            self._app.show_msg("wtf!")
+            return
+
+        self._clear_recommendation_panels()
+        provider = pvd_ui.provider
+        if isinstance(provider, SupportsRecListCollections):
+            collections = await run_fn(
+                lambda: provider.rec_list_collections(limit=RecCollectionsLimit)
+            )
+            for collection in collections:
+                panel = self._create_panel_from_collection(provider, collection)
+                if panel is None:
+                    continue
+                self._recommendation_section_layout.addWidget(panel)
+                self._collection_panels.append(panel)
+            if self._collection_panels:
+                self._recommendation_section.show()
+                for panel in self._collection_panels:
+                    await panel.render()
+            else:
+                # Keep action buttons usable even when no collection can be shown.
+                self._recommendation_section.hide()
+        elif isinstance(provider, SupportsRecListDailyPlaylists):
+            if self._playlist_panel is None:
+                self._playlist_panel = RecPlaylistsPanel(
+                    self._app,
+                    provider,
+                    initial_row_count=1,
+                    # /rec is scoped to the current provider, so provider icon is
+                    # redundant here.
+                    show_icon=False,
+                )
+                self._playlist_panel.header.setText(t("music-customized-recommendation"))
+                self._recommendation_section_layout.addWidget(self._playlist_panel)
+            self._recommendation_section.show()
+            await self._playlist_panel.render()
+        else:
+            # Keep action buttons usable even when provider has no daily playlists.
+            self._recommendation_section.hide()
+
+        self.daily_songs_btn.setEnabled(isinstance(provider, SupportsRecListDailySongs))
+        self.rank_btn.setEnabled(isinstance(provider, SupportsToplist))
+        self.heart_radar_btn.setEnabled(
+            isinstance(provider, SupportsCurrentUserListRadioSongs)
+        )
+        self.dislike_btn.setEnabled(
+            isinstance(provider, SupportsCurrentUserDislikeSongsReader)
+        )
+
+    def _on_heart_radar_clicked(self):
+        pvd_ui = self._app.current_pvd_ui_mgr.get()
+        assert pvd_ui is not None
+        provider = pvd_ui.provider
+        assert isinstance(provider, SupportsCurrentUserListRadioSongs)
+
+        was_active = self._app.fm.is_active
+        current_provider = self._heart_radar_provider if was_active else None
+        fetch_func = provider.current_user_list_radio_songs
+        if was_active and current_provider is provider:
+            self._app.show_msg(t("music-radio-radar-activated"))
+            return
+
+        if was_active:
+            self._app.fm.deactivate()
+
+        self._app.fm.activate(fetch_func)
+        self._heart_radar_provider = provider
+        self._app.show_msg(
+            t("music-radio-radar-changed")
+            if was_active
+            else t("music-radio-radar-activated")
+        )

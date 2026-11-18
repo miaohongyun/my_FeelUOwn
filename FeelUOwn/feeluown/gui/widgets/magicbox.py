@@ -1,0 +1,156 @@
+import io
+import sys
+from typing import TYPE_CHECKING
+
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtWidgets import QLineEdit, QSizePolicy
+
+from feeluown.i18n import t
+from feeluown.library.text2song import create_dummy_brief_song
+from feeluown.fuoexec import fuoexec
+from feeluown.utils.aio import run_afn
+
+if TYPE_CHECKING:
+    from feeluown.app.gui_app import GuiApp
+
+_KeyPrefix = "search_"  # local storage key prefix
+KeySourceIn = _KeyPrefix + "source_in"
+KeyType = _KeyPrefix + "type"
+
+
+class MagicBox(QLineEdit):
+    """Read user input, parse and execute
+
+    ref: https://wiki.qt.io/Technical_FAQ#How_can_I_create_a_one-line_QTextEdit?
+    """
+
+    # this filter signal is designed for table (songs_table & albums_table)
+    filter_text_changed = pyqtSignal(str)
+
+    def __init__(self, app: "GuiApp", parent=None):
+        super().__init__(parent)
+
+        self._app = app
+        self.setPlaceholderText(t("search-box-placeholder"))
+        self.setToolTip(t("search-box-tooltip"))
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(32)
+        self.setFrame(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        self.setTextMargins(5, 0, 0, 0)
+
+        self._timer = QTimer(self)
+        self._cmd_text = None
+        self._mode = "cmd"  # 详见 _set_mode 函数
+        self._timer.timeout.connect(self.__on_timeout)
+
+        self.textChanged.connect(self.__on_text_edited)
+        # self.textEdited.connect(self.__on_text_edited)
+        self.returnPressed.connect(self.__on_return_pressed)
+
+    def _set_mode(self, mode):
+        """Modify current mode
+
+        Currently, there are two main modes: cmd mode is the normal mode;
+        msg mode is for displaying message notifications.
+
+        When in msg mode, all signals will be blocked.
+        """
+        if mode == "cmd":
+            self.setReadOnly(False)
+            self._timer.stop()
+            self.setText(self._cmd_text or "")
+            # Note: only disable blockSignals after all operations are completed
+            # Then modify the current mode
+            self.blockSignals(False)
+            self._mode = mode
+        elif mode == "msg":
+            self.blockSignals(True)
+            if self._mode == "cmd":
+                self.setReadOnly(True)
+                self._cmd_text = self.text()
+                self._mode = mode
+
+    def _exec_code(self, code):
+        """Execute code and redirect the code’s stdout/stderr."""
+        output = io.StringIO()
+        sys.stderr = output
+        sys.stdout = output
+        try:
+            obj = compile(code, "<string>", "single")
+            fuoexec(obj)
+        except Exception as e:
+            print(str(e))
+        finally:
+            sys.stderr = sys.__stderr__
+            sys.stdout = sys.__stdout__
+
+        text = output.getvalue()
+        self._set_mode("msg")
+        self.setText(text or "No output.")
+        self._timer.start(1000)
+        if text:
+            self._app.show_msg(text)
+
+    def __on_text_edited(self):
+        text = self.text()
+        if self._mode == "cmd":
+            self._cmd_text = text
+        # filter browser content if prefix starts with `#`
+        # TODO: cancel unneeded filter
+        if text.startswith("#"):
+            self.filter_text_changed.emit(text[1:].strip())
+        else:
+            self.filter_text_changed.emit("")
+
+    def __on_return_pressed(self):
+        text = self.text()
+        if text.startswith(">>> "):
+            self._exec_code(text[4:])
+        elif text.startswith("---") or text.startswith("==="):
+            if self._app.ui.ai_chat_overlay is not None:
+                body = text[4:] if len(text) > 4 else ""
+                if body:
+                    run_afn(self._app.ui.ai_chat_overlay.body.exec_user_query, body)
+                self._app.ui.ai_chat_overlay.show()
+            else:
+                self._app.show_msg(t("search-box-ai-chat-unavailable"))
+        elif (
+            text.startswith("--> ")
+            or text.startswith("==> ")
+            or text.startswith("--》")
+            or text.startswith("==》")
+        ):
+            body = text[4:]
+            if not body:
+                return
+            delimiters = ("|", "-")
+            title = artists_name = ""
+            for delimiter in delimiters:
+                parts = body.split(delimiter)
+                if len(parts) == 2:
+                    title, artists_name = parts
+                    break
+            if title and artists_name:
+                song = create_dummy_brief_song(title.strip(), artists_name.strip())
+                self._app.playlist.play_model(song)
+                self._app.show_msg(t("search-box-play-track", song=song))
+            else:
+                self._app.show_msg(t("search-box-play-track-ill-formed"))
+        else:
+            local_storage = self._app.browser.local_storage
+            type_ = local_storage.get(KeyType)
+            source_in = local_storage.get(KeySourceIn)
+            query = {"q": text}
+            if type_ is not None:
+                query["type"] = type_
+            if source_in is not None:
+                query["source_in"] = source_in
+            self._app.browser.goto(page="/search", query=query)
+
+    def __on_timeout(self):
+        self._set_mode("cmd")
+
+    def focusInEvent(self, e):
+        super().focusInEvent(e)
+        self._set_mode("cmd")

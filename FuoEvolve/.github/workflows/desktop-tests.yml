@@ -1,0 +1,269 @@
+name: Nucleus Desktop Tests
+
+"on":
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: Git ref or SHA to test
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux Nucleus runtime
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.checkout_ref || github.sha }}
+
+      - name: Prepare Git refs for Gradle versioning
+        run: |
+          if ! git show-ref --verify --quiet refs/heads/master; then
+            git branch master origin/master
+          fi
+
+      - name: Verify Linux LTS baseline
+        run: |
+          . /etc/os-release
+          test "$ID" = "ubuntu"
+          test "$VERSION_ID" = "26.04"
+
+      - name: Set up Nucleus toolchain
+        uses: ./.github/actions/setup-nucleus
+        with:
+          java-version: "25"
+          packaging-tools: "false"
+          setup-node: "false"
+
+      - name: Set up Rust 1.98.1
+        uses: dtolnay/rust-toolchain@1.98.1
+
+      - name: Cache Rust native helpers
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktopApp/native/audio-fingerprint/target
+            desktopApp/native/audio-capture/target
+          key: nucleus-native-linux-ubuntu26.04-x64-rust-1.98.1-${{ hashFiles('desktopApp/native/audio-fingerprint/Cargo.toml', 'desktopApp/native/audio-fingerprint/src/**', 'shared/src/commonMain/resources/audio_recognition/afp.wasm', 'desktopApp/native/audio-capture/Cargo.toml', 'desktopApp/native/audio-capture/Cargo.lock', 'desktopApp/native/audio-capture/src/**') }}
+          restore-keys: |
+            nucleus-native-linux-ubuntu26.04-x64-rust-1.98.1-
+
+      - name: Validate Rust audio fingerprint helper
+        run: |
+          cargo build --release --manifest-path desktopApp/native/audio-fingerprint/Cargo.toml
+          python3 - <<'PY' | desktopApp/native/audio-fingerprint/target/release/fuoevolve-audio-fingerprint
+          import base64
+          import json
+          import math
+          import struct
+
+          samples = b''.join(
+              struct.pack('<f', 0.5 * math.sin(2 * math.pi * 440 * index / 8000))
+              for index in range(48000)
+          )
+          print(json.dumps({'samplesBase64': base64.b64encode(samples).decode()}))
+          PY
+          desktopApp/native/audio-fingerprint/target/release/fuoevolve-audio-fingerprint --self-test
+
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libfuse2t64 \
+            libasound2-dev \
+            libmpv-dev \
+            libpipewire-0.3-dev \
+            libpulse-dev \
+            libsecret-1-dev \
+            libwebkit2gtk-4.1-dev \
+            glib-networking \
+            patchelf \
+            pax-utils
+
+      - name: Validate Nucleus resource metadata task graph
+        run: |
+          ./gradlew \
+            --no-daemon \
+            --no-configuration-cache \
+            --warning-mode all \
+            :desktopApp:generateGraalvmProjectResourceMetadata
+
+      - name: Test shared desktop and Nucleus runtime
+        run: |
+          ./gradlew \
+            --no-configuration-cache \
+            --warning-mode all \
+            -Pfuoevolve.nucleus.bundleLinuxRuntime=true \
+            ciDesktopTest \
+            :desktopApp:test \
+            :desktopApp:compileKotlin \
+            :desktopApp:prepareNucleusAppResources
+          desktopApp/native/audio-fingerprint/target/release/fuoevolve-audio-fingerprint --self-test
+
+  windows:
+    name: Windows Nucleus runtime
+    runs-on: windows-latest
+    timeout-minutes: 50
+    env:
+      FUOEVOLVE_NUCLEUS_LIBMPV_DEV_DIR: ${{ github.workspace }}\build\nucleus-native\windows\mpv
+      FUOEVOLVE_NUCLEUS_LIBMPV_RUNTIME_DIR: ${{ github.workspace }}\build\nucleus-native\windows\mpv
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.checkout_ref || github.sha }}
+
+      - name: Prepare Git refs for Gradle versioning
+        shell: pwsh
+        run: |
+          git show-ref --verify --quiet refs/heads/master
+          if ($LASTEXITCODE -ne 0) {
+            git branch master origin/master
+          }
+
+      - name: Set up Nucleus toolchain
+        uses: ./.github/actions/setup-nucleus
+        with:
+          java-version: "25"
+          packaging-tools: "false"
+          setup-node: "false"
+
+      - name: Set up Rust 1.98.1
+        uses: dtolnay/rust-toolchain@1.98.1
+
+      - name: Cache Rust native helpers
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktopApp/native/audio-fingerprint/target
+            desktopApp/native/audio-capture/target
+          key: nucleus-native-windows-x64-rust-1.98.1-${{ hashFiles('desktopApp/native/audio-fingerprint/Cargo.toml', 'desktopApp/native/audio-fingerprint/src/**', 'shared/src/commonMain/resources/audio_recognition/afp.wasm', 'desktopApp/native/audio-capture/Cargo.toml', 'desktopApp/native/audio-capture/Cargo.lock', 'desktopApp/native/audio-capture/src/**') }}
+          restore-keys: |
+            nucleus-native-windows-x64-rust-1.98.1-
+
+      - name: Cache pinned Windows libmpv bundle
+        id: windows-libmpv-cache
+        uses: actions/cache@v6
+        with:
+          path: build/nucleus-native/windows/mpv
+          key: nucleus-libmpv-windows-x64-${{ hashFiles('desktopApp/packaging/native-deps.lock') }}
+
+      - name: Prepare pinned Windows libmpv development bundle
+        if: steps.windows-libmpv-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: >-
+          ./desktopApp/packaging/windows/prepare-libmpv-dev.ps1
+          -OutputDir "$env:FUOEVOLVE_NUCLEUS_LIBMPV_DEV_DIR"
+
+      - name: Verify Windows native compiler
+        shell: pwsh
+        run: |
+          clang --version
+          lld-link --version
+
+      - name: Test shared desktop and Nucleus runtime
+        shell: pwsh
+        run: |
+          .\gradlew.bat `
+            --no-configuration-cache `
+            --warning-mode all `
+            ciDesktopTest `
+            :desktopApp:test `
+            :desktopApp:compileKotlin `
+            :desktopApp:prepareNucleusAppResources
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\desktopApp\native\audio-fingerprint\target\release\fuoevolve-audio-fingerprint.exe --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  macos:
+    name: macOS Nucleus runtime
+    runs-on: macos-15
+    timeout-minutes: 50
+    env:
+      FUOEVOLVE_NUCLEUS_LIBMPV_DEV_DIR: ${{ github.workspace }}/build/nucleus-native/macos/mpv
+      FUOEVOLVE_NUCLEUS_LIBMPV_RUNTIME_DIR: ${{ github.workspace }}/build/nucleus-native/macos/mpv
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.checkout_ref || github.sha }}
+
+      - name: Prepare Git refs for Gradle versioning
+        run: |
+          if ! git show-ref --verify --quiet refs/heads/master; then
+            git branch master origin/master
+          fi
+
+      - name: Set up Nucleus toolchain
+        uses: ./.github/actions/setup-nucleus
+        with:
+          java-version: "25"
+          packaging-tools: "false"
+          setup-node: "false"
+
+      - name: Set up Rust 1.98.1
+        uses: dtolnay/rust-toolchain@1.98.1
+
+      - name: Cache Rust native helpers
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktopApp/native/audio-fingerprint/target
+            desktopApp/native/audio-capture/target
+          key: nucleus-native-macos-arm64-rust-1.98.1-${{ hashFiles('desktopApp/native/audio-fingerprint/Cargo.toml', 'desktopApp/native/audio-fingerprint/src/**', 'shared/src/commonMain/resources/audio_recognition/afp.wasm', 'desktopApp/native/audio-capture/Cargo.toml', 'desktopApp/native/audio-capture/Cargo.lock', 'desktopApp/native/audio-capture/src/**') }}
+          restore-keys: |
+            nucleus-native-macos-arm64-rust-1.98.1-
+
+      - name: Cache relocatable macOS libmpv bundle
+        id: macos-libmpv-cache
+        uses: actions/cache@v6
+        with:
+          path: build/nucleus-native/macos/mpv
+          key: nucleus-libmpv-macos-arm64-${{ hashFiles('desktopApp/packaging/native-deps.lock', 'desktopApp/packaging/macos/prepare-libmpv.sh') }}
+
+      - name: Prepare relocatable macOS libmpv bundle
+        if: steps.macos-libmpv-cache.outputs.cache-hit != 'true'
+        run: >-
+          bash desktopApp/packaging/macos/prepare-libmpv.sh
+          "${{ github.workspace }}/build/nucleus-native/macos/mpv"
+
+      - name: Verify cached macOS libmpv bundle
+        run: |
+          test -f "$FUOEVOLVE_NUCLEUS_LIBMPV_DEV_DIR/include/mpv/client.h"
+          test -f "$FUOEVOLVE_NUCLEUS_LIBMPV_RUNTIME_DIR/libmpv.dylib"
+          duplicate_count="$(otool -l "$FUOEVOLVE_NUCLEUS_LIBMPV_RUNTIME_DIR/libmpv.dylib" | awk '$1 == "cmd" && $2 == "LC_RPATH" { r=1; next } r && $1 == "path" { if ($2 == "@loader_path/") c++; r=0 } END { print c+0 }')"
+          if [[ "$duplicate_count" -gt 1 ]]; then
+            echo "Duplicate @loader_path/ LC_RPATH remains in cached libmpv.dylib" >&2
+            exit 1
+          fi
+
+      - name: Test shared desktop and Nucleus runtime
+        run: |
+          ./gradlew \
+            --no-configuration-cache \
+            --warning-mode all \
+            ciDesktopTest \
+            :desktopApp:test \
+            :desktopApp:compileKotlin \
+            :desktopApp:prepareNucleusAppResources
+          desktopApp/native/audio-fingerprint/target/release/fuoevolve-audio-fingerprint --self-test
