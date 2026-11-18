@@ -104,10 +104,13 @@ fun estimateDownloadSizeMb(durationMs: Long?, referenceKbps: Int?): String? {
     if (durationMs == null || durationMs <= 0L) return null
     val kbps = referenceKbps?.takeIf { it > 0 } ?: return null
     val megabytes = durationMs.toDouble() / 1_000.0 * kbps / 8.0 / 1_024.0
+    // String.format is a JVM-only extension; do explicit rounding so commonMain
+    // also compiles on Kotlin/Native (iOS). Output matches %.0f / %.1f (HALF_UP).
     return if (megabytes >= 10.0) {
-        "约 %.0f MB".format(megabytes)
+        "约 ${kotlin.math.round(megabytes).toLong()} MB"
     } else {
-        "约 %.1f MB".format(megabytes)
+        val tenths = kotlin.math.round(megabytes * 10.0).toLong()
+        "约 ${tenths / 10}.${tenths % 10} MB"
     }
 }
 

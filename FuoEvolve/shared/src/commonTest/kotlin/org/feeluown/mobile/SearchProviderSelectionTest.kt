@@ -7,7 +7,7 @@ class SearchProviderSelectionTest {
     @Test
     fun freshInstallSearchesAllEnabledChineseDiscoverySources() {
         assertEquals(
-            listOf("netease", "qqmusic", "bilibili"),
+            listOf("netease", "qqmusic", "bilibili", "modeb"),
             AppSettings().searchProviderIdsForFeature(),
         )
     }

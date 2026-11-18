@@ -6,6 +6,7 @@ import org.feeluown.mobile.provider.core.KotlinProviderFactory
 import org.feeluown.mobile.provider.core.ProviderCredentialStore
 import org.feeluown.mobile.provider.core.ProviderRuntimeDependencies
 import org.feeluown.mobile.provider.core.network.ProviderHttpClient
+import org.feeluown.mobile.provider.modeb.ModeBProviderFactory
 import org.feeluown.mobile.provider.netease.NeteaseProviderFactory
 import org.feeluown.mobile.provider.qqmusic.QQMusicProviderFactory
 import org.feeluown.mobile.provider.ytmusic.YtMusicProviderFactory
@@ -17,6 +18,7 @@ internal object ProviderComposition {
         QQMusicProviderFactory,
         BilibiliProviderFactory,
         YtMusicProviderFactory,
+        ModeBProviderFactory,
     )
 
     fun providerInfos(): List<ProviderInfo> = factories.map { it.info }

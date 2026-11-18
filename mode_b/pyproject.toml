@@ -1,0 +1,26 @@
+[project]
+name = "fuo-mode-b"
+authors = [{name = "miaohongyun"}]
+license = "GPL-3.0-or-later"
+dynamic = ["version", "description"]
+requires-python = ">=3.10"
+
+# 引擎 mode_b_sources 仅用标准库；feeluown 由宿主提供，不重复声明。
+dependencies = [
+    "feeluown",
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.entry-points."fuo.plugins_v1"]
+mode_b = "fuo_mode_b"
+
+[build-system]
+requires = ["flit_core >=3.11,<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.black]
+line-length = 88

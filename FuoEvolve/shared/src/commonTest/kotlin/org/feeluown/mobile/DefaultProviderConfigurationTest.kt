@@ -8,7 +8,7 @@ class DefaultProviderConfigurationTest {
     @Test
     fun freshInstallEnablesChineseMusicDiscoverySources() {
         assertEquals(
-            setOf("netease", "qqmusic", "bilibili"),
+            setOf("netease", "qqmusic", "bilibili", "modeb"),
             DEFAULT_ENABLED_PROVIDER_IDS,
         )
         assertTrue(DEFAULT_PROVIDER_ORDER_IDS.containsAll(DEFAULT_ENABLED_PROVIDER_IDS))

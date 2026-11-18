@@ -1,6 +1,7 @@
 package org.feeluown.mobile
 
 import android.app.Application
+import org.feeluown.mobile.provider.modeb.installModeBStorageDirectory
 
 /**
  * Thin Android process host.
@@ -14,6 +15,8 @@ class FuoEvolveApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         installAndroidAppLogger(this)
+        // Mode B config cache + circuit-breaker cooldown must survive process restarts.
+        installModeBStorageDirectory(java.io.File(filesDir, "mode_b"))
         installPlaylistMigrationBackgroundScheduler { request ->
             AndroidPlaylistMigrationWorker.enqueue(applicationContext, request)
         }

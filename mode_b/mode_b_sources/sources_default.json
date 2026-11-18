@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "configVersion": "2026.11.18-02",
+  "manualOverride": null,
+  "remoteConfigUrls": [
+    "https://your-domestic-oss-or-server.example.com/my_feeluown/sources.json"
+  ],
+  "healthPolicy": {
+    "failureThreshold": 3,
+    "cooldownSeconds": 600,
+    "requestTimeoutSeconds": 5.0,
+    "probeOnTrip": true,
+    "probeParams": {
+      "probe": "1",
+      "quality": "standard"
+    }
+  },
+  "sources": [
+    {
+      "id": "self_hosted_gateway",
+      "name": "自建标准曲库网关（启用时改为 true 并填真实地址）",
+      "apiBase": "https://music-gateway.your-domain.example.com",
+      "urlPath": "/url",
+      "searchPath": "/search",
+      "searchKeywordParam": "q",
+      "searchListField": "data",
+      "searchIdField": "id",
+      "searchTitleField": "title",
+      "searchArtistField": "artist",
+      "params": {
+        "quality": "lossless"
+      },
+      "urlField": "data.url",
+      "method": "GET",
+      "headers": {},
+      "priority": 120,
+      "enabled": false
+    },
+    {
+      "id": "jamendo_flac",
+      "name": "Jamendo CC 独立音乐（支持 FLAC）",
+      "apiBase": "https://api.jamendo.com/v3.0",
+      "urlPath": "/tracks/",
+      "searchPath": "/tracks/",
+      "searchKeywordParam": "search",
+      "searchListField": "results",
+      "searchIdField": "id",
+      "searchTitleField": "name",
+      "searchArtistField": "artist_name",
+      "params": {
+        "client_id": "5ace5988",
+        "format": "json",
+        "audioformat": "flac",
+        "limit": "10"
+      },
+      "urlField": "results.0.audio",
+      "method": "GET",
+      "headers": {},
+      "priority": 110,
+      "enabled": true
+    },
+    {
+      "id": "radioparadise_now",
+      "name": "Radio Paradise 官方无损电台",
+      "apiBase": "https://api.radioparadise.com/api",
+      "urlPath": "/get_block",
+      "params": {
+        "bitrate": "4",
+        "info": "true",
+        "chan": "0"
+      },
+      "urlField": "url",
+      "method": "GET",
+      "headers": {},
+      "priority": 100,
+      "enabled": true
+    },
+    {
+      "id": "radiobrowser_cn_de1",
+      "name": "Radio Browser 中国电台（de1 镜像）",
+      "apiBase": "https://de1.api.radio-browser.info",
+      "urlPath": "/json/stations/bycountryexact/China",
+      "params": {
+        "limit": "5"
+      },
+      "urlField": "0.url_resolved",
+      "method": "GET",
+      "headers": {},
+      "priority": 80,
+      "enabled": true
+    },
+    {
+      "id": "itunes_preview",
+      "name": "Apple iTunes 官方试听库（30秒试听/免Key）",
+      "apiBase": "https://itunes.apple.com",
+      "urlPath": "/lookup",
+      "searchPath": "/search",
+      "searchKeywordParam": "term",
+      "searchListField": "results",
+      "searchIdField": "trackId",
+      "searchTitleField": "trackName",
+      "searchArtistField": "artistName",
+      "params": {
+        "media": "music",
+        "entity": "song",
+        "country": "US",
+        "limit": "10"
+      },
+      "urlField": "results.0.previewUrl",
+      "method": "GET",
+      "headers": {},
+      "priority": 70,
+      "enabled": true
+    }
+  ]
+}

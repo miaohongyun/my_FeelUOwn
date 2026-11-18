@@ -23,6 +23,7 @@ kotlin {
         commonMain.dependencies {
             api(project(":provider:api"))
             api(project(":playback:api"))
+            api(project(":provider:modeb"))
             api(libs.ktor.client.core)
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)

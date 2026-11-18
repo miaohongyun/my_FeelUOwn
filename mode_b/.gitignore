@@ -1,0 +1,14 @@
+# Python 虚拟环境与构建缓存
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# 本地运行时缓存与日志
+*.log
+.pytest_cache/
+.mypy_cache/

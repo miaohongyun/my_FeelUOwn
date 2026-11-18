@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "config_version": "2026.11.18-01",
+  "remote_config_urls": [
+    "https://your-domestic-oss-or-server.example.com/my_feeluown/sources.json"
+  ],
+  "health_policy": {
+    "failure_threshold": 3,
+    "cooldown_seconds": 600,
+    "request_timeout_seconds": 5
+  },
+  "sources": [
+    {
+      "id": "radioparadise_flac",
+      "name": "Radio Paradise 官方无损 FLAC 电台",
+      "type": "radioparadise",
+      "enabled": true,
+      "priority": 100,
+      "lossless": true,
+      "endpoints": [
+        {
+          "id": "rp_api_primary",
+          "api_base": "https://api.radioparadise.com/api",
+          "channels": [
+            {
+              "chan_id": 0,
+              "name": "Main Mix (CD无损 FLAC)",
+              "stream_url": "https://stream.radioparadise.com/flac"
+            },
+            {
+              "chan_id": 1,
+              "name": "Mellow Mix (舒缓 CD无损 FLAC)",
+              "stream_url": "https://stream.radioparadise.com/mellow-flac"
+            },
+            {
+              "chan_id": 2,
+              "name": "Rock Mix (摇滚 CD无损 FLAC)",
+              "stream_url": "https://stream.radioparadise.com/rock-flac"
+            },
+            {
+              "chan_id": 3,
+              "name": "Global Mix (世界音乐 CD无损 FLAC)",
+              "stream_url": "https://stream.radioparadise.com/global-flac"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "radiobrowser_cn",
+      "name": "Radio Browser 开源电台库（含国内音乐台）",
+      "type": "radiobrowser",
+      "enabled": true,
+      "priority": 80,
+      "lossless": false,
+      "mirror_discovery_url": "https://all.api.radio-browser.info/json/servers",
+      "endpoints": [
+        { "id": "rb_de1", "api_base": "https://de1.api.radio-browser.info" },
+        { "id": "rb_nl1", "api_base": "https://nl1.api.radio-browser.info" },
+        { "id": "rb_at1", "api_base": "https://at1.api.radio-browser.info" }
+      ]
+    },
+    {
+      "id": "jamendo_cc",
+      "name": "Jamendo 官方 CC 独立音乐库",
+      "type": "jamendo",
+      "enabled": false,
+      "priority": 60,
+      "lossless": false,
+      "client_id": "YOUR_FREE_JAMENDO_CLIENT_ID",
+      "endpoints": [
+        { "id": "jamendo_v3", "api_base": "https://api.jamendo.com/v3.0" }
+      ]
+    }
+  ]
+}

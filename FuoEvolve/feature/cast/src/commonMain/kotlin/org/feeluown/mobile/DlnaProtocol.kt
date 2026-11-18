@@ -70,7 +70,10 @@ object DlnaProtocol {
         val hours = totalSeconds / 3600
         val minutes = (totalSeconds % 3600) / 60
         val seconds = totalSeconds % 60
-        return "%02d:%02d:%02d.%03d".format(hours, minutes, seconds, millis)
+        // String.format is a JVM-only extension; padStart keeps this commonMain code
+        // compilable on Kotlin/Native (iOS) with byte-for-byte identical output.
+        fun pad(value: Long, width: Int) = value.toString().padStart(width, '0')
+        return "${pad(hours, 2)}:${pad(minutes, 2)}:${pad(seconds, 2)}.${pad(millis, 3)}"
     }
 
     /**

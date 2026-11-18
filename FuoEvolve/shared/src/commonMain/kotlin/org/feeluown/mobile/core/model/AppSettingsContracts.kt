@@ -160,9 +160,14 @@ const val DEFAULT_JAMENDO_CLIENT_ID = "5ace5988"
  * Default sources for a fresh installation. QQ Music and Bilibili complement NetEase
  * for Chinese-language discovery; YouTube Music remains opt-in because availability
  * and network reachability vary substantially by region.
+ *
+ * "modeb" is the personal multi-source router (Radio Paradise FLAC / Radio Browser live radios).
+ * It is enabled by default so the local build can search "flac"/"电台" and play real streams
+ * out of the box; on ordinary keyword searches its search() returns no tracks and makes no
+ * network call, so it does not pollute normal discovery results.
  */
-val DEFAULT_ENABLED_PROVIDER_IDS = setOf("netease", "qqmusic", "bilibili")
-val DEFAULT_PROVIDER_ORDER_IDS = listOf("netease", "qqmusic", "bilibili", "ytmusic")
+val DEFAULT_ENABLED_PROVIDER_IDS = setOf("netease", "qqmusic", "bilibili", "modeb")
+val DEFAULT_PROVIDER_ORDER_IDS = listOf("netease", "qqmusic", "bilibili", "ytmusic", "modeb")
 
 data class SettingsState(
     val isLoaded: Boolean = false,
