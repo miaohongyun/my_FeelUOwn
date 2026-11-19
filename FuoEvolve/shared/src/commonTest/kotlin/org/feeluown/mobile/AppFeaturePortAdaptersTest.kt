@@ -194,10 +194,23 @@ class AppFeaturePortAdaptersTest {
         override fun addToUpNext(track: MusicTrack) = Unit
     }
 
-    private class FakeDownloadActionPort : DownloadActionPort {
+    private class FakeDownloadActionPort : DownloadFeaturePorts {
         override val downloadStates: Map<String, DownloadState> = emptyMap()
+        override val managerState: kotlinx.coroutines.flow.StateFlow<DownloadManagerUiState> =
+            kotlinx.coroutines.flow.MutableStateFlow(DownloadManagerUiState())
+        override val pendingSelection: kotlinx.coroutines.flow.StateFlow<DownloadQualitySelection?> =
+            kotlinx.coroutines.flow.MutableStateFlow(null)
         override fun download(track: MusicTrack) = Unit
         override fun deleteDownload(track: MusicTrack) = Unit
+        override fun downloadBest(track: MusicTrack) = Unit
+        override fun requestSelection(track: MusicTrack) = Unit
+        override fun confirmSelection(policy: String?) = Unit
+        override fun dismissSelection() = Unit
+        override fun pause(taskId: String) = Unit
+        override fun resume(taskId: String) = Unit
+        override fun retry(taskId: String) = Unit
+        override fun deleteTask(taskId: String, deleteFile: Boolean) = Unit
+        override fun dismissQueueFeedback(feedback: String) = Unit
     }
 
     private class FakePlaylistActionPort : PlaylistActionPort {

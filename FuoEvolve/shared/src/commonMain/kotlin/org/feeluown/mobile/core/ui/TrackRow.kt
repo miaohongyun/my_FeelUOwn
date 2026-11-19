@@ -62,6 +62,8 @@ fun TrackRow(
     onDeleteDownload: () -> Unit,
     onOpenArtist: () -> Unit,
     onOpenAlbum: () -> Unit,
+    /** 可选：手动选择下载音质的入口（更多选项里）。null 则不显示该菜单项。 */
+    onChooseDownloadQuality: (() -> Unit)? = null,
     onOpenDetail: (() -> Unit)? = null,
     onEditLocalMetadata: (() -> Unit)? = null,
     onAddToPlaylist: (() -> Unit)? = null,
@@ -111,6 +113,7 @@ fun TrackRow(
             onDeleteDownload = onDeleteDownload,
             onOpenArtist = onOpenArtist,
             onOpenAlbum = onOpenAlbum,
+            onChooseDownloadQuality = onChooseDownloadQuality,
             onOpenDetail = onOpenDetail,
             onEditLocalMetadata = onEditLocalMetadata,
             onAddToPlaylist = onAddToPlaylist,
@@ -197,6 +200,7 @@ fun TrackAction(
     onDeleteDownload: () -> Unit,
     onOpenArtist: () -> Unit,
     onOpenAlbum: () -> Unit,
+    onChooseDownloadQuality: (() -> Unit)? = null,
     onOpenDetail: (() -> Unit)? = null,
     onEditLocalMetadata: (() -> Unit)?,
     onAddToPlaylist: (() -> Unit)?,
@@ -282,6 +286,16 @@ fun TrackAction(
                             onDownload()
                         },
                     )
+                    if (onChooseDownloadQuality != null) {
+                        DropdownMenuItem(
+                            text = { Text("下载（选择音质）") },
+                            leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
+                            onClick = {
+                                expanded = false
+                                onChooseDownloadQuality()
+                            },
+                        )
+                    }
                 }
             }
             if (onEditLocalMetadata != null) {

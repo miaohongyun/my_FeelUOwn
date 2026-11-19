@@ -149,6 +149,11 @@ data class AppSettings(
     val quarantinedScriptIds: Set<String> = emptySet(),
     val playlistPlaybackStatsVersion: Int = 0,
     val playlistPlaybackStats: Map<String, PlaylistPlaybackStat> = emptyMap(),
+    /**
+     * 音源默认集迁移版本：老用户升级时把本版本新增的默认音源补入 enabledProviderIds，
+     * 只补一次；之后用户可自由关闭。见 migrateProviderDefaults。
+     */
+    val providerDefaultsMigrationVersion: Int = 0,
 )
 
 @Serializable
@@ -192,12 +197,46 @@ const val MAX_SOURCE_UPDATE_INTERVAL_HOURS = 168
  * "lxscript" is deliberately absent from the default set: with an empty catalog it can only
  * return nothing, and showing an always-empty source in search would be noise. It is switched on
  * automatically the first time the controlled catalog actually installs an approved script
- * (see SourceUpdateHost). "jamendo" is likewise opt-in: it returns open-catalog tracks that are
- * not the original recording, so it must stay an explicit user choice rather than polluting
- * search results.
+ * (see SourceUpdateHost).
+ *
+ * "jamendo" is now enabled by default (product decision 2026-11-19): the app must be useful
+ * out of the box for family members without visiting Settings. Its results are clearly labelled
+ * "开放曲库" in search/detail/player (see sourceLabel / TrackLicenseInfo), so open-catalog tracks
+ * are never presented as the commercial original. Users can still disable it in Settings.
+ *
+ * "ytmusic" stays opt-in because availability and network reachability vary by region.
  */
-val DEFAULT_ENABLED_PROVIDER_IDS = setOf("netease", "qqmusic", "bilibili", "modeb")
+val DEFAULT_ENABLED_PROVIDER_IDS = setOf("netease", "qqmusic", "bilibili", "modeb", "jamendo")
 val DEFAULT_PROVIDER_ORDER_IDS = listOf("netease", "qqmusic", "bilibili", "lxscript", "ytmusic", "modeb", "jamendo")
+
+/**
+ * One-time provider-defaults migration. When an upgrading user's persisted
+ * providerDefaultsMigrationVersion is below [CURRENT_PROVIDER_DEFAULTS_MIGRATION_VERSION],
+ * the newly-defaulted [PROVIDER_DEFAULTS_ADDED_IN_V1] ids are added to their enabled set once,
+ * then the version is bumped and written back. New installs already get the full default set,
+ * so they skip this. The user remains free to disable any provider afterwards.
+ */
+const val CURRENT_PROVIDER_DEFAULTS_MIGRATION_VERSION = 1
+val PROVIDER_DEFAULTS_ADDED_IN_V1 = setOf("jamendo")
+
+/** Adds newly-defaulted providers to an existing set, exactly once (idempotent). */
+fun migrateProviderDefaults(
+    enabledProviderIds: Set<String>,
+    fromVersion: Int,
+): MigratedProviderDefaults {
+    if (fromVersion >= CURRENT_PROVIDER_DEFAULTS_MIGRATION_VERSION) {
+        return MigratedProviderDefaults(enabledProviderIds, fromVersion)
+    }
+    return MigratedProviderDefaults(
+        enabledProviderIds = enabledProviderIds + PROVIDER_DEFAULTS_ADDED_IN_V1,
+        migrationVersion = CURRENT_PROVIDER_DEFAULTS_MIGRATION_VERSION,
+    )
+}
+
+data class MigratedProviderDefaults(
+    val enabledProviderIds: Set<String>,
+    val migrationVersion: Int,
+)
 
 data class SettingsState(
     val isLoaded: Boolean = false,

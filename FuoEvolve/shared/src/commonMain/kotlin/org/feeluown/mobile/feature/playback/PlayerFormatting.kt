@@ -22,6 +22,9 @@ fun sourceLabel(track: MusicTrack, downloadState: DownloadState?): String {
             TrackSourceType.LocalMediaStore -> "本地"
             TrackSourceType.Downloaded -> "本地"
         },
+        // 开放曲库曲目必须醒目标注，避免家人误认为是商业原曲。
+        // 只在带 cc: 标签时出现，普通商业来源不受影响。
+        "开放曲库·非原曲".takeIf { licenseInfoFromTags(track.providerTags) != null },
         "智能替换".takeIf { track.isSmartReplacement },
         "不可用".takeIf { track.isUnavailable },
         state,

@@ -128,6 +128,36 @@ class DownloadQualitySelectionTest {
     }
 
     @Test
+    fun downloadBestStartsImmediatelyAtHighestPolicyWithoutPicker() {
+        // 一键下载：不弹窗（pendingSelection 始终 null），直接以 Highest 档入队，
+        // Highest 在 Provider 侧会自动从无损回退到可用最高质量。
+        val owner = RecordingOwner()
+        val port = DefaultDownloadQualitySelectionPort(owner, RecordingResolver())
+
+        port.downloadBest(track())
+
+        assertEquals(1, owner.downloads.size)
+        assertEquals("track-1", owner.downloads[0].first)
+        assertEquals(AudioQualityPolicy.Highest.policy, owner.downloads[0].second)
+        assertNull(port.pendingSelection.value, "一键下载不应弹出音质选择窗")
+    }
+
+    @Test
+    fun downloadBestClearsAnOpenPicker() {
+        // 用户先打开了"更多选项"，随后点普通下载：应关掉选择窗并直接入队。
+        val owner = RecordingOwner()
+        val resolver = RecordingResolver().apply { available = listOf("hq<>") }
+        val port = DefaultDownloadQualitySelectionPort(owner, resolver)
+        port.requestSelection(track())
+
+        port.downloadBest(track())
+
+        assertNull(port.pendingSelection.value, "一键下载应清掉已打开的选择窗")
+        assertEquals(1, owner.downloads.size)
+        assertEquals(AudioQualityPolicy.Highest.policy, owner.downloads[0].second)
+    }
+
+    @Test
     fun confirmSelectionDownloadsWithTheChosenPolicy() {
         val owner = RecordingOwner()
         val port = DefaultDownloadQualitySelectionPort(owner, RecordingResolver())

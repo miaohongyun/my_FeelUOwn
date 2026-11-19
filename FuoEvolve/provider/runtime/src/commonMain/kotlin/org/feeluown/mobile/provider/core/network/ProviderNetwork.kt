@@ -8,7 +8,6 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.header
 import io.ktor.client.request.request
 import io.ktor.client.request.setBody
-import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -307,7 +306,16 @@ class ProviderHttpClient(
                     headers.forEach { (name, value) -> header(name, value) }
                     if (body != null) setBody(body)
                 }
-                val responseBody = response.bodyAsText()
+                // 有上限读取：防止异常/被劫持的超大响应把整块正文读进内存导致卡顿或 OOM。
+                val bounded = readProviderBodyBounded(response)
+                val responseBody = when (bounded) {
+                    is BoundedBodyRead.Ok -> bounded.text
+                    is BoundedBodyRead.TooLarge -> throw ProviderNetworkException.Http(
+                        statusCode = response.status.value,
+                        responseBody = "<响应体超过 ${bounded.limit} 字节上限，已拒绝读取>",
+                        retryAfterMillis = null,
+                    )
+                }
                 if (response.status.isSuccess()) {
                     effectiveCacheKey?.let { key ->
                         cache.put(key, responseBody, cachePolicy)

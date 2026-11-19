@@ -97,25 +97,59 @@ class PersistentAppSettingsRepository(
 
     private suspend fun loadOrMigrate(): AppSettings {
         AppLogger.d("AppSettings", "Reading persisted settings snapshot")
-        return when (val result = store.read()) {
+        val loaded = when (val result = store.read()) {
             is SettingsSnapshotReadResult.Loaded -> {
                 AppLogger.i("AppSettings", "Persisted settings snapshot loaded")
                 result.snapshot.toAppSettings().withoutProviderCredentials()
             }
-            SettingsSnapshotReadResult.Corrupted -> AppSettings().also { fallback ->
-                AppLogger.w("AppSettings", "Persisted settings snapshot is corrupted; writing defaults")
-                store.write(fallback.toPersistedSettings())
-            }
+            SettingsSnapshotReadResult.Corrupted -> AppSettings()
+                .copy(providerDefaultsMigrationVersion = CURRENT_PROVIDER_DEFAULTS_MIGRATION_VERSION)
+                .also { fallback ->
+                    AppLogger.w("AppSettings", "Persisted settings snapshot is corrupted; writing defaults")
+                    store.write(fallback.toPersistedSettings())
+                }
             SettingsSnapshotReadResult.Missing -> {
                 AppLogger.i("AppSettings", "Persisted settings snapshot is missing; writing defaults")
-                val migrated = legacyLoader
-                    ?.load()
-                    ?.withoutProviderCredentials()
-                    ?: AppSettings()
+                val legacy = legacyLoader?.load()?.withoutProviderCredentials()
+                // 全新安装用最新默认（含 jamendo、版本最新），无需迁移；
+                // 从旧存储迁移来的用户保留其版本，交给 applyProviderDefaultsMigration 补新增源。
+                val migrated = legacy ?: AppSettings().copy(
+                    providerDefaultsMigrationVersion = CURRENT_PROVIDER_DEFAULTS_MIGRATION_VERSION,
+                )
                 store.write(migrated.toPersistedSettings())
                 migrated
             }
         }
+        return applyProviderDefaultsMigration(loaded)
+    }
+
+    /**
+     * 一次性把本版本新增的默认音源补入老用户的 enabledProviderIds。
+     *
+     * 只补一次并回写版本号，因此升级后开箱即用、而用户之后仍可自由关闭该音源。
+     * 新装用户的快照版本已是最新，这里是无操作。
+     */
+    private suspend fun applyProviderDefaultsMigration(settings: AppSettings): AppSettings {
+        val migrated = migrateProviderDefaults(
+            enabledProviderIds = settings.enabledProviderIds,
+            fromVersion = settings.providerDefaultsMigrationVersion,
+        )
+        if (migrated.enabledProviderIds == settings.enabledProviderIds &&
+            migrated.migrationVersion == settings.providerDefaultsMigrationVersion
+        ) {
+            return settings
+        }
+        AppLogger.i(
+            "AppSettings",
+            "Migrating provider defaults to v${migrated.migrationVersion}: " +
+                "added=${PROVIDER_DEFAULTS_ADDED_IN_V1 - settings.enabledProviderIds}",
+        )
+        val updated = settings.copy(
+            enabledProviderIds = migrated.enabledProviderIds,
+            providerDefaultsMigrationVersion = migrated.migrationVersion,
+        ).withoutProviderCredentials()
+        store.write(updated.toPersistedSettings())
+        return updated
     }
 }
 
@@ -188,6 +222,7 @@ internal fun AppSettings.toPersistedSettings(): PersistedSettingsV1 = PersistedS
     playlistPlaybackStats = playlistPlaybackStats.mapValues { (_, stat) ->
         PersistedPlaylistPlaybackStat(stat.playCount, stat.lastPlayedAtMillis)
     },
+    providerDefaultsMigrationVersion = providerDefaultsMigrationVersion,
 )
 
 internal fun PersistedSettingsV1.toAppSettings(): AppSettings {
@@ -262,6 +297,8 @@ internal fun PersistedSettingsV1.toAppSettings(): AppSettings {
         playlistPlaybackStats = playlistPlaybackStats
             ?.mapValues { (_, stat) -> PlaylistPlaybackStat(stat.playCount, stat.lastPlayedAtMillis) }
             ?: defaults.playlistPlaybackStats,
+        providerDefaultsMigrationVersion = providerDefaultsMigrationVersion
+            ?: defaults.providerDefaultsMigrationVersion,
     )
 }
 

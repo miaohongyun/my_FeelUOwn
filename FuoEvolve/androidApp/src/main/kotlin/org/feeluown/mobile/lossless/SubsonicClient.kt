@@ -150,7 +150,7 @@ class SubsonicClient(
             }
             if (connection.responseCode !in 200..299) return null
             requestFailed = false
-            val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val text = connection.readBoundedJsonText() ?: return null
             json.parseToJsonElement(text) as? JsonObject
         } catch (cancelled: CancellationException) {
             throw cancelled

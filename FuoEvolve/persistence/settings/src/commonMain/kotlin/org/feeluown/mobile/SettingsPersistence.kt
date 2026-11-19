@@ -104,6 +104,8 @@ data class PersistedSettingsV1(
     val quarantinedScriptIds: Set<String>? = null,
     val playlistPlaybackStatsVersion: Int? = null,
     val playlistPlaybackStats: Map<String, PersistedPlaylistPlaybackStat>? = null,
+    /** 音源默认集一次性迁移版本；老快照为 null，按 0 处理。 */
+    val providerDefaultsMigrationVersion: Int? = null,
 )
 
 sealed interface SettingsSnapshotReadResult {

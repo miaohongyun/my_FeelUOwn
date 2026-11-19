@@ -2,8 +2,9 @@ package org.feeluown.mobile.provider.jamendo
 
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
-import io.ktor.client.statement.bodyAsText
 import kotlinx.coroutines.CancellationException
+import org.feeluown.mobile.provider.core.network.BoundedBodyRead
+import org.feeluown.mobile.provider.core.network.readProviderBodyBounded
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -123,7 +124,11 @@ class JamendoApiClient(
                 if (response.status.value !in 200..299) {
                     FetchResult.Failure(JamendoFailureKind.Upstream)
                 } else {
-                    FetchResult.Success(response.bodyAsText())
+                    // 有上限读取：异常/被劫持的超大响应不得整块读进内存。
+                    when (val bounded = readProviderBodyBounded(response)) {
+                        is BoundedBodyRead.Ok -> FetchResult.Success(bounded.text)
+                        is BoundedBodyRead.TooLarge -> FetchResult.Failure(JamendoFailureKind.Upstream)
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e

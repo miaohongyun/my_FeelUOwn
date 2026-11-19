@@ -77,10 +77,35 @@ class AppSettingsRepositoryTest {
             scope = backgroundScope,
         )
 
-        assertEquals(AppSettings(), repository.awaitSettings())
+        // 损坏恢复写入最新默认：版本已是当前值，无需再迁移。
+        assertEquals(
+            AppSettings().copy(providerDefaultsMigrationVersion = CURRENT_PROVIDER_DEFAULTS_MIGRATION_VERSION),
+            repository.awaitSettings(),
+        )
         repository.update { it.copy(themeMode = ThemeMode.Dark) }
 
         assertEquals(ThemeMode.Dark, repository.state.value.settings.themeMode)
+    }
+
+    @Test
+    fun upgradingUserGetsJamendoEnabledAutomaticallyOnce() = runTest {
+        // 老用户持久快照：v0（字段缺失）、enabledProviderIds 不含 jamendo。
+        val store = FakeSettingsSnapshotStore(
+            SettingsSnapshotReadResult.Loaded(
+                PersistedSettingsV1(enabledProviderIds = setOf("netease", "qqmusic")),
+            ),
+        )
+        val repo = PersistentAppSettingsRepository(store, legacyLoader = null, scope = backgroundScope)
+        val settings = repo.awaitSettings()
+        assertTrue("jamendo" in settings.enabledProviderIds,
+            "升级后应自动补入 jamendo，家人无需进设置页")
+        assertEquals(CURRENT_PROVIDER_DEFAULTS_MIGRATION_VERSION, settings.providerDefaultsMigrationVersion)
+
+        // 迁移结果已回写；用户随后主动关闭 jamendo，重启后不应再被补回。
+        repo.update { it.copy(enabledProviderIds = it.enabledProviderIds - "jamendo") }
+        val reopened = PersistentAppSettingsRepository(store, legacyLoader = null, scope = backgroundScope)
+        assertTrue("jamendo" !in reopened.awaitSettings().enabledProviderIds,
+            "用户主动关闭后不得再被迁移补回")
     }
 
     @Test

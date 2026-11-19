@@ -203,7 +203,7 @@ class InternetArchiveClient(
             }
             if (connection.responseCode !in 200..299) return null
             searchRequestFailed = false
-            val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val text = connection.readBoundedJsonText() ?: return null
             json.parseToJsonElement(text)
         } catch (cancelled: CancellationException) {
             throw cancelled

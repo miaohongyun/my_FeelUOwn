@@ -15,6 +15,27 @@ import kotlin.test.assertTrue
 class TrackLicensePresentationTest {
 
     @Test
+    fun sourceLabelMarksOpenCatalogTracksAsNotOriginal() {
+        val openCatalog = MusicTrack(
+            id = "jamendo:1", title = "t", artists = "a", album = "",
+            source = "jamendo", sourceType = TrackSourceType.Provider,
+            providerName = "Jamendo 开放曲库",
+            providerTags = listOf("jamendo", "cc:BY-NC-ND", "license-url:https://creativecommons.org/"),
+        )
+        val label = sourceLabel(openCatalog, null)
+        assertTrue(label.contains("开放曲库"), "搜索/列表来源行应标明开放曲库: $label")
+        assertTrue(label.contains("非原曲"), "必须明确非商业原曲，避免误认: $label")
+
+        val commercial = MusicTrack(
+            id = "netease:1", title = "t", artists = "a", album = "",
+            source = "netease", sourceType = TrackSourceType.Provider,
+            providerName = "网易云音乐",
+        )
+        val commercialLabel = sourceLabel(commercial, null)
+        assertTrue(!commercialLabel.contains("开放曲库"), "商业来源不应被标为开放曲库: $commercialLabel")
+    }
+
+    @Test
     fun commercialTrackWithoutCcTagIsNotMarked() {
         assertNull(licenseInfoFromTags(listOf("qqmusic", "flac")), "无 cc: 标签不得标为开放曲库")
         assertNull(licenseInfoFromTags(emptyList()))

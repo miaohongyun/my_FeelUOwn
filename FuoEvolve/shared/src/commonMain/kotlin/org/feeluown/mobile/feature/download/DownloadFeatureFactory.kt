@@ -138,10 +138,15 @@ class BoundDownloadActionPort(
         }
     }
 
-    /** Opens the quality picker; the download only starts once the user confirms a tier. */
-    override fun download(track: MusicTrack) = qualitySelection.requestSelection(track)
+    /**
+     * 普通下载按钮：一键选最高可用质量直接入队，不弹窗（家人只需点一次）。
+     * 想手动选档位时走 requestSelection（"更多选项/选择音质"）。
+     */
+    override fun download(track: MusicTrack) = qualitySelection.downloadBest(track)
 
     override fun requestSelection(track: MusicTrack) = qualitySelection.requestSelection(track)
+
+    override fun downloadBest(track: MusicTrack) = qualitySelection.downloadBest(track)
 
     override fun confirmSelection(policy: String?) = qualitySelection.confirmSelection(policy)
 

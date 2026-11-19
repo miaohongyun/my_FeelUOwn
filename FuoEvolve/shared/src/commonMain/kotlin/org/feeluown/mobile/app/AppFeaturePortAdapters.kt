@@ -15,7 +15,7 @@ class DefaultSearchAppPort(
     private val searchController: SearchFeatureController,
     private val providerSessions: () -> ProviderSessionState,
     private val playbackQueue: PlaybackQueueUiPort,
-    private val downloads: DownloadActionPort,
+    private val downloads: DownloadFeaturePorts,
     private val playlists: PlaylistActionPort,
     private val providerTrackActions: ProviderTrackActionPort,
     private val navigator: AppNavigator,
@@ -55,6 +55,8 @@ class DefaultSearchAppPort(
     override fun addToUpNext(track: MusicTrack) = playbackQueue.addToUpNext(track)
 
     override fun download(track: MusicTrack) = downloads.download(track)
+
+    override fun chooseDownloadQuality(track: MusicTrack) = downloads.requestSelection(track)
 
     override fun deleteDownload(track: MusicTrack) = downloads.deleteDownload(track)
 

@@ -20,6 +20,9 @@ interface SearchAppPort {
 
     fun download(track: MusicTrack)
 
+    /** 用户主动选择下载音质（更多选项入口）。 */
+    fun chooseDownloadQuality(track: MusicTrack)
+
     fun deleteDownload(track: MusicTrack)
 
     fun openArtist(track: MusicTrack)

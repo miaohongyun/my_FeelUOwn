@@ -51,7 +51,13 @@ data class DownloadQualitySelection(
 interface DownloadQualitySelectionPort {
     val pendingSelection: StateFlow<DownloadQualitySelection?>
 
-    /** Opens the picker for [track]. Downloads immediately when no picker is available. */
+    /**
+     * 一键下载：不弹窗，按当前曲目可用的最高质量直接入队（Highest 档会自动从无损回退到高音质）。
+     * 普通"下载"按钮走这里，家人只需点一次。
+     */
+    fun downloadBest(track: MusicTrack)
+
+    /** Opens the picker for [track]. 只在用户主动选择"更多选项/选择音质"时调用。 */
     fun requestSelection(track: MusicTrack)
 
     /** Confirms the pending selection and starts the download with [policy]. */
@@ -84,6 +90,8 @@ interface DownloadFeaturePorts : DownloadActionPort, DownloadQualitySelectionPor
 object NoOpDownloadQualitySelectionPort : DownloadQualitySelectionPort {
     private val mutablePending = MutableStateFlow<DownloadQualitySelection?>(null)
     override val pendingSelection: StateFlow<DownloadQualitySelection?> = mutablePending.asStateFlow()
+
+    override fun downloadBest(track: MusicTrack) = Unit
 
     override fun requestSelection(track: MusicTrack) = Unit
 
@@ -168,6 +176,14 @@ class DefaultDownloadQualitySelectionPort(
 
     /** Stale probes must not overwrite a newer picker request. */
     private var requestGeneration = 0
+
+    override fun downloadBest(track: MusicTrack) {
+        // 取消任何正在显示的音质选择窗（若用户先前打开了"更多选项"又点了普通下载）。
+        requestGeneration++
+        mutablePending.value = null
+        // Highest 档在 Provider 侧会自动从无损回退到高音质，正是"默认最高、无色时降级"的语义。
+        owner.download(track, AudioQualityPolicy.Highest.policy)
+    }
 
     override fun requestSelection(track: MusicTrack) {
         if (resolver == null) {

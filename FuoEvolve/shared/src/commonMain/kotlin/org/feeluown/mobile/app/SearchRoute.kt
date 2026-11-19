@@ -23,6 +23,7 @@ internal fun SearchRoute(
             onPlayResult = appPort::playResult,
             onAddToUpNext = appPort::addToUpNext,
             onDownload = appPort::download,
+            onChooseDownloadQuality = appPort::chooseDownloadQuality,
             onDeleteDownload = appPort::deleteDownload,
             onOpenArtist = appPort::openArtist,
             onOpenAlbum = appPort::openAlbum,
