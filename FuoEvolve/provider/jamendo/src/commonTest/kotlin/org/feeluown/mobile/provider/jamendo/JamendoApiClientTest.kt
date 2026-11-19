@@ -108,11 +108,75 @@ class JamendoApiClientTest {
         val results = provider.search("sunrise")
         val track = results.tracks.single()
         assertEquals(JamendoMusicProvider.ID, track.source)
-        assertTrue(track.providerTags.contains("open-catalog"))
+        assertTrue(track.providerTags.contains(JamendoMusicProvider.TAG))
         assertEquals("jamendo", track.id.substringBefore(':'))
 
         val payload = provider.resolve(track, "highest")
         assertEquals(JamendoMusicProvider.QUALITY_LABEL, payload?.audioQuality)
         assertTrue(payload?.url?.startsWith("https://prod-1.storage.jamendo.com/") == true)
+    }
+
+    @Test
+    fun licenseIsPreservedNotTreatedAsUnconditionalOpen() = runTest {
+        // 带真实 CC BY-NC-ND 3.0 许可的响应：Provider 必须保留许可证类型、原始链接与条件，
+        // 不得笼统标为无条件开放资源。
+        val ccUrl = "http://creativecommons.org/licenses/by-nc-nd/3.0/"
+        val raw = FIXTURE.replace(""""id": "1859761"""", "\"id\": \"1859761\", \"license_ccurl\": \"$ccUrl\"")
+        val provider = JamendoMusicProvider(
+            providerCredentials = org.feeluown.mobile.provider.core.InMemoryProviderCredentialStore(),
+            clientIdProvider = { "test-client" },
+            httpClient = clientReturning(raw),
+        )
+        val track = provider.search("sunrise").tracks.single()
+        assertTrue(track.providerTags.contains("cc:BY-NC-ND"), "应保留 CC 许可证类型: ${track.providerTags}")
+        assertTrue(track.providerTags.any { it.startsWith("license-url:http://creativecommons.org/") },
+            "应保留原始许可链接: ${track.providerTags}")
+        assertTrue(track.providerTags.any { it.contains("非商业") && it.contains("禁止演绎") },
+            "应保留适用条件说明: ${track.providerTags}")
+        assertTrue(!track.providerTags.contains("open-catalog"), "不得笼统标为无条件开放资源")
+    }
+
+    @Test
+    fun licenseCodeParsesCommonCcVariants() {
+        fun code(url: String) = JamendoTrack(
+            id = "1", name = "n", artist = "a", album = "", durationSeconds = 1,
+            audioUrl = "https://x", downloadUrl = "", imageUrl = "", shareUrl = "",
+            licenseCcUrl = url,
+        ).licenseCode
+        assertEquals("BY", code("http://creativecommons.org/licenses/by/4.0/"))
+        assertEquals("BY-SA", code("https://creativecommons.org/licenses/by-sa/3.0/"))
+        assertEquals("BY-NC-ND", code("http://creativecommons.org/licenses/by-nc-nd/3.0/"))
+        assertEquals("", code(""))
+    }
+
+    @Test
+    fun licenseSummaryLabelsEveryCcCondition() {
+        fun summary(codePath: String) = JamendoTrack(
+            id = "1", name = "n", artist = "a", album = "", durationSeconds = 1,
+            audioUrl = "https://x", downloadUrl = "", imageUrl = "", shareUrl = "",
+            licenseCcUrl = "https://creativecommons.org/licenses/$codePath/4.0/",
+        ).licenseSummary
+
+        // 纯 BY 也必须显式写"须署名"，不能退化成含糊的"请查看条款"。
+        val by = summary("by")
+        assertTrue(by.contains("须署名") && by.contains("BY"), "BY 应标注署名: $by")
+        assertTrue(!by.contains("非商业") && !by.contains("禁止演绎"), "BY 不应标注它不具备的限制: $by")
+
+        // 组合条件必须全部列出，不因分支短路而漏标。
+        val bySa = summary("by-sa")
+        assertTrue(bySa.contains("须署名") && bySa.contains("相同方式共享") && bySa.contains("SA"),
+            "BY-SA 应同时标注署名与相同方式共享: $bySa")
+
+        val byNcNd = summary("by-nc-nd")
+        assertTrue(byNcNd.contains("须署名"), "BY-NC-ND 应标注署名: $byNcNd")
+        assertTrue(byNcNd.contains("非商业") && byNcNd.contains("NC"), "BY-NC-ND 应标注非商业: $byNcNd")
+        assertTrue(byNcNd.contains("禁止演绎") && byNcNd.contains("ND"), "BY-NC-ND 应标注禁止演绎: $byNcNd")
+
+        // 无 CC 链接时保守提示，不声称开放。
+        val none = JamendoTrack(
+            id = "1", name = "n", artist = "a", album = "", durationSeconds = 1,
+            audioUrl = "https://x", downloadUrl = "", imageUrl = "", shareUrl = "",
+        ).licenseSummary
+        assertTrue(none.contains("未知"), "无许可证应保守提示未知: $none")
     }
 }

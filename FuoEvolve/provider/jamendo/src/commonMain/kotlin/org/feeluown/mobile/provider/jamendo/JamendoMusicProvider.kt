@@ -85,7 +85,15 @@ class JamendoMusicProvider(
         coverUrl = imageUrl.takeIf { it.isNotBlank() },
         durationMs = durationSeconds?.let { it * 1000L },
         providerUrl = shareUrl.takeIf { it.isNotBlank() },
-    ).copy(providerTags = listOf(TAG, "open-catalog"))
+    ).copy(
+        // 不笼统标 "open-catalog"：保留具体 CC 许可证类型与原始链接，供 UI 展示适用条件。
+        providerTags = buildList {
+            add(TAG)
+            if (licenseCode.isNotEmpty()) add("cc:$licenseCode")
+            if (licenseCcUrl.isNotBlank()) add("license-url:$licenseCcUrl")
+            add(licenseSummary)
+        },
+    )
 
     companion object {
         const val ID = "jamendo"

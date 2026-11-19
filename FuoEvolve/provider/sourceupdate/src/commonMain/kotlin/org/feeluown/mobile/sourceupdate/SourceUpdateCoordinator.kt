@@ -77,9 +77,12 @@ class SourceUpdateCoordinator(
                 }
                 // 索引损坏但从锚点恢复了版本：无法确定损坏前接受的确切内容，
                 // 因此要求目录版本严格大于锚点，等于锚点也拒绝（防止同版本旧目录回放）。
-                if (index.recoveredFromAnchor && catalog.catalogVersion <= index.catalogVersion) {
+                if ((index.recoveredFromAnchor || index.versionCorrectedByAnchor) &&
+                    catalog.catalogVersion <= index.catalogVersion
+                ) {
+                    val cause = if (index.recoveredFromAnchor) "索引已从锚点恢复" else "索引版本已被锚点校正"
                     return UpdateReport.Failed(
-                        "索引已从锚点恢复，拒绝不高于锚点版本的目录：锚点 ${index.catalogVersion}，收到 ${catalog.catalogVersion}",
+                        "$cause，拒绝不高于锚点版本的目录：锚点 ${index.catalogVersion}，收到 ${catalog.catalogVersion}",
                     )
                 }
                 // 同版本内容变化：版本策略要求"内容变了必须提升 catalogVersion"。

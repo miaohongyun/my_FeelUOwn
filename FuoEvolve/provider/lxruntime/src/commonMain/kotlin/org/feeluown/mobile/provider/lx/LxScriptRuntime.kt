@@ -70,6 +70,12 @@ import org.feeluown.mobile.sourceupdate.readBodyBounded
  * - load/close：close 必须等 load 完成"创建→绑定→evaluate→发布"整段结束后才执行，
  *   不会出现"close 只看到旧 session、而 load 随后又把新 session 发布出去"的漏关。
  *
+ * 求值（[requestMusicUrl] 等）**不**与 close 用同一把锁：asModule 顶层 await 挂起等待
+ * Promise 时，native evaluationTimeout 无法中断挂起（无 JS 指令在跑），若 close 等求值
+ * 返回会一直卡到脚本 timer 到期。改由 quickjs-kt 的 `close()` 负责 cancel 它自己登记的
+ * asyncJobs（含求值协程）——这是库保证的安全取消路径；宿主侧则保证自己的 timer Job 在
+ * context 销毁前退出，两者叠加避免 use-after-free（见 [RuntimeSession.closeSuspend]）。
+ *
  * [close] 的顺序是：标记 session 已关闭（阻止新 timer 登记）→ 取消所有 timer 信号 →
  * 取消 timerScope → **join 等待所有宿主 timer Job 真正退出** → 最后才销毁 QuickJs context。
  * 这样 close 返回后，不存在仍在运行、且可能访问已销毁 context 的宿主协程。

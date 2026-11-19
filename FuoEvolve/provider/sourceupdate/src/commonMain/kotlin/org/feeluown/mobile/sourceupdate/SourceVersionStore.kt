@@ -85,6 +85,12 @@ data class SourceIndex(
      */
     @Transient
     val recoveredFromAnchor: Boolean = false,
+    /**
+     * 主索引版本被锚点高水位校正过（写 index 失败/回滚导致 index 落后于 anchor）。
+     * 与 [recoveredFromAnchor] 一样触发更严格的"同版本目录拒绝"策略。
+     */
+    @Transient
+    val versionCorrectedByAnchor: Boolean = false,
 ) {
     /**
      * 是否为"首次安装"：既没有接受过任何目录版本，也没有已装脚本，且不是从锚点恢复的。
@@ -130,13 +136,25 @@ class SourceVersionStore(
      * 让上层至少知道状态异常；此时没有可信版本号，属于无法完全封住的恢复边界，见文档。
      */
     suspend fun loadIndex(): SourceIndex {
+        val anchor = loadAnchor()
         val raw = files.readText(INDEX_PATH)
         if (raw != null) {
             val parsed = runCatching { json.decodeFromString(SourceIndex.serializer(), raw) }.getOrNull()
-            if (parsed != null) return parsed
+            if (parsed != null) {
+                // 原子性校正：saveIndex 先写锚点后写 index，两步之间若崩溃/失败，index 会
+                // 落后于锚点。用锚点高水位校正版本下限，确保任何中断点都不倒退。
+                if (anchor != null && anchor.catalogVersion > parsed.catalogVersion) {
+                    return parsed.copy(
+                        catalogVersion = anchor.catalogVersion,
+                        acceptedCatalogSha256 = anchor.acceptedCatalogSha256
+                            ?: parsed.acceptedCatalogSha256,
+                        versionCorrectedByAnchor = true,
+                    )
+                }
+                return parsed
+            }
         }
         // 主索引缺失（raw == null）或损坏（解析失败）——两种情况都不能当首次安装。
-        val anchor = loadAnchor()
         return if (anchor != null) {
             SourceIndex(
                 catalogVersion = anchor.catalogVersion,
@@ -148,14 +166,31 @@ class SourceVersionStore(
         }
     }
 
+    /**
+     * 写入索引与反重放锚点。顺序与单调性是原子性的关键：
+     * 1. 先写锚点，且只取"现有锚点版本 vs 新版本"的较大者——锚点是只增的高水位，
+     *    即便调用方传入更低版本（回滚/重试）也不倒退；
+     * 2. 再写完整 index。
+     *
+     * 任意一步失败的后果（由 [loadIndex] 的高水位校正兜底）：
+     * - 只写成锚点：index 落后，loadIndex 用锚点校正版本，下限不倒退；
+     * - 锚点写成 + index 写成：正常；
+     * - 锚点写失败：index 可能领先，但下次崩溃恢复从旧锚点校正——所以必须先写锚点，
+     *   避免"index 领先、锚点落后"这个无法从高水位恢复的组合。
+     */
     suspend fun saveIndex(index: SourceIndex) {
-        files.writeText(INDEX_PATH, json.encodeToString(SourceIndex.serializer(), index))
-        // 只要曾经接受过目录版本或内容哈希，就同步维护独立锚点。锚点不随 etag/检查时间
-        // 等易变字段更新，只有反重放相关的两个字段会被写入，损坏概率显著低于主索引。
         if (index.catalogVersion > 0 || index.acceptedCatalogSha256 != null) {
-            val anchor = SourceAnchor(index.catalogVersion, index.acceptedCatalogSha256)
+            val existing = loadAnchor()
+            val highVersion = maxOf(index.catalogVersion, existing?.catalogVersion ?: 0L)
+            val highHash = if (highVersion == index.catalogVersion) {
+                index.acceptedCatalogSha256
+            } else {
+                existing?.acceptedCatalogSha256 ?: index.acceptedCatalogSha256
+            }
+            val anchor = SourceAnchor(highVersion, highHash)
             files.writeText(SOURCE_ANCHOR_PATH, json.encodeToString(SourceAnchor.serializer(), anchor))
         }
+        files.writeText(INDEX_PATH, json.encodeToString(SourceIndex.serializer(), index))
     }
 
     /** 读取独立锚点；损坏时返回 null（此时没有可信版本锚点，如实降级）。 */

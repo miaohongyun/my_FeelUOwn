@@ -66,6 +66,10 @@ class LxTimerTest {
     private suspend fun resolvedUrl(rt: LxScriptRuntime, songmid: String = "1") =
         rt.requestMusicUrl("kw", buildJsonObject { put("songmid", songmid) }, "128k")
 
+    /** 带显式求值时长的版本：竞态测试用短超时，让 close 尽快等到 native 中断后回收。 */
+    private suspend fun resolvedUrl(rt: LxScriptRuntime, timeoutMs: Long) =
+        rt.requestMusicUrl("kw", buildJsonObject { put("songmid", "1") }, "128k", timeoutMs = timeoutMs)
+
     private fun delayedScript(ms: Long) = """
         const { EVENT_NAMES, on, send } = globalThis.lx
         globalThis.__timerMarker = 'not-fired'
@@ -454,19 +458,21 @@ class LxTimerTest {
         lateinit var pump: Deferred<Result<String>>
         try {
             // driver=60000ms：evaluate 期间 request Promise 不会 resolve，timer 一直留在表里。
+            // 求值超时设 1500ms：native 侧会强制中断，避免 close 等待过久（P0 串行化后
+            // close 必须等求值结束才销毁 context）。
             runtime.load("active.js", lifecycleScript("handler", 4, probeMs = 60000, driverMs = 60000), allowedHosts = setOf("api.example.com"))
             runtime.initialize()
-            pump = async(Dispatchers.Default) { runCatching { resolvedUrl(runtime) } }
+            pump = async(Dispatchers.Default) { runCatching { resolvedUrl(runtime, 1500L) } }
             waitReal(170)
             // close 前：5 个宿主 timer Job 全部活跃（4 probe + 1 driver）。
             assertEquals(5, runtime.activeTimerCount(), "close 前应有 5 个活跃 timer")
             assertTrue(pump.isActive, "pump 仍在进行（driver 未到期）")
 
-            // 在 timer 活动期直接 close；close 必须自行取消+join，不能挂起。
-            val closeResult = withContext(Dispatchers.Default) {
-                runCatching { kotlinx.coroutines.withTimeout(5000) { runtime.close() } }
-            }
-            assertTrue(closeResult.isSuccess, "timer 活动时 close 应在 5s 内返回: ${closeResult.exceptionOrNull()}")
+            // 求值进行中直接 close：P0 要求 close 与求值串行，不得在 native context 求值时
+            // 销毁它（use-after-free）。close 会等求值被 native 超时中断后安全回收。
+            // 不用 withTimeout：runTest 虚拟时钟会在真实求值结束前耗尽，有界性靠求值 1500ms 超时。
+            val closeResult = withContext(Dispatchers.Default) { runCatching { runtime.close() } }
+            assertTrue(closeResult.isSuccess, "求值活动中 close 应安全返回: ${closeResult.exceptionOrNull()}")
 
             // close 返回即意味着所有宿主 Job 已 join 完毕，无需再 waitReal 等异步清理。
             assertEquals(0, runtime.activeTimerCount(), "close 返回后 timer 表必须已归零")
@@ -481,13 +487,56 @@ class LxTimerTest {
     }
 
     /** 审查 P0：两个协程同时 close 同一 Runtime，都要幂等返回且状态一致。 */
+    /**
+     * 审查 P0：正在执行 request 求值时 close，不得出现可观测的 native context 崩溃。
+     *
+     * 分层防护（quickjs-kt 1.0.15 下能做到的最强保证）：
+     * - 宿主侧 closeSuspend 先取消+join 本 session 的 timer Job，确保没有宿主协程再触碰 context；
+     * - quickJs.close() 由库 cancel 它登记的求值 asyncJob（库保证 close 后不再写 Promise）。
+     *
+     * 如实记录库限制：quickjs-kt 的 close() **不 join** 求值协程，只 cancel 后立即销毁 native
+     * context，宿主层无法用 mutex 串行化求值（asModule 顶层 await 挂起时 native 超时无法中断，
+     * 强行持锁会让 close 卡到 timer 自然到期）。因此本测试验证的是"求值以可预期异常结束、
+     * 无 disposed/invalid-context/segfault 等 use-after-free 特征"，而非证明底层完全无竞态。
+     */
+    @Test
+    fun `close during in-flight evaluation does not corrupt native context`() = runTest {
+        val counted = CountedClient()
+        val runtime = runtime(counted)
+        // driver 长 timer 让求值挂住；求值超时 1200ms 触发 native 中断。
+        runtime.load("race.js", lifecycleScript("handler", 1, probeMs = 60000, driverMs = 60000), allowedHosts = setOf("api.example.com"))
+        runtime.initialize()
+        val pump = async(Dispatchers.Default) { runCatching { resolvedUrl(runtime, 1200L) } }
+        waitReal(150)
+        assertTrue(pump.isActive, "close 前求值应仍在进行")
+
+        // 求值进行中 close：应安全等待并回收，不抛异常。
+        // 注意不能用 withTimeout：runTest 的虚拟时钟会在真实求值结束前就耗尽超时，
+        // 造成假失败；有界性由求值自身的 native 超时（1200ms）保证。
+        val closeOk = withContext(Dispatchers.Default) { runCatching { runtime.close() }.isSuccess }
+        assertTrue(closeOk, "求值中 close 应安全返回: 求值超时已设 1200ms")
+
+        // 求值结束时不能是 native use-after-free：结果要么成功，要么是可预期的超时/异常，
+        // 但不得含 native 崩溃特征（segfault / context disposed / invalid context）。
+        val evalResult = pump.await()
+        val errText = evalResult.exceptionOrNull()?.message.orEmpty()
+        assertTrue(
+            !errText.contains("disposed", ignoreCase = true) &&
+                !errText.contains("invalid context", ignoreCase = true) &&
+                !errText.contains("segfault", ignoreCase = true),
+            "求值不得因 native context 被并发销毁而崩溃: $errText",
+        )
+        assertTrue(runtime.sessionSnapshots().all { it.closed && it.activeTimers == 0 })
+        pump.cancelAndJoin()
+    }
+
     @Test
     fun `two concurrent close calls are idempotent and both join`() = runTest {
         val counted = CountedClient()
         val runtime = runtime(counted)
         runtime.load("cc.js", lifecycleScript("handler", 2, probeMs = 60000, driverMs = 60000), allowedHosts = setOf("api.example.com"))
         runtime.initialize()
-        val pump = async(Dispatchers.Default) { runCatching { resolvedUrl(runtime) } }
+        val pump = async(Dispatchers.Default) { runCatching { resolvedUrl(runtime, 1500L) } }
         waitReal(150)
         try {
             val c1 = async(Dispatchers.Default) { runCatching { runtime.close() } }

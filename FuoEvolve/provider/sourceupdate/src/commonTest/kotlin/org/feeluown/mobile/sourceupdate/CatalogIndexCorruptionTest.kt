@@ -1,6 +1,8 @@
 package org.feeluown.mobile.sourceupdate
 
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -158,5 +160,66 @@ class CatalogIndexCorruptionTest {
         // 锚点也坏了没有可信版本号，但不能静默当首次安装——标记异常，版本保守取 0。
         assertTrue(index.recoveredFromAnchor, "主索引损坏就应标记异常恢复态")
         assertFalse(index.isFirstInstall, "损坏态不得判首次安装，即便锚点也损坏")
+    }
+
+    /** 可注入写失败的 Store：对指定路径的 writeText 抛异常，模拟写入中断。 */
+    private class FailingStore(
+        private val delegate: InMemorySourceFileStore,
+        var failPath: String? = null,
+    ) : SourceFileStore by delegate {
+        override suspend fun writeText(path: String, content: String) {
+            if (path == failPath) throw IllegalStateException("模拟写入失败: $path")
+            delegate.writeText(path, content)
+        }
+    }
+
+    @Test
+    fun `anchor write before index keeps version floor on index write failure`() = runTest {
+        val delegate = InMemorySourceFileStore()
+        val failing = FailingStore(delegate, failPath = "sources/index.json")
+        val store = SourceVersionStore(failing)
+
+        // 接受目录 v50 时 index 写入失败（锚点已先写成）。
+        val writeFailed = runCatching {
+            store.saveIndex(SourceIndex(catalogVersion = 50, acceptedCatalogSha256 = "hash50"))
+        }.isFailure
+        assertTrue(writeFailed, "index 写入应失败（锚点已写成）")
+
+        // 换一个健康的 store 读同一批文件：锚点 v50 存在，index 仍是旧/空。
+        val healthy = SourceVersionStore(delegate)
+        val index = healthy.loadIndex()
+        assertEquals(50L, index.catalogVersion, "锚点高水位必须保住版本下限，不因 index 写失败倒退")
+    }
+
+    @Test
+    fun `anchor never regresses when saving a lower version index`() = runTest {
+        val files = InMemorySourceFileStore()
+        val store = SourceVersionStore(files)
+        store.saveIndex(SourceIndex(catalogVersion = 60, acceptedCatalogSha256 = "hash60"))
+        // 调用方误传一个更低版本（回滚/重试），锚点不得倒退。
+        store.saveIndex(SourceIndex(catalogVersion = 40, acceptedCatalogSha256 = "hash40"))
+        assertEquals(60L, store.loadIndex().catalogVersion, "锚点是只增高水位，不得被低版本写倒退")
+        val anchor = jsonOf(files.readText(SOURCE_ANCHOR_PATH)!!)
+        assertEquals("hash60", anchor, "锚点哈希也应保持高水位版本对应的值")
+    }
+
+    @Test
+    fun `index lagging behind anchor is corrected on load`() = runTest {
+        val files = InMemorySourceFileStore()
+        // 手工构造"index 落后于锚点"的中断现场：锚点 v70、index v65。
+        files.writeText(SOURCE_ANCHOR_PATH, """{"catalogVersion":70,"acceptedCatalogSha256":"hash70"}""")
+        files.writeText("sources/index.json", """{"schemaVersion":1,"catalogVersion":65,"sources":{}}""")
+        val index = SourceVersionStore(files).loadIndex()
+        assertEquals(70L, index.catalogVersion, "loadIndex 必须用锚点高水位校正落后的 index")
+        assertTrue(index.versionCorrectedByAnchor, "应标记版本被锚点校正")
+        assertFalse(index.isFirstInstall)
+    }
+
+    private fun jsonOf(raw: String): String? {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        return runCatching {
+            json.parseToJsonElement(raw).jsonObject["acceptedCatalogSha256"]
+                ?.jsonPrimitive?.content
+        }.getOrNull()
     }
 }

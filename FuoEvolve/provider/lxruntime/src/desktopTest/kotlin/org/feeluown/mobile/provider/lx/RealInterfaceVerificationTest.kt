@@ -1,5 +1,11 @@
 package org.feeluown.mobile.provider.lx
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.feeluown.mobile.provider.core.network.createSharedProviderHttpClient
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
@@ -76,12 +82,15 @@ class RealInterfaceVerificationTest {
     }
 
     /**
-     * 真实音频响应：Range GET 取前 N 字节，严格验证 Content-Type 与容器魔数。
-     * 修正审查指出的两个问题：不再用 `len > 0`（HTML 错误页也可能有正长度），
-     * 也不只做 HEAD（HEAD 不能证明 GET 拿得到音频字节）。
+     * 真实音频响应：Range GET 取前 N 字节，严格验证 206 + Content-Range + Content-Type + 容器魔数。
+     * 修正审查指出的三点：
+     * - 不再用 `len > 0`（HTML 错误页也可能有正长度），也不只做 HEAD（HEAD 不证明 GET 拿得到音频字节）；
+     * - 必须是 **HTTP 206**，不能是服务端忽略 Range 后返回的 200 整段（那条路拿不到"Range 证据"）；
+     * - 必须返回 **Content-Range: bytes 0-(N-1)/total**，起点/结束与请求区间一致，且实际字节数 == N。
      *
-     * 达到 REAL_AUDIO_RESPONSE 的充分条件：2xx/206 + Content-Type 以 audio/ 开头或
-     * application/octet-stream + 响应字节以 ID3（MP3 标签）或 MP3 帧同步开头。
+     * 达到 REAL_AUDIO_RESPONSE 的充分条件：HTTP 206 + Content-Range 覆盖请求的 0-(N-1) +
+     * Content-Type 以 audio/ 开头或 application/octet-stream + 响应字节以 ID3/MP3 帧同步开头
+     * + 实际读取字节数等于 N（既不是更短，也不是整段）。
      */
     private fun realAudioRange(url: String, probeBytes: Int = 16): Step {
         return try {
@@ -93,7 +102,7 @@ class RealInterfaceVerificationTest {
             conn.setRequestProperty("Range", "bytes=0-${probeBytes - 1}")
             val code = conn.responseCode
             val ct = conn.contentType.orEmpty()
-            val range = conn.getHeaderField("Content-Range")
+            val range = conn.getHeaderField("Content-Range").orEmpty()
             val bytes = conn.inputStream.use { it.readNBytes(probeBytes) }
             conn.disconnect()
             val ctAudio = ct.startsWith("audio/", ignoreCase = true) ||
@@ -102,12 +111,21 @@ class RealInterfaceVerificationTest {
             val mp3Frame = bytes.size >= 2 &&
                 (bytes[0].toInt() and 0xff) == 0xff && (bytes[1].toInt() and 0xe0) == 0xe0
             val audioBytes = mp3Magic || mp3Frame
-            val ok = code in 200..299 && ctAudio && audioBytes
+            // 严格 1：必须是 206 Partial Content，200 表示服务端忽略了 Range。
+            val isPartial = code == 206
+            // 严格 2：Content-Range 起点 0、结束 probeBytes-1、带 /total，与请求区间一致。
+            val cr = Regex("""bytes\s+(\d+)-(\d+)/(\d+)""", RegexOption.IGNORE_CASE).find(range)
+            val rangeOk = cr != null && cr.groupValues[1] == "0" &&
+                cr.groupValues[2] == (probeBytes - 1).toString()
+            // 严格 3：实际字节数恰好等于请求长度（非更短、非整段）。
+            val bytesOk = bytes.size == probeBytes
+            val ok = isPartial && rangeOk && bytesOk && ctAudio && audioBytes
             val hex = bytes.take(8).joinToString("") { b -> "%02x".format(b) }
             Step(
                 "REAL_AUDIO_RESPONSE",
                 ok,
                 "HTTP $code ct=$ct range=$range bytes=${bytes.size} hex=$hex" +
+                    " partial=$isPartial rangeOk=$rangeOk bytesOk=$bytesOk" +
                     " id3=$mp3Magic frameSync=$mp3Frame（Range ${probeBytes}B，未下载完整音频）",
             )
         } catch (e: Exception) {
@@ -155,27 +173,77 @@ class RealInterfaceVerificationTest {
         }
         val step = realAudioRange(audioUrl)
         println("[REAL] 音频 Range: ${step.level} ok=${step.ok} ${step.detail}")
-        assertTrue(step.ok, "opt-in 真实音频必须有 2xx+audio/*+容器魔数证据: ${step.detail}")
+        assertTrue(step.ok,
+            "opt-in 真实音频必须有 206+Content-Range(0-15)+audio/*+容器魔数+16B 证据: ${step.detail}")
+    }
+
+    /**
+     * 权威等级定义的**唯一来源**加载器：只从 candidates.json.testLevelDefinitions 读取。
+     * 测试代码里不再维护第二份等级清单——否则两边会各自演进、再次不一致（审查指出的问题）。
+     * 找不到/格式错误一律 fail，绝不退化成内置硬编码清单。
+     */
+    private fun loadAuthoritativeLevels(): Pair<JsonObject, List<String>> {
+        val candidatesFile = listOf(
+            "config/source-catalog/candidates.json",
+            "../../config/source-catalog/candidates.json",
+            "../../../config/source-catalog/candidates.json",
+        ).map { java.io.File(it) }.firstOrNull { it.isFile }
+            ?: throw AssertionError(
+                "找不到 config/source-catalog/candidates.json（工作目录=${System.getProperty("user.dir")}）；" +
+                    "等级定义必须来自权威文件，不得退化为硬编码",
+            )
+        val root = Json.parseToJsonElement(candidatesFile.readText()).jsonObject
+        val defs = root["testLevelDefinitions"]?.jsonObject
+            ?: throw AssertionError("candidates.json 缺少 testLevelDefinitions，测试等级与审核记录会脱节")
+        val levels = (defs["levels"] as? JsonArray)
+            ?.map { it.jsonPrimitive.content.substringBefore(" - ") }
+            ?: throw AssertionError("testLevelDefinitions.levels 缺失或格式错误")
+        return root to levels
     }
 
     @Test
     fun `real chain ladder never outruns evidence`() {
-        // 不依赖网络：验证等级阶梯与 candidates.json 的权威定义一致（10 级，含 NOT_OBTAINED），
-        // 且不得越级——真实搜索成功也不能自动记 REAL_AUDIO_RESPONSE 或 TRACK_IDENTITY。
-        val ladder = listOf(
-            "NOT_OBTAINED", "STATIC_ONLY", "RUNTIME_LOAD", "SIMULATED_INIT", "SIMULATED_URL_RESOLVE",
-            "REAL_INIT", "REAL_SEARCH", "REAL_URL_RESOLVE", "REAL_AUDIO_RESPONSE",
-            "REAL_TRACK_IDENTITY_VERIFIED",
-        )
-        assertEquals(10, ladder.size, "必须与 candidates.json.testLevelDefinitions 同为 10 级")
-        assertEquals("REAL_SEARCH", ladder[6])
-        assertEquals("REAL_TRACK_IDENTITY_VERIFIED", ladder.last())
-        // 反例：只有搜索证据时，能达到的最高等级就是 REAL_SEARCH，不得越级到音频/身份。
-        val searchOnlyEvidence = "REAL_SEARCH"
-        assertEquals(6, ladder.indexOf(searchOnlyEvidence))
-        assertTrue(ladder.indexOf("REAL_AUDIO_RESPONSE") > ladder.indexOf(searchOnlyEvidence),
-            "音频等级必须严于搜索等级，不得越级")
-        println("[REAL] 阶梯定义校验通过：10 级单调，最高 REAL_TRACK_IDENTITY_VERIFIED")
+        // 等级阶梯完全以 candidates.json.testLevelDefinitions 为权威定义：
+        // 数量、名称、顺序都从文件读，测试侧不再硬编码任何一份清单。
+        val (root, levels) = loadAuthoritativeLevels()
+        assertTrue(levels.isNotEmpty(), "权威等级定义不得为空")
+        assertEquals(levels.distinct().size, levels.size, "等级名称不得重复")
+        // 单调性由等级名字典序之外的"业务语义锚点"保证：从权威文件里定位，而不是假定索引。
+        val searchIdx = levels.indexOf("REAL_SEARCH")
+        val audioIdx = levels.indexOf("REAL_AUDIO_RESPONSE")
+        val identityIdx = levels.indexOf("REAL_TRACK_IDENTITY_VERIFIED")
+        assertTrue(searchIdx >= 0 && audioIdx > searchIdx && identityIdx > audioIdx,
+            "等级必须单调：REAL_SEARCH < REAL_AUDIO_RESPONSE < REAL_TRACK_IDENTITY_VERIFIED（$levels）")
+        // note 不得残留旧的"九级"措辞。
+        val note = root["note"]?.jsonPrimitive?.content.orEmpty()
+        assertTrue(!note.contains("九级"), "note 不应残留过时的九级定义措辞")
+        println("[REAL] 阶梯来自权威文件：${levels.size} 级，最高 ${levels.last()}")
+    }
+
+    /**
+     * 审核记录一致性：每个候选的 testLevel 必须是权威 levels 集合中的值，
+     * 且 reviewStatus/autoInstall 不得违反"无 APPROVED、无自动安装"的边界。
+     * 权威值只从 candidates.json 读取一次，测试不硬编码等级集合。
+     */
+    @Test
+    fun `candidate levels and flags match authoritative definition`() {
+        val (root, levels) = loadAuthoritativeLevels()
+        val candidates = root["candidates"]?.jsonArray
+            ?: throw AssertionError("candidates.json 缺少 candidates 数组")
+        assertTrue(candidates.isNotEmpty(), "审核记录不应为空")
+        candidates.forEach { element ->
+            val c = element.jsonObject
+            val id = c["id"]?.jsonPrimitive?.content ?: "<no-id>"
+            val level = c["testLevel"]?.jsonPrimitive?.content
+                ?: throw AssertionError("候选 $id 缺少 testLevel")
+            assertTrue(level in levels,
+                "候选 $id 的 testLevel='$level' 不在权威定义 $levels 内")
+            val status = c["reviewStatus"]?.jsonPrimitive?.content.orEmpty()
+            assertTrue(status != "APPROVED", "候选 $id 不得为 APPROVED")
+            val autoInstall = c["autoInstall"]?.jsonPrimitive?.content?.toBooleanStrictOrNull()
+            assertEquals(false, autoInstall, "候选 $id 的 autoInstall 必须为 false")
+        }
+        println("[REAL] ${candidates.size} 个候选等级/标记均与权威定义一致（无 APPROVED、无 autoInstall）")
     }
 
     @Test

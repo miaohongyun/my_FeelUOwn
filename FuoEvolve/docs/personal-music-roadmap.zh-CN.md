@@ -778,3 +778,69 @@ androidHost/iOS/desktopApp/APK 见本轮提交说明。
 
 **验证**：lxruntime desktopTest（含修正的 5 项阶梯测试）、jamendo desktopTest（2 项端到端
 opt-in 实跑通过）、全模块回归见本轮提交说明。
+
+### 10.8 第二轮审查续修：求值/close 分层、锚点原子性、生产 API 路径（2026-11-19）
+
+用户按实际代码再审，本轮三项：
+
+**P0 求值与 close 并发（LxScriptRuntime.kt / LxTimerTest.kt）**：
+- 审查要求"正在 request 时 close 不销毁 native context"。尝试过用 lifecycleMutex 串行化
+  求值，但因 asModule 顶层 await 挂起时 native evaluationTimeout 无法中断（无 JS 指令在跑），
+  close 会卡到脚本 timer 自然到期——**此路不通，已撤销**。
+- 采用分层方案：宿主侧 closeSuspend 取消+join 本 session 全部 timer Job，再 quickJs.close()
+  由库 cancel 它登记的求值 asyncJob（库保证 close 后不再写 Promise）。
+- 如实记录库限制：quickjs-kt 1.0.15 的 close() **不 join** 求值协程，cancel 后立即销毁 native
+  context，宿主层无法彻底消除底层竞态。新增测试 `close during in-flight evaluation does not
+  corrupt native context` 验证求值得以可预期异常结束、无 disposed/invalid-context/segfault 特征，
+  这是该库下能实际验证的最强证据，不虚报"完全消除"。
+
+**P1 锚点写入原子性（SourceVersionStore.kt / SourceUpdateCoordinator.kt）**：
+- 审查属实：saveIndex 先写 index 后写锚点，写锚点失败会让下次损坏恢复时版本倒退。
+- 修复：改为**先写锚点（只增高水位，取 max(现有, 新版本)）再写 index**；loadIndex 读主索引
+  成功后用锚点高水位校正落后的 index（新增 `versionCorrectedByAnchor` 标记）；Coordinator 在
+  恢复/校正态都拒绝不高于锚点版本的目录。任意一步写入失败都不倒退。
+- 新增 3 项测试：index 写失败保住锚点版本、低版本写不倒退锚点、index 落后被 load 校正。
+
+**P1 Jamendo 生产 API 路径 + 授权严格化**：
+- 新增 `JamendoProductionPathTest`：`FUOE_REAL_VERIFY=1` 时**完全走生产 JamendoApiClient.search()
+  /trackById() 的 HTTP 路径**（Ktor+OkHttp，仅用 JVM 系统属性注入代理），实跑通过：search 3 条、
+  trackById 重取身份一致。与旧测试（HttpURLConnection+生产解析）互补，构成完整生产端到端。
+- 音频严格化：断言 HTTP **206**（非任意 2xx）、Content-Range 起点 0/结束 15、实际字节数 16，
+  排除服务端忽略 Range 返回 200 整段的情况。实跑证据：206 / bytes 0-15/11572736 / ID3 魔数。
+- 等级定义：`RealInterfaceVerificationTest` 改为**读取 candidates.json.testLevelDefinitions 比对**
+  （不再各自硬编码），并断言 note 无过时"九级"措辞；同步修正 note 里的九级旧文字。
+- 授权严格化：`JamendoTrack` 新增 `licenseCode`/`licenseSummary`（解析 by-nc-nd 等条件），
+  Provider 的 providerTags 保留具体 CC 类型 + 原始链接 + 适用条件说明，不再笼统标
+  `"open-catalog"`（NC=非商用、ND=禁演绎，不等同无条件开放）。补 2 项单测。
+
+**合规**：音频仅 Range 取 16B，未下载完整商业音乐；source-catalog.json 仍 0 条、21 候选
+autoInstall=false/无 APPROVED。
+
+### 10.9 第三轮审查收尾：Range 严格断言、等级唯一来源、许可证逐项标注（2026-11-19）
+
+用户按"再做三项"要求复核，本轮三项都是对 10.8 已做内容的**补齐遗漏点**，不改安全边界：
+
+**P1 Range 响应严格断言（RealInterfaceVerificationTest.realAudioRange）**：
+- 10.8 只在 JamendoEndToEndTest 强制了 206+Content-Range，通用的 `realAudioRange()` 仍是
+  `code in 200..299` 的宽松判定——服务端忽略 Range 返回 200 整段也会被记为成功。
+- 收紧为三重严格条件：`HTTP 206` + `Content-Range: bytes 0-(N-1)/total`（起点/结束与请求区间一致）
+  + 实际字节数恰好 == N；三者与 audio/* + 容器魔数同时满足才算 REAL_AUDIO_RESPONSE。
+- 验证测试断言消息同步为"206+Content-Range(0-15)+audio/*+容器魔数+16B"，与 Jamendo 端到端口径统一。
+
+**P2 审核等级唯一来源（RealInterfaceVerificationTest）**：
+- 10.8 的阶梯测试虽读了 candidates.json，却又在测试侧硬编码了一份 10 级 `expected` 列表比对，
+  仍是"两套定义"——权威文件改动会与测试脱节。
+- 删除硬编码清单：抽出 `loadAuthoritativeLevels()` 作为**唯一来源**加载器（找不到/格式错误一律
+  fail，不退化内置清单）。阶梯测试只从文件读名称/数量/顺序并用语义锚点校验单调；新增
+  `candidate levels and flags match authoritative definition` 测试，逐一核对 21 候选的 testLevel
+  都来自权威集合、无 APPROVED、autoInstall=false。
+
+**P2 许可证逐项标注（JamendoModels.licenseSummary / JamendoApiClientTest）**：
+- 10.8 的 `licenseSummary` 用 when 分支，纯 BY 落到"请查看原始条款"未写署名；BY-NC-SA 等
+  组合只按首个匹配分支标注，会漏掉部分限制。
+- 改为逐项解码 BY(署名)/NC(非商业)/ND(禁演绎)/SA(相同方式共享)，组合时**列出全部适用条件**，
+  CC0/PD 单独说明、无链接保守提示未知。新增 `licenseSummaryLabelsEveryCcCondition` 覆盖
+  纯 BY / BY-SA / BY-NC-ND / 无链接四种情形。
+
+**验证与合规**：desktopTest 全绿；音频仍只 Range 取 16B 未下载完整音乐；source-catalog.json
+仍为空数组、21 候选无 APPROVED/autoInstall=false。本轮不推送。

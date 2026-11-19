@@ -37,7 +37,14 @@ class JamendoEndToEndTest {
     /** 用生产 JamendoApiClient 的纯解析函数解析真实响应（复用同一套字段映射）。 */
     private val parser by lazy { JamendoApiClient(createSharedProviderHttpClient(), { clientId }) }
 
-    private fun http(url: String, rangeBytes: Int? = null): Pair<Int, Pair<String, ByteArray>> {
+    data class HttpResult(
+        val code: Int,
+        val contentType: String,
+        val contentRange: String,
+        val bytes: ByteArray,
+    )
+
+    private fun http(url: String, rangeBytes: Int? = null): HttpResult {
         val conn = (if (proxy != null) URL(url).openConnection(proxy) else URL(url).openConnection())
             as HttpURLConnection
         conn.requestMethod = "GET"
@@ -53,7 +60,7 @@ class JamendoEndToEndTest {
             if (rangeBytes != null) stream.readNBytes(rangeBytes) else stream.readBytes()
         }
         conn.disconnect()
-        return code to ("$ct | $range" to bytes)
+        return HttpResult(code, ct, range, bytes)
     }
 
     private fun searchUrl(keyword: String, limit: Int = 3) =
@@ -77,9 +84,9 @@ class JamendoEndToEndTest {
         var result = parser.parseSearch("{}")
         var lastCode = 0
         for (attempt in 1..3) {
-            val (searchCode, searchBody) = http(searchUrl("ambient"))
-            lastCode = searchCode
-            val bodyText = searchBody.second.toString(Charsets.UTF_8)
+            val searchResp = http(searchUrl("ambient"))
+            lastCode = searchResp.code
+            val bodyText = searchResp.bytes.toString(Charsets.UTF_8)
             assertEquals(200, lastCode, "Jamendo 搜索应 HTTP 200: ${bodyText.take(200)}")
             result = parser.parseSearch(bodyText)
             if (result.tracks.isNotEmpty()) {
@@ -104,16 +111,31 @@ class JamendoEndToEndTest {
             "Jamendo 曲目应带 CC 授权元数据: '${track.licenseCcUrl}'")
 
         // ---- REAL_AUDIO_RESPONSE：Range GET 验证真实音频字节（不下载完整音乐）----
-        val (audioCode, audioHeaderAndBytes) = http(track.audioUrl, rangeBytes = 16)
-        val (headerInfo, audioBytes) = audioHeaderAndBytes
-        val ctOk = headerInfo.startsWith("audio/") || headerInfo.startsWith("application/octet-stream")
+        // 审查要求严格验证 HTTP 206（不是任意 2xx——服务端忽略 Range 返回 200 整段不算），
+        // Content-Range 起点必须为 0 且覆盖请求的 0-15 字节，实际取得字节数符合预期。
+        val audioResp = http(track.audioUrl, rangeBytes = 16)
+        val audioCode = audioResp.code
+        val audioBytes = audioResp.bytes
+        val headerInfo = "${audioResp.contentType} | ${audioResp.contentRange}"
+        val ctOk = audioResp.contentType.startsWith("audio/", ignoreCase = true) ||
+            audioResp.contentType.equals("application/octet-stream", ignoreCase = true)
         val id3 = audioBytes.size >= 3 && audioBytes[0].toInt() == 0x49 &&
             audioBytes[1].toInt() == 0x44 && audioBytes[2].toInt() == 0x33
         val frameSync = audioBytes.size >= 2 &&
             (audioBytes[0].toInt() and 0xff) == 0xff && (audioBytes[1].toInt() and 0xe0) == 0xe0
         val hex = audioBytes.take(8).joinToString("") { b -> "%02x".format(b) }
         println("[REAL] Jamendo REAL_AUDIO_RESPONSE: HTTP $audioCode $headerInfo hex=$hex id3=$id3 frameSync=$frameSync")
-        assertTrue(audioCode in 200..299, "音频 Range 请求应 2xx: HTTP $audioCode")
+
+        // 严格 1：必须是 206 Partial Content，不能是服务端忽略 Range 后的 200 整段响应。
+        assertEquals(206, audioCode, "Range 请求必须返回 HTTP 206（200 表示服务端忽略了 Range）")
+        // 严格 2：Content-Range 必须是 bytes 0-15/<total>，起点 0、结束 15 与请求一致。
+        val crMatch = Regex("""bytes\s+(\d+)-(\d+)/(\d+)""", RegexOption.IGNORE_CASE)
+            .find(audioResp.contentRange)
+        assertTrue(crMatch != null, "必须返回 Content-Range: $headerInfo")
+        assertEquals("0", crMatch!!.groupValues[1], "Content-Range 起点必须为 0: $headerInfo")
+        assertEquals("15", crMatch.groupValues[2], "Content-Range 结束必须与请求 0-15 一致: $headerInfo")
+        // 严格 3：实际取得的字节数等于请求的 16B（不是更少，也不是整段响应）。
+        assertEquals(16, audioBytes.size, "实际取得字节数应为 16（请求 0-15）")
         assertTrue(ctOk, "音频 Content-Type 应为 audio/* 或 octet-stream: $headerInfo")
         assertTrue(id3 || frameSync, "音频字节应为 ID3/MP3 容器魔数（排除 HTML 错误页）")
 
@@ -136,20 +158,21 @@ class JamendoEndToEndTest {
             return
         }
         // 先用搜索拿一个真实 id（同样允许有限重试应对偶发空结果）。
+        // limit=1 时 Jamendo 偶发返回空，用 limit=3 + 5 次重试提高稳定性。
         var first = parser.parseSearch("{}").tracks.firstOrNull()
-        for (attempt in 1..3) {
-            val (code, pair) = http(searchUrl("ambient", limit = 1))
-            assertEquals(200, code)
-            first = parser.parseSearch(pair.second.toString(Charsets.UTF_8)).tracks.firstOrNull()
+        for (attempt in 1..5) {
+            val searchResp = http(searchUrl("ambient", limit = 3))
+            assertEquals(200, searchResp.code)
+            first = parser.parseSearch(searchResp.bytes.toString(Charsets.UTF_8)).tracks.firstOrNull()
             if (first != null) break
         }
-        assertTrue(first != null, "搜索应返回至少一条（3 次尝试）")
+        assertTrue(first != null, "搜索应返回至少一条（5 次尝试）")
         // trackById 用真实 HTTP 请求重新取。
         val detailUrl = "${JamendoApiClient.DEFAULT_BASE_URL}/tracks/?client_id=$clientId" +
             "&format=json&id=${first!!.id}&audioformat=mp32"
-        val (detailCode, detailPair) = http(detailUrl)
-        assertEquals(200, detailCode)
-        val reResolved = parser.parseSearch(detailPair.second.toString(Charsets.UTF_8)).tracks.firstOrNull()
+        val detailResp = http(detailUrl)
+        assertEquals(200, detailResp.code)
+        val reResolved = parser.parseSearch(detailResp.bytes.toString(Charsets.UTF_8)).tracks.firstOrNull()
         assertTrue(reResolved != null, "trackById 应返回曲目（REAL_URL_RESOLVE）")
         assertEquals(first.id, reResolved!!.id, "重取后 id 必须一致")
         assertEquals(first.name, reResolved.name, "重取后曲名必须一致（身份核验）")

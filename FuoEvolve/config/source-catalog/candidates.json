@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedAt": "2026-11-19T00:00:00Z",
-  "note": "本文件只用于人工审核记录，客户端不会读取，也不会安装其中任何条目。审核结论变化时只改这里，不改 source-catalog.json。所有新条目均为 autoInstall=false，且无 APPROVED：模拟测试通过不等于真实音源验证通过。 2026-11-19 追加 realEndpointProbe：8个候选的真实DNS/HTTP可达性观测，均不构成审核提升；source-catalog.json 仍为空数组。 2026-11-19 修正审核记录一致性：统一 testLevelDefinitions 九级定义；3 个初始化失败脚本由 SIMULATED_INIT_AND_URL_PARSE 下调为 RUNTIME_LOAD；8 个元数据候选标 NOT_OBTAINED；补齐 requiredHostApis/discoveredDomains/staticReview/simulatedResult/realTestResult/license/实际通过平台字段。全部维持非 APPROVED、autoInstall=false，source-catalog.json 仍空数组。",
+  "note": "本文件只用于人工审核记录，客户端不会读取，也不会安装其中任何条目。审核结论变化时只改这里，不改 source-catalog.json。所有新条目均为 autoInstall=false，且无 APPROVED：模拟测试通过不等于真实音源验证通过。 2026-11-19 追加 realEndpointProbe：8个候选的真实DNS/HTTP可达性观测，均不构成审核提升；source-catalog.json 仍为空数组。 2026-11-19 修正审核记录一致性：统一 testLevelDefinitions 十级定义（含 NOT_OBTAINED）；3 个初始化失败脚本由 SIMULATED_INIT_AND_URL_PARSE 下调为 RUNTIME_LOAD；8 个元数据候选标 NOT_OBTAINED；补齐 requiredHostApis/discoveredDomains/staticReview/simulatedResult/realTestResult/license/实际通过平台字段。全部维持非 APPROVED、autoInstall=false，source-catalog.json 仍空数组。",
   "candidates": [
     {
       "id": "gd-studio",
