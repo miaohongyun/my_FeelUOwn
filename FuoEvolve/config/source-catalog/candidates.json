@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-19T00:00:00Z",
-  "note": "本文件只用于人工审核记录，客户端不会读取，也不会安装其中任何条目。审核结论变化时只改这里，不改 source-catalog.json。所有新条目均为 autoInstall=false，且无 APPROVED：模拟测试通过不等于真实音源验证通过。 2026-11-19 追加 realEndpointProbe：8个候选的真实DNS/HTTP可达性观测，均不构成审核提升；source-catalog.json 仍为空数组。 2026-11-19 修正审核记录一致性：统一 testLevelDefinitions 十级定义（含 NOT_OBTAINED）；3 个初始化失败脚本由 SIMULATED_INIT_AND_URL_PARSE 下调为 RUNTIME_LOAD；8 个元数据候选标 NOT_OBTAINED；补齐 requiredHostApis/discoveredDomains/staticReview/simulatedResult/realTestResult/license/实际通过平台字段。全部维持非 APPROVED、autoInstall=false，source-catalog.json 仍空数组。",
+  "generatedAt": "2026-11-19T22:45:00Z",
+  "note": "本文件只用于人工审核记录，客户端不会读取，也不会安装其中任何条目。审核结论变化时只改这里，不改 source-catalog.json。所有新条目均为 autoInstall=false，且无 APPROVED：模拟测试通过不等于真实音源验证通过。 2026-11-19 追加 realEndpointProbe：8个候选的真实DNS/HTTP可达性观测，均不构成审核提升；source-catalog.json 仍为空数组。 2026-11-19 修正审核记录一致性：统一 testLevelDefinitions 十级定义（含 NOT_OBTAINED）；3 个初始化失败脚本由 SIMULATED_INIT_AND_URL_PARSE 下调为 RUNTIME_LOAD；8 个元数据候选标 NOT_OBTAINED；补齐 requiredHostApis/discoveredDomains/staticReview/simulatedResult/realTestResult/license/实际通过平台字段。全部维持非 APPROVED、autoInstall=false，source-catalog.json 仍空数组。 2026-11-19 晚间：pdone 三脚本取证与静态审查（长青/非常刀/玉宁熙原文+SHA256），长青 BLOCK(SVIP) 维持拒绝，非常刀/玉宁熙 NEEDS_REVIEW；Fish/Flower 隔离登记待解混淆。全部非 APPROVED、autoInstall=false，source-catalog.json 仍空数组。",
   "candidates": [
     {
       "id": "gd-studio",
@@ -62,8 +62,8 @@
       "reviewStatus": "QUARANTINE_OBFUSCATED",
       "autoInstall": false,
       "reason": "约 639 KB 且高度混淆，当前不可充分审计",
-      "testLevel": "NOT_OBTAINED",
-      "testLevelEvidence": "仅登记 shellsec/pdone 仓库路径与风险提示，脚本原文未取证、未审查、未执行",
+      "testLevel": "STATIC_ONLY",
+      "testLevelEvidence": "2026-11-19 复核：fish v1.9.0，639619B，控制流平坦化+重度字符串混淆（eval/Function 60 处）。本轮隔离：不执行、不安装、不进正式目录；下一轮离线解混淆专项审计。",
       "requiredHostApis": [],
       "discoveredDomains": [],
       "staticReview": "未执行（脚本未取证）",
@@ -112,12 +112,20 @@
       "path": "sources/changqing/长青SVIP音源(二改修复版).js",
       "reviewStatus": "REJECT_AUTO_CATALOG",
       "autoInstall": false,
-      "reason": "SVIP/会员权益绕过定位 + 混淆 + 外部更新",
-      "testLevel": "NOT_OBTAINED",
-      "testLevelEvidence": "仅登记 shellsec/pdone 仓库路径与风险提示，脚本原文未取证、未审查、未执行",
-      "requiredHostApis": [],
-      "discoveredDomains": [],
-      "staticReview": "未执行（脚本未取证）",
+      "reason": "保留候选，不进正式目录。合规拆分需去除 SVIP 定位后单独评估；本轮不改 BLOCK 规则强行放行。",
+      "testLevel": "STATIC_ONLY",
+      "testLevelEvidence": "2026-11-19 取证原文 sha256=6a942987c1e111a113376fbf8ff9fb677c487058f16ce792779c72f69c4ed6de（27645B,v1.3.0）。静态扫描命中 membership-bypass（@name 长青SVIP音源，2处 SVIP）BLOCK。未执行、未做真实搜索/播放。",
+      "requiredHostApis": [
+        "globalThis.lx",
+        "EVENT_NAMES.request",
+        "on",
+        "send"
+      ],
+      "discoveredDomains": [
+        "yinyue.haitangw.net",
+        "13413.kstore.vip"
+      ],
+      "staticReview": "BLOCK：membership-bypass(SVIP)；标准 LX 事件结构可审计，但名称即以会员权益解锁为定位",
       "simulatedResult": "未执行",
       "realTestResult": "未执行",
       "license": "未核实（脚本未取证）"
@@ -249,9 +257,9 @@
         "tx",
         "kg"
       ],
-      "reviewStatus": "NEEDS_REVIEW",
+      "reviewStatus": "QUARANTINE_OBFUSCATED",
       "autoInstall": false,
-      "testLevel": "SIMULATED_URL_RESOLVE",
+      "testLevel": "STATIC_ONLY",
       "reason": "混淆脚本，执行期域名 flower.tempmusics.tk；模拟解析通过",
       "realEndpointProbe": {
         "date": "2026-11-19",
@@ -261,7 +269,7 @@
         "level": "NETWORK_REACHABILITY_ONLY_NOT_REAL_API",
         "note": "仅DNS+HTTP可达性，未做真实搜索/解析/音频/歌曲身份全链路；不构成审核状态提升"
       },
-      "testLevelEvidence": "ThirdPartyScriptCompatTest 参数化用例：MockEngine 下 inited 成功 + requestMusicUrl 返回 URL，且请求 songId 与返回 URL 内 ID 一致",
+      "testLevelEvidence": "野花/Flower v1，10057B，\\x 编码 1241 处，静态可读性极差。本轮隔离：不执行、不安装、不进正式目录；下一轮离线解混淆专项审计。",
       "declaredPlatforms": [
         "kw",
         "wy",
@@ -652,6 +660,58 @@
       "simulatedResult": "未通过/未执行",
       "realTestResult": "未执行",
       "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
+    },
+    {
+      "id": "feichangdao",
+      "name": "非常刀",
+      "repository": "pdone/lx-music-source",
+      "path": "sources/feichangdao/latest.js",
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "reason": "聚合 API 含商业平台高等级音质解析与裸 IP；需人工确认域名可信度/授权/是否付费墙绕过。只允许审核通过域名进白名单，禁止通配符。本轮不做商业付费音质真实下载。",
+      "testLevel": "STATIC_ONLY",
+      "testLevelEvidence": "2026-11-19 取证原文 sha256=49486cab064e64d5ad63723e670c44ee55eadadcc790ccf493351fbde64284d7（17846B,v5）。标准 LX 事件注册（action=search/getMusicUrl）；未执行、未做真实搜索/播放。",
+      "requiredHostApis": [
+        "lx.request",
+        "EVENT_NAMES.request",
+        "on",
+        "send"
+      ],
+      "discoveredDomains": [
+        "175.27.166.236",
+        "api-vehicle.volcengine.com",
+        "api.chksz.top",
+        "api.qishui.com",
+        "api.xcvts.cn",
+        "cp.chksz.top",
+        "music-api.gdstudio.xyz",
+        "music.haitangw.cc",
+        "music.nxinxz.com",
+        "musicapi.haitangw.net",
+        "oiapi.net",
+        "t.me"
+      ],
+      "staticReview": "BLOCK 规则未命中（无 eval/卡密/SVIP/_0x 混淆）；含裸 IP 与 12 个第三方聚合域名、hires/flac24bit/master 映射，需逐个审授权与数据流",
+      "simulatedResult": "未执行",
+      "realTestResult": "未执行",
+      "license": "未核实"
+    },
+    {
+      "id": "yuningxi-pro",
+      "name": "lx-玉宁熙-Pro",
+      "repository": "pdone/lx-music-source",
+      "path": "sources/yuningxi-pro/latest.js",
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "reason": "请求域名不可静态确认，不进正式目录；禁止放宽 SSRF。遵守 2s/4 次限频，不并发压测，不做商业付费音频完整下载。",
+      "testLevel": "STATIC_ONLY",
+      "testLevelEvidence": "2026-11-19 取证原文 sha256=5dd4752c16c17f7bab45dccf87dcd3f3c2a6e251e62bad68bde9554bfd275f79（144621B,v1.2.5）。URL 字符串拼接构造，extractHosts 提取为空；域名需专项逆向，未确认前不放宽 SSRF 白名单。声明 2 秒最多 4 次请求。",
+      "requiredHostApis": [],
+      "discoveredDomains": [],
+      "staticReview": "BLOCK 规则未命中（仅 2 处 \\x 编码）；域名静态不可见、涉及 QQ 音乐 hires/atmos，需逆向确认请求域名与限频",
+      "simulatedResult": "未执行",
+      "realTestResult": "未执行",
+      "license": "未核实"
     }
   ],
   "testLevelDefinitions": {

@@ -888,3 +888,89 @@ cleartext 放行）、iOS（AVPlayer，NSAllowsArbitraryLoads=true）、Desktop�
 
 **合规**：client_id 仍内置（用户决策保留）；未新增 LX 音源、未下载完整商业音乐；
 真实现播放验证仍 opt-in，Mock 链路测试不冒充真实播放。
+
+### 11. 产品化转向：开箱即用（2026-11-19）
+
+用户明确从"修边界测试"转向"让家人开箱即用"。本轮做第一优先级，不重写已有 Provider：
+
+**① Jamendo 默认启用 + 一次性升级迁移**：
+- `DEFAULT_ENABLED_PROVIDER_IDS` 加入 `jamendo`（家人安装即可搜到，无需进设置页找开关）。
+- 老用户升级问题：持久层已存 `enabledProviderIds` 时改默认值不生效。新增一次性迁移标记
+  `providerDefaultsMigrationVersion`（AppSettings + PersistedSettingsV1 双向映射），
+  `migrateProviderDefaults()` 只在版本落后时把 `PROVIDER_DEFAULTS_ADDED_IN_V1`（jamendo）
+  补入并回写版本号——**只补一次**，用户之后可自由关闭（v1 后不再补回）。
+  新装/损坏恢复直接写最新版本跳过迁移；从旧存储 legacyLoader 来的用户走迁移。
+- 搜索/列表来源行 `sourceLabel` 对带 `cc:` 标签的曲目追加"开放曲库·非原曲"，避免误认商业原曲。
+
+**② 下载一键最高质量（家人只点一次）**：
+- `DownloadQualitySelectionPort` 新增 `downloadBest()`：不弹窗，直接以 `Highest` 档入队
+  （Highest 在 Provider 侧自动从无损回退到高音质，恰好是"默认无损优先、不可用降级"）。
+- `BoundDownloadActionPort.download()`（所有下载按钮入口）改走 `downloadBest()`；
+  `requestSelection()` 保留为"更多选项/下载（选择音质）"显式入口，搜索列表菜单里加了该项。
+- 一键下载会清掉任何已打开的选择窗，避免状态残留。
+
+**③ 网络响应体大小上限加固（P2，防卡顿/OOM，非安全审计工程）**：
+- provider/runtime 新增 `BoundedBody.kt`（`readProviderBodyBounded`）：Content-Length 预判 +
+  流式累计超限即取消，512 KiB JSON 上限；`ProviderNetwork.execute` 与 JamendoApiClient 改用。
+- 两份 lossless client（Android/desktop 的 Jamendo/InternetArchive/Subsonic）新增
+  `BoundedJsonRead.kt`：最多读 MAX+1 字节识别超长响应，超限按请求失败降级；音频流下载走独立通道不受影响。
+
+**本轮明确未做（需用户拍板/真机，非遗漏）**：
+- **LX 音源自动更新目录**：用户想"不让家人手动导入脚本"，但与既有安全边界（source-catalog 空数组、
+  21 候选无 APPROVED、不自动装未审核脚本）直接冲突；此前真实验证显示候选端点大多失效/有 Risk。
+  需用户指定可信且真实可用的脚本后才按门禁流程入库，本轮不擅自开绿灯。
+- **开放曲库匹配分级（高可信/有疑问）**、**断点续传/离线播放**：第三优先级，后续阶段。
+- **真机真实验收**（真实搜索/播放/FLAC 下载、三端）：无设备，仅提供 opt-in 验证脚本，不冒充。
+
+**测试**：迁移（4）、默认集、sourceLabel 标注、下载一键（2）、有界读取（runtime 3 + desktop 4）
+均通过。本轮不推送。
+
+### 12. LX 音源分批接入与社区音源自动发现框架（2026-11-19，工作分支 work/lx-discovery-framework）
+
+用户计划书明确：不绕过安全门禁、不伪造验证、不自动安装未审核脚本、先做不依赖私钥的工作、
+只在集合仓工作分支开发、不改公钥/不关验签/不动 master。本轮完成阶段 A 审查 + 阶段 C 框架。
+
+**基线处理**：集合仓工作分支 `fc05530` 停在 a213522；本地 FuoEvolve 的 fa7a5e8（产品化）尚未同步。
+先把 fa7a5e8 的 32 个文件同步进工作分支（内容一致、仅 CRLF/LF 差异），保证基线不丢改动。
+所有改动只在 `work/lx-discovery-framework`，master 不动。
+
+**阶段 A：候选审查报告**（写入 config/source-catalog/candidates.json，21→23 条，全非 APPROVED / autoInstall=false）：
+
+| 候选 | 取证 | 静态结论 | 处置 | 真实等级 |
+|---|---|---|---|---|
+| 长青 changqing v1.3.0 / 27KB | sha256 6a94298…ed6de，域名 yinyue.haitangw.net + 13413.kstore.vip | **BLOCK**：membership-bypass（@name 长青SVIP音源，2 处 SVIP） | REJECT_AUTO_CATALOG，不改 BLOCK 规则强行放行 | STATIC_ONLY |
+| 非常刀 feichangdao v5 / 17.8KB | sha256 49486ca…64284d，12 域名含裸 IP 175.27.166.236、t.me，hires/flac24bit/master 映射 | BLOCK 规则未命中，但需逐个审授权与数据流 | NEEDS_REVIEW，禁止通配符白名单，不做商业付费音质真实下载 | STATIC_ONLY |
+| 玉宁熙 yuningxi v1.2.5 / 144KB | sha256 5dd4752…d275f79，URL 字符串拼接致域名静态不可见；声明 2s/4 次限频 | BLOCK 未命中，域名需专项逆向 | NEEDS_REVIEW，禁止放宽 SSRF，遵守限频不并发 | STATIC_ONLY |
+| Fish v1.9.0 / 639KB | eval/Function 60 处、控制流平坦化 | 无法静态审计 | QUARANTINE_OBFUSCATED，不执行不安装 | STATIC_ONLY |
+| Flower 野花 v1 / 10KB | \x 编码 1241 处 | 无法静态审计 | QUARANTINE_OBFUSCATED，不执行不安装 | STATIC_ONLY |
+
+可接入功能拆分结论：长青的 SVIP 定位是 BLOCK 根因，如需接入只能去掉会员解锁卖点后单独评估；
+非常刀/玉宁熙的合规部分（标准 LX 事件结构）可进入架构兼容性验证，但音频能力以真实验证为准，
+本轮均只到 STATIC_ONLY，未执行脚本、未做真实搜索/播放。
+
+**阶段 C：社区音源自动发现框架**（新增代码，全部在 provider/sourceupdate）：
+- `CommunityCatalogModels.kt`：社区清单模型 `{sources:[{id,name,url}]}`、DiscoveredCandidate/CandidateStore、
+  审核状态 DISCOVERED/QUARANTINED/NEEDS_REVIEW/APPROVED/REJECTED/STALE、验证等级 STATIC_REVIEW→REAL_LOSSLESS_VERIFIED
+  （isReal 从 REAL_SEARCH 起）、风险等级、URL 规范化（gh-proxy 前缀剥离/百分号解码）、三类去重
+  （规范化 URL / 仓库路径 / SHA256 预留）、清单解析校验（空 sources / 非法字段 / id 重复一律拒绝）。
+- `CommunityCatalogDiscovery.kt`：`discover()` 复用 `CatalogFetcher` 主地址→镜像、失败用上次成功缓存、
+  解析/去重/STALE 标记；`scanQuarantined()` 复用 `SourceStaticPolicy` 扫描隔离区脚本。
+  **隔离红线**：状态只会写 DISCOVERED/QUARANTINED，绝不写 APPROVED；不执行脚本、不安装、
+  不扩白名单（提取域名只进候选元数据供人工审）、不覆盖受控目录 source-catalog.json；
+  清单读取失败/结构非法/空 sources 一律保留现有候选不清空。
+- `CommunityCatalogDiscoveryTest.kt`（7 项）：镜像回退、三类去重、缓存回退不清空、STALE 不删除、
+  BLOCK 自动隔离且不批准、干净扫描不改状态、解析器拒绝非法清单。
+
+**file:line 数据链路（现有能力，未重写）**：
+- LX 加载 `provider/lxruntime/.../LxScriptRuntime.kt:127`（load）、`:166-207`（inited 必需）；
+  shim `LxBridge.kt:44-192`；搜索适配器 `LxSongSearchRegistry.kt:58-59`（默认仅 kw+kg）；
+  质量回退 `LxScriptProvider.kt:369-382`（刻意不用 flac24bit）。
+- 门禁 `SourceStaticPolicy.kt:46-62`（BLOCK 判据）；安装事务 `SourceVersionStore.kt:295-365`
+  （审核→SHA256→静态扫描→staging→冒烟→切 active）；多镜像验签 `SourceCatalogUpdater.kt:159-238`；
+  签名 `config/source-catalog/tools/sign-catalog.mjs`（私钥不入库、环境变量传入）。
+- 验证十级定义在 candidates.json:testLevelDefinitions；真实 Range 验证 `RealInterfaceVerificationTest.kt`
+  （opt-in FUOE_REAL_VERIFY=1，只读 16B，不下载完整商业曲目）。
+
+**未做（需项目所有者/私钥，非遗漏）**：正式目录签发（私钥不在可访问位置，缺 FUOEVOLVE_CATALOG_KEY）；
+Fish/Flower 离线解混淆；非常刀/玉宁熙域名逆向与授权确认；真机搜索/播放/下载验收；
+断点续传/离线播放/跨源匹配。全部门禁与验签保持原样，未关闭、未降配、未改公钥。
