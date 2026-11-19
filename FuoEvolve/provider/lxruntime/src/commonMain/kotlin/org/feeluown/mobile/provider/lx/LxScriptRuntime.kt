@@ -14,9 +14,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.selects.onTimeout
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
@@ -53,15 +57,22 @@ import org.feeluown.mobile.sourceupdate.readBodyBounded
  *   無名/小熊猫均为 REJECT/QUARANTINE 且接口已失效），因此不盲目补齐。这些原语在桥接层
  *   调用时明确抛错，不返回伪造值；依赖它们的脚本无法初始化，而不是给出错误 URL。
  *
- * ## 生命周期与并发（[RuntimeSession]）
+ * ## 生命周期与并发（[RuntimeSession] + [lifecycleMutex]）
  *
  * 每次 [load] 创建一个不可变的 [RuntimeSession]，它独占自己的 QuickJs 实例、timer scope、
- * timer 表和生命周期状态。所有绑定闭包捕获的是**那一次 load 的 session**（局部 val），
- * 不再读取外层可变属性。因此：
- * - 旧 context 的 asyncFunction 即使晚于 close 恢复，也只能操作自己那份（已取消的）session，
- *   绝不会把延时挂到新 session 的 scope / 写进新 session 的 timer 表；
- * - [close] 只关闭"当前 session"，且 session 内部用 [Session.closed] 幂等保护；
- * - 连续 close、close 与 clearTimeout 并发、close 与 load 并发都不会交叉污染。
+ * timer 表、timer Job 集合和生命周期状态。所有绑定闭包捕获的是**那一次 load 的 session**
+ * （局部 val），不再读取外层可变属性。因此旧 context 的 asyncFunction 即使晚于 close 恢复，
+ * 也只能操作自己那份（已取消的）session，绝不会把延时挂到新 session 的 scope / 表。
+ *
+ * [load] 与 [close] 全程在 [lifecycleMutex] 下串行执行，消除两个竞态窗口：
+ * - load/load：两个并发 load 不再互相覆盖——第二个在锁内看到第一个已发布的 session，
+ *   先可靠关闭它再创建自己的；不会出现某个 session 建好后无人关闭而泄漏。
+ * - load/close：close 必须等 load 完成"创建→绑定→evaluate→发布"整段结束后才执行，
+ *   不会出现"close 只看到旧 session、而 load 随后又把新 session 发布出去"的漏关。
+ *
+ * [close] 的顺序是：标记 session 已关闭（阻止新 timer 登记）→ 取消所有 timer 信号 →
+ * 取消 timerScope → **join 等待所有宿主 timer Job 真正退出** → 最后才销毁 QuickJs context。
+ * 这样 close 返回后，不存在仍在运行、且可能访问已销毁 context 的宿主协程。
  *
  * quickjs-kt 1.0.15 的实证行为（反编译 QuickJs.class）：
  * - asyncFunction 的协程挂在**库自己的** coroutineScope 上（不是我们的 timer scope），并登记到
@@ -69,18 +80,24 @@ import org.feeluown.mobile.sourceupdate.readBodyBounded
  * - resolve/reject JS Promise 前检查 `isClosed()`，close 后不再向 JS 写 Promise；
  * - `close()` **不 join** asyncFunction 协程，只 cancel 后立刻销毁 native context。
  * 因此宿主侧必须自己保证 timer 协程与登记表收尾——这正是 [RuntimeSession] 的职责。
+ *
+ * [close] 是 suspend 函数（本类不再实现 AutoCloseable）：调用方均已在协程上下文中
+ * （Provider 的 suspend 方法、测试的 runTest/runBlocking），可以安全地 join 等待。
  */
 @OptIn(ExperimentalEncodingApi::class)
 class LxScriptRuntime(
     private val httpClient: HttpClient,
     private val json: Json = Json { ignoreUnknownKeys = true; isLenient = true },
-) : AutoCloseable {
+) {
 
     /**
      * 关闭自动重定向的客户端视图：重定向由 [sendFollowingAllowedRedirects] 手动处理，
      * 每一跳都重新过域名白名单。此客户端无状态，可跨 session 共享。
      */
     private val noRedirectClient = httpClient.config { followRedirects = false }
+
+    /** load/close 全周期互斥，消除 load/load、load/close 的发布窗口竞态。 */
+    private val lifecycleMutex = Mutex()
 
     /** 当前会话；load 时整体替换。所有可变状态都封在 session 内。 */
     private var session: RuntimeSession? = null
@@ -106,12 +123,13 @@ class LxScriptRuntime(
         source: String,
         timeoutMs: Long = LxProtocol.DEFAULT_INIT_TIMEOUT_MS,
         allowedHosts: Set<String> = emptySet(),
-    ) {
+    ) = lifecycleMutex.withLock {
         require(source.encodeToByteArray().size <= LxProtocol.MAX_SCRIPT_BYTES) {
             "脚本体积超过 ${LxProtocol.MAX_SCRIPT_BYTES} 字节上限"
         }
-        // 先关闭旧 session（若并发 load，另一个 load 的 session 也会被这里关闭；见类注释）。
-        close()
+        // 全程持锁：先可靠关闭旧 session 并 join 其 timer Job，再建新的。
+        // closeLocked 不会再去抢 lifecycleMutex（它是内部实现），因此无自锁死锁。
+        closeLocked()
         val newSession = RuntimeSession(name, allowedHosts, timeoutMs)
         sessionHistory += newSession
         val instance = newSession.quickJs
@@ -122,13 +140,13 @@ class LxScriptRuntime(
             // 只有全部成功后才发布；失败时旧 session 已在上面 close，保持"无可用 runtime"。
             session = newSession
         } catch (e: QuickJsException) {
-            newSession.close()
+            newSession.closeSuspend()
             throw LxScriptException("脚本 [$name] 执行失败: ${e.message}", e)
         } catch (e: CancellationException) {
-            newSession.close()
+            newSession.closeSuspend()
             throw e
         } catch (e: Exception) {
-            newSession.close()
+            newSession.closeSuspend()
             throw LxScriptException("脚本 [$name] 加载失败: ${e.message}", e)
         }
     }
@@ -232,16 +250,19 @@ class LxScriptRuntime(
     }
 
     /**
-     * 关闭当前 session。幂等：重复调用不重复销毁 context。
+     * 关闭当前 session，并等待其所有宿主 timer Job 真正退出后才返回。幂等。
      *
-     * 与 clearTimeout 并发安全：timer 表的所有写都在 [RuntimeSession.timerMutex] 内；
-     * 这里用 tryLock 拿不到就跳过主动清理，依赖各 asyncFunction 的 finally 自行移除
-     * （它们用的是同一把锁，且只操作自己 session 的表）。
+     * 与 [load] 共用 [lifecycleMutex]，因此并发 load/close 会串行执行，不会出现
+     * "close 只看到旧 session、而 load 随后又发布新 session"的漏关窗口。
+     *
+     * 不置空 session：保留它让 activeTimerCount / sessionSnapshots 在 close 后仍可观测
+     * 该会话已 closed 且 timer 归零，也让"close 后旧 asyncFunction 不会写新表"可被断言。
      */
-    override fun close() {
-        session?.close()
-        // 不置空 session：保留它让 activeTimerCount 在 close 后仍可观测该会话的残留表，
-        // 也让"close 后旧 asyncFunction 不会写新表"可被测试断言。下次 load 会整体替换。
+    suspend fun close() = lifecycleMutex.withLock { closeLocked() }
+
+    /** 在已持有 [lifecycleMutex] 时执行实际关闭；供 [close] 与 [load] 复用。 */
+    private suspend fun closeLocked() {
+        session?.closeSuspend()
     }
 
     // ---- 内部实现 ----
@@ -266,29 +287,41 @@ class LxScriptRuntime(
         val timerSignals = mutableMapOf<Long, CompletableDeferred<Unit>>()
         val timerMutex = Mutex()
 
-        /** 幂等关闭标志；只读可见性用 @Volatile 足够（close 由单线程调用，库内部另有 CAS）。 */
+        /**
+         * 本 session 创建的全部宿主 timer Job。close 会 join 它们，确保返回时没有任何
+         * 宿主协程仍在运行（否则它们可能在 QuickJs 销毁后才写表 / 触发 JS 回调）。
+         */
+        val timerJobs = mutableSetOf<Job>()
+
+        /** 幂等关闭标志；@Volatile 保证跨线程可见（asyncFunction 可能在别的线程读）。 */
         @Volatile
         var closed = false
             private set
 
         suspend fun activeTimerCount(): Int = timerMutex.withLock { timerSignals.size }
 
-        fun close() {
+        /**
+         * 关闭顺序（不可调换）：
+         * 1. 置 closed 门闩——此后 __lxDelay 拒绝登记新 timer；
+         * 2. 取消所有 timer 信号——让尚未进入 select 的等待者走异常路径，不触发 JS 回调；
+         * 3. 取消 timerScope——正在 select 的 Job 收到 CancellationException；
+         * 4. join 所有 timer Job——真正等到它们退出（含 finally 清表）；
+         * 5. 最后才销毁 QuickJs context——此时已无宿主协程会再触碰它。
+         *
+         * 全程用 timerMutex 保护表的读改；不再用 tryLock 跳过（suspend 上下文可直接 withLock）。
+         */
+        suspend fun closeSuspend() {
             if (closed) return
             closed = true
-            // 先取消 timer scope：withContext(timerScope) 抛 CancellationException，
-            // select 不会走 onAwait 正常返回，因此 JS .then 回调不会执行。
-            timerScope.cancel()
-            if (timerMutex.tryLock()) {
-                try {
-                    // 用 cancel（不是 complete）：让任何尚未进入 select 的等待者也走异常路径，
-                    // 绝不因为"信号正常完成"而触发 JS 回调。
-                    timerSignals.values.forEach { it.cancel() }
-                    timerSignals.clear()
-                } finally {
-                    timerMutex.unlock()
-                }
+            val jobs: List<Job>
+            timerMutex.withLock {
+                timerSignals.values.forEach { it.cancel() }
+                timerSignals.clear()
+                jobs = timerJobs.toList()
             }
+            timerScope.cancel()
+            // 等待本 session 的全部宿主 timer Job 退出；即使某个 Job 已经结束，join 也立即返回。
+            jobs.joinAll()
             // 库的 close() 幂等且会 cancel 自己的 asyncJobs；这里 try/catch 兜底。
             runCatching { quickJs.close() }
         }
@@ -384,24 +417,36 @@ class LxScriptRuntime(
             val millis = (args.getOrNull(1)?.toString()?.toLongOrNull() ?: 0L)
                 .coerceIn(0L, MAX_TIMER_DELAY_MS)
             val signal = CompletableDeferred<Unit>()
-            // session 已关闭就不再登记：避免 close 之后表被新增条目污染（activeTimerCount 归零才可断言）。
-            val registered = s.timerMutex.withLock {
-                if (s.closed) false else { s.timerSignals[id] = signal; true }
+            // 登记信号 + 等待 Job 必须在同一把锁内、且检查 closed 门闩：
+            // 这样 closeSuspend 置 closed 后，新 timer 无法再登记，也就不会被漏 join。
+            val wait = s.timerMutex.withLock {
+                if (s.closed) null else {
+                    s.timerSignals[id] = signal
+                    s.timerScope.async {
+                        try {
+                            select<Unit> {
+                                signal.onAwait { }
+                                onTimeout(millis) { }
+                            }
+                        } finally {
+                            // single-arg remove（双参 remove(key,value) 在 Kotlin/Native 不可用）；
+                            // identity 判断防止误删"同 id 但属于重试"的新信号。
+                            s.timerMutex.withLock {
+                                if (s.timerSignals[id] === signal) s.timerSignals.remove(id)
+                                s.timerJobs.remove(currentCoroutineContext()[Job])
+                            }
+                        }
+                    }.also { s.timerJobs += it }
+                }
             }
-            if (!registered) return@asyncFunction null
+            if (wait == null) return@asyncFunction null
+            // 等本 timer 的 Job：正常到期/被 clearTimeout 信号唤醒后返回；
+            // close 取消 timerScope 时抛 CancellationException，由库的 asyncFunction 框架吞掉
+            // （关闭后库不再向 JS 写 Promise），这里显式 catch 让协程干净结束。
             try {
-                withContext(s.timerScope.coroutineContext) {
-                    select<Unit> {
-                        signal.onAwait { }
-                        onTimeout(millis) { }
-                    }
-                }
-            } finally {
-                // 单参数 remove（双参 remove(key,value) 在 Kotlin/Native 不可用）；identity 判断
-                // 防止误删"同 id 但属于重试"的新信号。
-                s.timerMutex.withLock {
-                    if (s.timerSignals[id] === signal) s.timerSignals.remove(id)
-                }
+                wait.await()
+            } catch (_: CancellationException) {
+                return@asyncFunction null
             }
             null
         }

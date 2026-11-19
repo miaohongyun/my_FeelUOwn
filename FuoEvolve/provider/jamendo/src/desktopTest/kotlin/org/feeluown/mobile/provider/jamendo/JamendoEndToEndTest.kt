@@ -1,0 +1,159 @@
+package org.feeluown.mobile.provider.jamendo
+
+import org.feeluown.mobile.provider.core.network.createSharedProviderHttpClient
+import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.URL
+import java.net.URLEncoder
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+/**
+ * 独立公开曲库（Jamendo）端到端真实验证（opt-in，默认不跑）。
+ *
+ * 这是"独立解析器"方向的验证：Jamendo 是 CC 授权开放曲库，API 有公开文档与 client_id，
+ * 不包装任何商业平台的未公开接口，授权边界清晰。验证链路：
+ *   REAL_SEARCH（公开搜索）→ REAL_URL_RESOLVE（trackById 重新取时效 audio URL）
+ *   → REAL_AUDIO_RESPONSE（Range 取极短字节，验 Content-Type + 容器魔数）
+ *   → REAL_TRACK_IDENTITY_VERIFIED（搜索 id 与音频 URL trackid 参数一致 + 元数据一致）
+ *
+ * 启用：`FUOE_REAL_VERIFY=1`；代理：`LX_VERIFY_PROXY=http://host:port`；
+ * client_id 默认用内置公开值（可用 `JAMENDO_CLIENT_ID` 覆盖）。
+ *
+ * 合规：音频只用 Range 取 16B 验证容器，**不下载完整音乐**；CC 授权元数据（license_ccurl）
+ * 必须非空，否则不声称已确认授权。
+ */
+class JamendoEndToEndTest {
+
+    private val enabled = System.getenv("FUOE_REAL_VERIFY") == "1"
+    private val clientId = System.getenv("JAMENDO_CLIENT_ID")?.takeIf { it.isNotBlank() } ?: "5ace5988"
+    private val proxy: Proxy? = System.getenv("LX_VERIFY_PROXY")?.takeIf { it.isNotBlank() }?.let {
+        val uri = java.net.URI(it)
+        Proxy(Proxy.Type.HTTP, InetSocketAddress(uri.host, uri.port))
+    }
+
+    /** 用生产 JamendoApiClient 的纯解析函数解析真实响应（复用同一套字段映射）。 */
+    private val parser by lazy { JamendoApiClient(createSharedProviderHttpClient(), { clientId }) }
+
+    private fun http(url: String, rangeBytes: Int? = null): Pair<Int, Pair<String, ByteArray>> {
+        val conn = (if (proxy != null) URL(url).openConnection(proxy) else URL(url).openConnection())
+            as HttpURLConnection
+        conn.requestMethod = "GET"
+        conn.connectTimeout = 15_000
+        conn.readTimeout = 20_000
+        conn.setRequestProperty("Accept-Encoding", "identity")
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+        if (rangeBytes != null) conn.setRequestProperty("Range", "bytes=0-${rangeBytes - 1}")
+        val code = conn.responseCode
+        val ct = conn.contentType.orEmpty()
+        val range = conn.getHeaderField("Content-Range").orEmpty()
+        val bytes = conn.inputStream.use { stream ->
+            if (rangeBytes != null) stream.readNBytes(rangeBytes) else stream.readBytes()
+        }
+        conn.disconnect()
+        return code to ("$ct | $range" to bytes)
+    }
+
+    private fun searchUrl(keyword: String, limit: Int = 3) =
+        "${JamendoApiClient.DEFAULT_BASE_URL}/tracks/?client_id=$clientId&format=json" +
+            "&limit=$limit&search=${URLEncoder.encode(keyword, "UTF-8")}" +
+            "&audioformat=mp32&include=musicinfo&imagesize=400"
+
+    /**
+     * 端到端必须成功测试：opt-in 开启时任何一环失败都让测试失败，绿色即代表真实成功。
+     */
+    @Test
+    fun `end to end real jamendo search identity audio and license`() {
+        if (!enabled) {
+            println("SKIP Jamendo 端到端：设置 FUOE_REAL_VERIFY=1 启用（常规 CI 不打真实网络）")
+            return
+        }
+
+        // ---- REAL_SEARCH：真实公开搜索 + 生产解析 ----
+        // Jamendo 公开 API 偶发返回空结果（本机多次观测：同一关键词有时 count=0），
+        // 真实网络测试允许有限重试，区分"端点不可用"与"偶发空结果"。
+        var result = parser.parseSearch("{}")
+        var lastCode = 0
+        for (attempt in 1..3) {
+            val (searchCode, searchBody) = http(searchUrl("ambient"))
+            lastCode = searchCode
+            val bodyText = searchBody.second.toString(Charsets.UTF_8)
+            assertEquals(200, lastCode, "Jamendo 搜索应 HTTP 200: ${bodyText.take(200)}")
+            result = parser.parseSearch(bodyText)
+            if (result.tracks.isNotEmpty()) {
+                println("[REAL] Jamendo 搜索第 $attempt 次成功，count=${result.totalCount}")
+                break
+            }
+            println("[PROBE] Jamendo 搜索第 $attempt 次返回空结果，重试")
+        }
+        assertTrue(result.tracks.isNotEmpty(), "真实搜索应有结果（REAL_SEARCH，HTTP $lastCode，3 次尝试）")
+        val track = result.tracks.first()
+        println("[REAL] Jamendo REAL_SEARCH: id=${track.id} name=${track.name} artist=${track.artist} " +
+            "duration=${track.durationSeconds}s license=${track.licenseCcUrl}")
+
+        // 身份字段（REAL_SEARCH 的元数据一致性）
+        assertTrue(track.id.isNotBlank() && track.name.isNotBlank() && track.artist.isNotBlank(),
+            "曲目应有 id/name/artist 身份字段")
+        assertTrue(track.durationSeconds != null && track.durationSeconds!! > 0, "应有正的时长")
+        assertTrue(track.audioUrl.startsWith("https://"), "播放地址应为 https")
+
+        // 授权元数据：CC URL 非空（开放曲库的核心前提）
+        assertTrue(track.licenseCcUrl.contains("creativecommons.org", ignoreCase = true),
+            "Jamendo 曲目应带 CC 授权元数据: '${track.licenseCcUrl}'")
+
+        // ---- REAL_AUDIO_RESPONSE：Range GET 验证真实音频字节（不下载完整音乐）----
+        val (audioCode, audioHeaderAndBytes) = http(track.audioUrl, rangeBytes = 16)
+        val (headerInfo, audioBytes) = audioHeaderAndBytes
+        val ctOk = headerInfo.startsWith("audio/") || headerInfo.startsWith("application/octet-stream")
+        val id3 = audioBytes.size >= 3 && audioBytes[0].toInt() == 0x49 &&
+            audioBytes[1].toInt() == 0x44 && audioBytes[2].toInt() == 0x33
+        val frameSync = audioBytes.size >= 2 &&
+            (audioBytes[0].toInt() and 0xff) == 0xff && (audioBytes[1].toInt() and 0xe0) == 0xe0
+        val hex = audioBytes.take(8).joinToString("") { b -> "%02x".format(b) }
+        println("[REAL] Jamendo REAL_AUDIO_RESPONSE: HTTP $audioCode $headerInfo hex=$hex id3=$id3 frameSync=$frameSync")
+        assertTrue(audioCode in 200..299, "音频 Range 请求应 2xx: HTTP $audioCode")
+        assertTrue(ctOk, "音频 Content-Type 应为 audio/* 或 octet-stream: $headerInfo")
+        assertTrue(id3 || frameSync, "音频字节应为 ID3/MP3 容器魔数（排除 HTML 错误页）")
+
+        // ---- REAL_TRACK_IDENTITY_VERIFIED：搜索 id 与音频 URL 的 trackid 参数一致 ----
+        // audio URL 形如 ...?trackid=<id>&format=mp32...，比对确认这段音频属于搜索到的曲目。
+        val trackIdInAudio = Regex("[?&]trackid=([^&]+)").find(track.audioUrl)?.groupValues?.get(1)
+        assertEquals(track.id, trackIdInAudio,
+            "音频 URL 的 trackid 必须与搜索曲目 id 一致，否则身份核验不通过")
+        println("[REAL] Jamendo REAL_TRACK_IDENTITY_VERIFIED: trackId=${track.id} 与音频 URL trackid 一致")
+    }
+
+    /**
+     * URL 时效重取验证（REAL_URL_RESOLVE）：trackById 重新取播放地址，
+     * 确认仍是同一 id/身份。仅在 opt-in 开启时执行。
+     */
+    @Test
+    fun `verification real jamendo track by id re-resolves same identity`() {
+        if (!enabled) {
+            println("SKIP Jamendo URL 重取验证：设置 FUOE_REAL_VERIFY=1 启用")
+            return
+        }
+        // 先用搜索拿一个真实 id（同样允许有限重试应对偶发空结果）。
+        var first = parser.parseSearch("{}").tracks.firstOrNull()
+        for (attempt in 1..3) {
+            val (code, pair) = http(searchUrl("ambient", limit = 1))
+            assertEquals(200, code)
+            first = parser.parseSearch(pair.second.toString(Charsets.UTF_8)).tracks.firstOrNull()
+            if (first != null) break
+        }
+        assertTrue(first != null, "搜索应返回至少一条（3 次尝试）")
+        // trackById 用真实 HTTP 请求重新取。
+        val detailUrl = "${JamendoApiClient.DEFAULT_BASE_URL}/tracks/?client_id=$clientId" +
+            "&format=json&id=${first!!.id}&audioformat=mp32"
+        val (detailCode, detailPair) = http(detailUrl)
+        assertEquals(200, detailCode)
+        val reResolved = parser.parseSearch(detailPair.second.toString(Charsets.UTF_8)).tracks.firstOrNull()
+        assertTrue(reResolved != null, "trackById 应返回曲目（REAL_URL_RESOLVE）")
+        assertEquals(first.id, reResolved!!.id, "重取后 id 必须一致")
+        assertEquals(first.name, reResolved.name, "重取后曲名必须一致（身份核验）")
+        assertTrue(reResolved.audioUrl.startsWith("https://"), "重取后应仍给出有效播放地址")
+        println("[REAL] Jamendo REAL_URL_RESOLVE ok: id=${reResolved.id} name=${reResolved.name}")
+    }
+}

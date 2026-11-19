@@ -75,6 +75,13 @@ class SourceUpdateCoordinator(
                         "拒绝旧目录重放：本地已接受版本 ${index.catalogVersion}，收到 ${catalog.catalogVersion}",
                     )
                 }
+                // 索引损坏但从锚点恢复了版本：无法确定损坏前接受的确切内容，
+                // 因此要求目录版本严格大于锚点，等于锚点也拒绝（防止同版本旧目录回放）。
+                if (index.recoveredFromAnchor && catalog.catalogVersion <= index.catalogVersion) {
+                    return UpdateReport.Failed(
+                        "索引已从锚点恢复，拒绝不高于锚点版本的目录：锚点 ${index.catalogVersion}，收到 ${catalog.catalogVersion}",
+                    )
+                }
                 // 同版本内容变化：版本策略要求"内容变了必须提升 catalogVersion"。
                 // 首次安装（无已接受版本）不受此约束。
                 val catalogHash = load.catalogSha256

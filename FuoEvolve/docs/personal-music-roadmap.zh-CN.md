@@ -701,3 +701,80 @@ previousVersion+记 lastError+释放 runtime；无上一版本时 no-op 且不�
 **任务8 DNS/crypto**：本轮复核无新增缺口，维持上一轮结论——DNS 三层字符串层防护 + fail-closed，
 DNS rebinding 在 commonMain 未实现如实记录；crypto 仅 md5/buffer，AES/RSA/randomBytes 无已批准
 脚本依赖、桥接层明确抛错，不盲目补齐。
+
+### 10.6 第二轮审查修复：Timer 生命周期与索引损坏反重放（2026-11-19）
+
+用户按实际代码审查，指出上一轮提交说明"close 用 signal.cancel + 等待协程退出"与代码不符，
+以及反重放在索引损坏时存在缺口。本轮修复两项，其余审查项（真实验证测试语义、等级定义条数、
+搜索重复请求）如实记录为未处理，不擅自扩大范围。
+
+**P0 Timer 生命周期（`LxScriptRuntime.kt`）**：
+- 审查属实：旧 `close()` 用 `timerScope.cancel()` + `tryLock()` 拿不到就跳过清理，
+  且 `quickJs.close()` 紧随其后，没有等待宿主 timer Job 真正退出；
+  `load()` 中 session 在 evaluate 成功后才发布，存在 load/close、load/load 的覆盖窗口。
+- 修复：
+  1. 新增 `lifecycleMutex`，`load()` 与 `close()` 全程持锁串行，消除两个覆盖窗口；
+  2. `RuntimeSession` 新增 `timerJobs: MutableSet<Job>`，`__lxDelay` 的等待 Job 登记其中，
+     session 真正持有全部宿主 Job（此前只有 signal）；
+  3. `close()` 改为 suspend（去掉 AutoCloseable——所有调用方都已在协程上下文），
+     顺序固定为：置 closed 门闩 → cancel 所有 signal → cancel timerScope →
+     `joinAll(timerJobs)` 等待全部 Job 退出 → 最后 `quickJs.close()`；
+  4. 更新类头/方法注释与实现一致，不再声称"等待协程退出"却没做。
+- `LxTimerTest` 新增 4 项真实竞态测试（共 17 项）：timer 活动期直接 close 并 join（不再先
+  `pump.await()` 等自然结束）、两个协程同时 close、并发 load/load 只留一个存活 session、
+  close 与 load 竞态不留未关闭 session。
+
+**P1 索引损坏反重放（`SourceVersionStore.kt` / `SourceUpdateCoordinator.kt`）**：
+- 审查属实：旧 `loadIndex()` 解析失败时 `getOrElse { SourceIndex() }` 静默回退默认索引，
+  被判首次安装，丢失 catalogVersion/acceptedCatalogSha256 锚点，可接收旧的签名目录。
+- 修复：
+  1. 新增独立锚点 `sources/anchor.json`（`SOURCE_ANCHOR_PATH`，仅存版本+内容哈希），
+     `saveIndex()` 在版本>0 或有哈希时同步写入；
+  2. `loadIndex()` 严格区分三种状态：索引与锚点都不存在才是真正首次安装；索引存在但损坏
+     或索引缺失但锚点存在时，从锚点恢复并置 `recoveredFromAnchor=true`；锚点也损坏时保守
+     标记异常态、版本取 0，但**绝不**判首次安装；
+  3. `SourceIndex.isFirstInstall` 排除 `recoveredFromAnchor`；
+  4. Coordinator 在恢复态下拒绝版本不高于锚点的目录（旧版本/同版本都拒），只有严格更新的
+     版本能通过并重新锚定。
+- 新增 `CatalogIndexCorruptionTest` 8 项（首次安装/锚点写入/索引损坏恢复/索引缺失恢复/
+  拒绝旧目录/拒绝同版本/接受更高版本重锚/索引与锚点皆损坏）。
+- **明确未封住的边界**：若锚点文件与索引同时损坏或被清除（如卸载重装、数据清除、无备份的
+  恢复），本地没有任何可信版本锚点，只能重新接受当前合法目录并重新锚定；这是"本地状态
+  全部丢失"场景的固有限制，无法在客户端单方面封住，需服务端配合（下发单调版本并要求
+  客户端回传当前版本）才能进一步收紧。
+
+**验证**：sourceupdate 95 项、lxruntime 全量 desktop 测试通过（含新增 12 项），
+androidHost/iOS/desktopApp/APK 见本轮提交说明。
+
+### 10.7 真实验证阶梯修正与独立公开曲库端到端验证（2026-11-19）
+
+用户采纳"独立解析器"方向，并要求修正审查指出的真实验证测试语义问题。本轮两项：
+
+**A. 修正真实验证阶梯（`RealInterfaceVerificationTest.kt`）**：
+审查属实：`if (step.ok) { assert... }` 在真实搜索失败时不失败；`audioLike` 用 `len > 0`
+会把 HTML 错误页当音频；只做 HEAD 不证明 GET 能拿音频；阶梯只有 9 级，与 candidates.json
+的 10 级定义不一致。修复：
+- 测试分两类：`network probe`（仅记录，失败不 gate）与 `verification`（`FUOE_REAL_VERIFY=1`
+  时 `assertTrue(step.ok)`，绿色必然代表真实成功）。
+- `REAL_AUDIO_RESPONSE` 改用 Range GET 取 16B，严格校验 2xx + Content-Type 为 audio/* 或
+  octet-stream + 字节以 ID3("ID3")/MP3 帧同步开头；删除 `len > 0` 判定。
+- 音频验证需显式 `FUOE_REAL_AUDIO_URL`，未配置就 SKIP，不伪造通过。
+- 阶梯修正为 10 级（含 NOT_OBTAINED），与 candidates.json.testLevelDefinitions 一致，
+  并断言"只有搜索证据不得越级到音频/身份"。
+
+**B. 独立公开曲库端到端验证（Jamendo）**：
+选择 Jamendo 而非大陆真机：它是 CC 授权开放曲库、API 有公开文档，无商业平台授权风险。
+- 模型与解析补 `licenseCcUrl`（授权元数据，API 字段 `license_ccurl`），端到端验证其非空。
+- 新增 opt-in `JamendoEndToEndTest`（desktopTest），用真实 HTTP（经代理）+ 生产解析逻辑，
+  实际执行（`FUOE_REAL_VERIFY=1 LX_VERIFY_PROXY=...`）证据：
+  - `REAL_SEARCH`: id=1348699 / "Planet Bubus" / Alexander Morozov / 541s / 共 3 条
+  - 授权元数据: `http://creativecommons.org/licenses/by-nc-nd/3.0/`
+  - `REAL_AUDIO_RESPONSE`: HTTP 206 / audio/mpeg / Content-Range 0-15/11572736 / ID3 魔数 49443304
+  - `REAL_TRACK_IDENTITY_VERIFIED`: 音频 URL 的 trackid 与搜索 id 一致
+  - `REAL_URL_RESOLVE`: trackById 重取后 id/曲名一致
+- 合规：音频仅 Range 取 16B，未下载完整音乐；允许 3 次重试应对 Jamendo 偶发空结果。
+- 这是**一等公民 Provider 的真实链路验证**，不改变 candidates.json（13 份 LX 第三方脚本
+  仍 autoInstall=false、source-catalog.json 仍空数组）。
+
+**验证**：lxruntime desktopTest（含修正的 5 项阶梯测试）、jamendo desktopTest（2 项端到端
+opt-in 实跑通过）、全模块回归见本轮提交说明。

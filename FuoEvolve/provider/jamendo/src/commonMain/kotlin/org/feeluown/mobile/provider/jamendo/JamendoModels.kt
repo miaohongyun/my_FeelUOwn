@@ -16,6 +16,11 @@ data class JamendoTrack(
     val downloadUrl: String,
     val imageUrl: String,
     val shareUrl: String,
+    /**
+     * 授权元数据：Jamendo 返回的 CC 许可 URL（如 creativecommons.org/licenses/by-nc-nd/3.0）。
+     * 用于端到端验证"这是开放授权曲库、可合法播放"，为空时不声称已确认授权。
+     */
+    val licenseCcUrl: String = "",
 )
 
 data class JamendoSearchResult(

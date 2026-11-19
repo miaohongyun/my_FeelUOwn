@@ -1,7 +1,11 @@
 package org.feeluown.mobile.sourceupdate
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.json.Json
+
+/** 独立于 index.json 的反重放锚点备份；主索引损坏时用它恢复版本下限。 */
+const val SOURCE_ANCHOR_PATH = "sources/anchor.json"
 
 /**
  * 安装状态与版本仓库。
@@ -73,16 +77,38 @@ data class SourceIndex(
     val sources: Map<String, InstalledSource> = emptyMap(),
     /** 已接受目录原始字节的 SHA-256：同版本内容变化必须拒绝（内容变了应提升 catalogVersion）。 */
     val acceptedCatalogSha256: String? = null,
+    /**
+     * 主索引缺失/损坏、但反重放锚点仍存在时为 true（运行时标记，不持久化）。
+     *
+     * 这类状态**不是首次安装**：锚点保留了曾接受过的最高 catalogVersion，必须继续强制执行
+     * 单调性，否则损坏的索引会被当成首次安装而接受旧目录，形成反重放缺口。
+     */
+    @Transient
+    val recoveredFromAnchor: Boolean = false,
 ) {
     /**
-     * 是否为"首次安装"：既没有接受过任何目录版本，也没有已装脚本。
+     * 是否为"首次安装"：既没有接受过任何目录版本，也没有已装脚本，且不是从锚点恢复的。
      *
-     * 应用重装 / 数据恢复后索引回到默认值，会被判为首次安装，从而允许接受当前合法目录；
-     * 这是明确的版本恢复规则（无法从丢失的本地状态恢复旧版本号，只能重新锚定）。
+     * 只有主索引与锚点都不存在（真正的应用重装 / 数据清除）才判为首次安装，从而允许接受
+     * 当前合法目录并重新锚定。索引损坏但从锚点恢复了版本时，[recoveredFromAnchor] 为 true，
+     * 不会被误判首次安装。
      */
     val isFirstInstall: Boolean
-        get() = catalogVersion == 0L && acceptedCatalogSha256 == null && sources.isEmpty()
+        get() = !recoveredFromAnchor &&
+            catalogVersion == 0L && acceptedCatalogSha256 == null && sources.isEmpty()
 }
+
+/**
+ * 独立的反重放锚点，单独存放在 [SOURCE_ANCHOR_PATH]。
+ *
+ * 只含"最高已接受目录版本 + 其内容哈希"两个字段，体积极小、写入频率低，因此比完整的
+ * index.json 更难损坏。主索引损坏时用它恢复锚点，避免把损坏误判为首次安装。
+ */
+@Serializable
+data class SourceAnchor(
+    val catalogVersion: Long = 0,
+    val acceptedCatalogSha256: String? = null,
+)
 
 class SourceVersionStore(
     private val files: SourceFileStore,
@@ -93,14 +119,49 @@ class SourceVersionStore(
     },
 ) {
 
+    /**
+     * 读取版本索引，并守住反重放锚点的恢复边界：
+     * - 主索引不存在且锚点也不存在 → 真正首次安装，返回默认 [SourceIndex]。
+     * - 主索引存在但解析失败，或主索引不存在但锚点存在 → 从独立锚点恢复版本号与内容哈希，
+     *   并置 [SourceIndex.recoveredFromAnchor]；**绝不**静默回退默认索引（那会被判首次安装，
+     *   从而允许旧目录回放）。
+     *
+     * 无法从锚点恢复时（锚点本身也损坏/不存在）只能在默认索引上置 recoveredFromAnchor，
+     * 让上层至少知道状态异常；此时没有可信版本号，属于无法完全封住的恢复边界，见文档。
+     */
     suspend fun loadIndex(): SourceIndex {
-        val raw = files.readText(INDEX_PATH) ?: return SourceIndex()
-        return runCatching { json.decodeFromString(SourceIndex.serializer(), raw) }
-            .getOrElse { SourceIndex() }
+        val raw = files.readText(INDEX_PATH)
+        if (raw != null) {
+            val parsed = runCatching { json.decodeFromString(SourceIndex.serializer(), raw) }.getOrNull()
+            if (parsed != null) return parsed
+        }
+        // 主索引缺失（raw == null）或损坏（解析失败）——两种情况都不能当首次安装。
+        val anchor = loadAnchor()
+        return if (anchor != null) {
+            SourceIndex(
+                catalogVersion = anchor.catalogVersion,
+                acceptedCatalogSha256 = anchor.acceptedCatalogSha256,
+                recoveredFromAnchor = true,
+            )
+        } else {
+            SourceIndex(recoveredFromAnchor = raw != null)
+        }
     }
 
     suspend fun saveIndex(index: SourceIndex) {
         files.writeText(INDEX_PATH, json.encodeToString(SourceIndex.serializer(), index))
+        // 只要曾经接受过目录版本或内容哈希，就同步维护独立锚点。锚点不随 etag/检查时间
+        // 等易变字段更新，只有反重放相关的两个字段会被写入，损坏概率显著低于主索引。
+        if (index.catalogVersion > 0 || index.acceptedCatalogSha256 != null) {
+            val anchor = SourceAnchor(index.catalogVersion, index.acceptedCatalogSha256)
+            files.writeText(SOURCE_ANCHOR_PATH, json.encodeToString(SourceAnchor.serializer(), anchor))
+        }
+    }
+
+    /** 读取独立锚点；损坏时返回 null（此时没有可信版本锚点，如实降级）。 */
+    private suspend fun loadAnchor(): SourceAnchor? {
+        val raw = files.readText(SOURCE_ANCHOR_PATH) ?: return null
+        return runCatching { json.decodeFromString(SourceAnchor.serializer(), raw) }.getOrNull()
     }
 
     suspend fun readActiveScript(scriptId: String): String? {

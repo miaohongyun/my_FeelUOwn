@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpStatusCode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -439,6 +440,107 @@ class LxTimerTest {
         assertTrue(runtime.sessionSnapshots().all { it.closed && it.activeTimers == 0 })
         assertFailsWith<IllegalStateException> { resolvedUrl(runtime) }
         pump.cancelAndJoin()
+    }
+
+    /**
+     * 审查 P0 缺口：原 armThenCloseAndVerify 先 pump.await() 等 timer 自然结束才 close，
+     * 只证明"正常完成后的清理"。这里在 driver timer 尚未 resolve、宿主 timer Job 仍活跃时
+     * 直接 close，验证 close 会主动取消并 join 所有 timer Job，而不是依赖它们自然退出。
+     */
+    @Test
+    fun `close while request timers still active joins every host job`() = runTest {
+        val counted = CountedClient()
+        val runtime = runtime(counted)
+        lateinit var pump: Deferred<Result<String>>
+        try {
+            // driver=60000ms：evaluate 期间 request Promise 不会 resolve，timer 一直留在表里。
+            runtime.load("active.js", lifecycleScript("handler", 4, probeMs = 60000, driverMs = 60000), allowedHosts = setOf("api.example.com"))
+            runtime.initialize()
+            pump = async(Dispatchers.Default) { runCatching { resolvedUrl(runtime) } }
+            waitReal(170)
+            // close 前：5 个宿主 timer Job 全部活跃（4 probe + 1 driver）。
+            assertEquals(5, runtime.activeTimerCount(), "close 前应有 5 个活跃 timer")
+            assertTrue(pump.isActive, "pump 仍在进行（driver 未到期）")
+
+            // 在 timer 活动期直接 close；close 必须自行取消+join，不能挂起。
+            val closeResult = withContext(Dispatchers.Default) {
+                runCatching { kotlinx.coroutines.withTimeout(5000) { runtime.close() } }
+            }
+            assertTrue(closeResult.isSuccess, "timer 活动时 close 应在 5s 内返回: ${closeResult.exceptionOrNull()}")
+
+            // close 返回即意味着所有宿主 Job 已 join 完毕，无需再 waitReal 等异步清理。
+            assertEquals(0, runtime.activeTimerCount(), "close 返回后 timer 表必须已归零")
+            val snaps = runtime.sessionSnapshots()
+            assertTrue(snaps.isNotEmpty() && snaps.all { it.closed && it.activeTimers == 0 },
+                "所有 session 必须 closed 且 timer 归零: $snaps")
+            assertFalse(pump.isActive, "close join 后请求协程不得仍在运行")
+        } finally {
+            pump.cancelAndJoin()
+            runtime.close()
+        }
+    }
+
+    /** 审查 P0：两个协程同时 close 同一 Runtime，都要幂等返回且状态一致。 */
+    @Test
+    fun `two concurrent close calls are idempotent and both join`() = runTest {
+        val counted = CountedClient()
+        val runtime = runtime(counted)
+        runtime.load("cc.js", lifecycleScript("handler", 2, probeMs = 60000, driverMs = 60000), allowedHosts = setOf("api.example.com"))
+        runtime.initialize()
+        val pump = async(Dispatchers.Default) { runCatching { resolvedUrl(runtime) } }
+        waitReal(150)
+        try {
+            val c1 = async(Dispatchers.Default) { runCatching { runtime.close() } }
+            val c2 = async(Dispatchers.Default) { runCatching { runtime.close() } }
+            assertTrue(c1.await().isSuccess && c2.await().isSuccess, "两个并发 close 都应成功返回")
+            assertEquals(0, runtime.activeTimerCount())
+            assertTrue(runtime.sessionSnapshots().all { it.closed && it.activeTimers == 0 })
+        } finally {
+            pump.cancelAndJoin()
+            runtime.close()
+        }
+    }
+
+    /** 审查 P0：并发 load/load 不得留下未关闭的 session（旧 session 必须被可靠关闭）。 */
+    @Test
+    fun `concurrent loads leave exactly one live session and close the other`() = runTest {
+        val counted = CountedClient()
+        val runtime = runtime(counted)
+        try {
+            val l1 = async(Dispatchers.Default) { runCatching { runtime.load("a.js", lifecycleScript("handler", 1, 60000, 60000), allowedHosts = setOf("api.example.com")) } }
+            val l2 = async(Dispatchers.Default) { runCatching { runtime.load("b.js", lifecycleScript("handler", 1, 60000, 60000), allowedHosts = setOf("api.example.com")) } }
+            assertTrue(l1.await().isSuccess && l2.await().isSuccess, "两个 load 都应成功")
+            // 两个 session 都创建过；因 lifecycleMutex 串行，先建的那个必已被关闭。
+            val snaps = runtime.sessionSnapshots()
+            assertEquals(2, snaps.size, "应记录两次 load 的 session")
+            assertEquals(1, snaps.count { !it.closed }, "并发 load 后应恰好只有 1 个存活 session")
+            assertTrue(runtime.isLoaded, "最终应有一个可用 session")
+        } finally {
+            runtime.close()
+        }
+    }
+
+    /** 审查 P0：load 进行中并发 close，不得出现"close 只看到旧 session、load 后又发布新 session"的漏关。 */
+    @Test
+    fun `close racing with load never leaves an unclosed session`() = runTest {
+        val counted = CountedClient()
+        val runtime = runtime(counted)
+        // 先放一个已加载的旧 session，确保 close 有东西可关。
+        runtime.load("old.js", lifecycleScript("handler", 1, 60000, 60000), allowedHosts = setOf("api.example.com"))
+        runtime.initialize()
+        val ld = async(Dispatchers.Default) { runCatching { runtime.load("race.js", lifecycleScript("handler", 1, 60000, 60000), allowedHosts = setOf("api.example.com")) } }
+        val cl = async(Dispatchers.Default) { runCatching { runtime.close() } }
+        val lr = ld.await(); val cr = cl.await()
+        // 两种执行顺序都合法：close 先（关旧 session，随后 load 建一个新的），
+        // 或 load 先（建新 session 关旧的，随后 close 关掉新的）。
+        // 无论如何，串行化保证不得出现两个存活 session，也不得有 timer 残留。
+        assertTrue(lr.isSuccess || lr.exceptionOrNull() is CancellationException, "load 结果应成功或被取消: ${lr.exceptionOrNull()}")
+        assertTrue(cr.isSuccess, "close 应成功返回: ${cr.exceptionOrNull()}")
+        val snaps = runtime.sessionSnapshots()
+        assertTrue(snaps.count { !it.closed } <= 1, "竞态结束后至多 1 个存活 session: $snaps")
+        assertTrue(snaps.all { it.activeTimers == 0 }, "竞态结束后不得有 timer 残留: $snaps")
+        runtime.close()
+        assertTrue(runtime.sessionSnapshots().all { it.closed }, "最终 close 后所有 session 应关闭")
     }
 
     @Test

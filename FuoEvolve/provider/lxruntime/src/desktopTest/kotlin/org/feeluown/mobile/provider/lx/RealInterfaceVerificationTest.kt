@@ -16,13 +16,18 @@ import kotlin.test.assertTrue
  * 也会把"网络抖动"误记为功能缺陷。设 `FUOE_REAL_VERIFY=1` 才执行；需要代理时设
  * `LX_VERIFY_PROXY=http://host:port`（本机经 127.0.0.1:7897 验证过）。
  *
- * 等级（与 config/source-catalog/candidates.json 的 testLevelDefinitions 一致，单调）：
- * STATIC_ONLY < RUNTIME_LOAD < SIMULATED_INIT < SIMULATED_URL_RESOLVE
+ * ## 两级测试语义（修正审查指出的"step.ok=false 测试仍绿"）
+ * - `network probe`（可跳过/仅记录）：默认关闭时打印 SKIP；开启后即便端点失效也只记录，
+ *   用于观察真实网络状态，**不**作为功能通过的依据。
+ * - `verification`（必须成功）：`FUOE_REAL_VERIFY=1` 时若达不到声称的等级就 assertTrue 失败；
+ *   默认关闭时 return（跳过）。这样"测试绿色"在 opt-in 模式下**必然**意味着真实成功。
+ *
+ * 等级（与 config/source-catalog/candidates.json 的 testLevelDefinitions 一致，单调，10 级）：
+ * NOT_OBTAINED < STATIC_ONLY < RUNTIME_LOAD < SIMULATED_INIT < SIMULATED_URL_RESOLVE
  *   < REAL_INIT < REAL_SEARCH < REAL_URL_RESOLVE < REAL_AUDIO_RESPONSE < REAL_TRACK_IDENTITY_VERIFIED
  *
- * 合规边界：只用公开搜索/元数据接口；音频响应用 HEAD 探测 Content-Type/长度，
- * **不下载完整商业音乐**，因此本测试即使达到 REAL_AUDIO_RESPONSE 也不做完整音频指纹比对，
- * 歌曲身份仅以"公开元数据字段一致"为据，不冒充 REAL_TRACK_IDENTITY_VERIFIED。
+ * 合规边界：只用公开搜索/元数据接口；音频响应用 Range 取极短字节（如 16B）验证 Content-Type
+ * 与容器魔数，**不下载完整商业音乐**；歌曲身份以公开元数据字段一致为据，不冒充声学指纹比对。
  */
 class RealInterfaceVerificationTest {
 
@@ -70,65 +75,113 @@ class RealInterfaceVerificationTest {
         }
     }
 
-    /** 真实音频响应：仅 HEAD 探测 content-type/长度，不下载音频正文。 */
-    private fun realAudioHeaders(url: String): Step {
+    /**
+     * 真实音频响应：Range GET 取前 N 字节，严格验证 Content-Type 与容器魔数。
+     * 修正审查指出的两个问题：不再用 `len > 0`（HTML 错误页也可能有正长度），
+     * 也不只做 HEAD（HEAD 不能证明 GET 拿得到音频字节）。
+     *
+     * 达到 REAL_AUDIO_RESPONSE 的充分条件：2xx/206 + Content-Type 以 audio/ 开头或
+     * application/octet-stream + 响应字节以 ID3（MP3 标签）或 MP3 帧同步开头。
+     */
+    private fun realAudioRange(url: String, probeBytes: Int = 16): Step {
         return try {
             val conn = (if (proxy != null) URL(url).openConnection(proxy) else URL(url).openConnection())
                 as HttpURLConnection
-            conn.requestMethod = "HEAD"
+            conn.requestMethod = "GET"
             conn.connectTimeout = 15_000
             conn.readTimeout = 15_000
+            conn.setRequestProperty("Range", "bytes=0-${probeBytes - 1}")
             val code = conn.responseCode
             val ct = conn.contentType.orEmpty()
-            val len = conn.contentLength
+            val range = conn.getHeaderField("Content-Range")
+            val bytes = conn.inputStream.use { it.readNBytes(probeBytes) }
             conn.disconnect()
-            val audioLike = ct.startsWith("audio/", ignoreCase = true) ||
-                ct.contains("octet-stream", ignoreCase = true) || len > 0
+            val ctAudio = ct.startsWith("audio/", ignoreCase = true) ||
+                ct.equals("application/octet-stream", ignoreCase = true)
+            val mp3Magic = bytes.size >= 3 && bytes[0].toInt() == 0x49 && bytes[1].toInt() == 0x44 && bytes[2].toInt() == 0x33
+            val mp3Frame = bytes.size >= 2 &&
+                (bytes[0].toInt() and 0xff) == 0xff && (bytes[1].toInt() and 0xe0) == 0xe0
+            val audioBytes = mp3Magic || mp3Frame
+            val ok = code in 200..299 && ctAudio && audioBytes
+            val hex = bytes.take(8).joinToString("") { b -> "%02x".format(b) }
             Step(
                 "REAL_AUDIO_RESPONSE",
-                code in 200..299 && audioLike,
-                "HTTP $code content-type=$ct content-length=$len（仅 HEAD，未下载正文）",
+                ok,
+                "HTTP $code ct=$ct range=$range bytes=${bytes.size} hex=$hex" +
+                    " id3=$mp3Magic frameSync=$mp3Frame（Range ${probeBytes}B，未下载完整音频）",
             )
         } catch (e: Exception) {
             Step("REAL_AUDIO_RESPONSE", false, "异常：${e.message}")
         }
     }
 
+    /** 网络探测（仅记录）：默认 SKIP，开启后失败也不让测试失败。 */
     @Test
-    fun `real kg search reaches REAL_SEARCH on live public endpoint`() {
+    fun `network probe real kg search records status without gating CI`() {
         if (!enabled) {
-            println("SKIP 真实接口验证：设置 FUOE_REAL_VERIFY=1 启用（常规 CI 不打真实网络）")
+            println("SKIP 真实接口网络探测：设置 FUOE_REAL_VERIFY=1 启用")
+            return
+        }
+        val step = realKgSearch("晴天")
+        println("[PROBE] kg 搜索: ${step.level} ok=${step.ok} ${step.detail}")
+    }
+
+    /**
+     * 必须成功的验证测试：opt-in 开启时，真实搜索失败就让测试失败。
+     * 修正审查：原实现 `if (step.ok) { assert... }` 在 ok=false 时静默通过。
+     */
+    @Test
+    fun `verification real kg search succeeds when opted in`() {
+        if (!enabled) {
+            println("SKIP 真实搜索验证：设置 FUOE_REAL_VERIFY=1 启用")
             return
         }
         val step = realKgSearch("晴天")
         println("[REAL] kg 搜索: ${step.level} ok=${step.ok} ${step.detail}")
-        // 只断言"等级判定自洽"：若声称 REAL_SEARCH 成功，必须有真实首条数据。
-        if (step.ok) {
-            assertTrue("晴天" in step.detail && "周杰伦" in step.detail, "真实搜索成功应包含目标元数据")
+        assertTrue(step.ok, "opt-in 真实搜索必须成功，不得静默通过: ${step.detail}")
+        assertTrue("晴天" in step.detail && "周杰伦" in step.detail, "真实搜索应含目标元数据: ${step.detail}")
+    }
+
+    /**
+     * 必须成功的音频验证（若配置 URL）：用 Range 字节证据验证，不是 HEAD、不看 len>0。
+     * 未配置 FUOE_REAL_AUDIO_URL 时跳过（没有可公开访问的音频 URL 就不伪造通过）。
+     */
+    @Test
+    fun `verification real audio response needs range and magic evidence`() {
+        val audioUrl = System.getenv("FUOE_REAL_AUDIO_URL")
+        if (!enabled || audioUrl.isNullOrBlank()) {
+            println("SKIP 真实音频验证：需 FUOE_REAL_VERIFY=1 且 FUOE_REAL_AUDIO_URL=<公开音频URL>")
+            return
         }
+        val step = realAudioRange(audioUrl)
+        println("[REAL] 音频 Range: ${step.level} ok=${step.ok} ${step.detail}")
+        assertTrue(step.ok, "opt-in 真实音频必须有 2xx+audio/*+容器魔数证据: ${step.detail}")
     }
 
     @Test
     fun `real chain ladder never outruns evidence`() {
-        // 这条测试不依赖网络也成立：验证等级阶梯的"不得越级"约束被代码遵守。
-        // 即便真实搜索成功，也只能到 REAL_SEARCH；音频未做 HEAD 就不能记 REAL_AUDIO_RESPONSE，
-        // 未做身份比对就不能记 REAL_TRACK_IDENTITY_VERIFIED。
+        // 不依赖网络：验证等级阶梯与 candidates.json 的权威定义一致（10 级，含 NOT_OBTAINED），
+        // 且不得越级——真实搜索成功也不能自动记 REAL_AUDIO_RESPONSE 或 TRACK_IDENTITY。
         val ladder = listOf(
-            "STATIC_ONLY", "RUNTIME_LOAD", "SIMULATED_INIT", "SIMULATED_URL_RESOLVE",
+            "NOT_OBTAINED", "STATIC_ONLY", "RUNTIME_LOAD", "SIMULATED_INIT", "SIMULATED_URL_RESOLVE",
             "REAL_INIT", "REAL_SEARCH", "REAL_URL_RESOLVE", "REAL_AUDIO_RESPONSE",
             "REAL_TRACK_IDENTITY_VERIFIED",
         )
-        assertEquals(9, ladder.size)
-        assertEquals("REAL_SEARCH", ladder[5])
+        assertEquals(10, ladder.size, "必须与 candidates.json.testLevelDefinitions 同为 10 级")
+        assertEquals("REAL_SEARCH", ladder[6])
         assertEquals("REAL_TRACK_IDENTITY_VERIFIED", ladder.last())
-        println("[REAL] 阶梯定义校验通过：9 级单调，最高 REAL_TRACK_IDENTITY_VERIFIED")
+        // 反例：只有搜索证据时，能达到的最高等级就是 REAL_SEARCH，不得越级到音频/身份。
+        val searchOnlyEvidence = "REAL_SEARCH"
+        assertEquals(6, ladder.indexOf(searchOnlyEvidence))
+        assertTrue(ladder.indexOf("REAL_AUDIO_RESPONSE") > ladder.indexOf(searchOnlyEvidence),
+            "音频等级必须严于搜索等级，不得越级")
+        println("[REAL] 阶梯定义校验通过：10 级单调，最高 REAL_TRACK_IDENTITY_VERIFIED")
     }
 
     @Test
     fun `candidate scripts with dead endpoints are not promoted`() {
-        // 取证结论固化：上一轮 + 本轮真实 DNS/HTTP 探测显示 Huibq=503(被所有者暂停)、
+        // 取证结论固化：上一轮真实 DNS/HTTP 探测显示 Huibq=503(被所有者暂停)、
         // ikun/野花/野草=NXDOMAIN、裸 IP 经代理不可达、肥猫/独家公开 /url/ 路径 404。
-        // 这些脚本不得因为"本地能加载"就被记成 REAL_*；用静态断言锁住这个审核结论。
         val deadEndpoints = mapOf(
             "huibq" to "SERVICE_SUSPENDED_503",
             "ikun" to "NXDOMAIN",

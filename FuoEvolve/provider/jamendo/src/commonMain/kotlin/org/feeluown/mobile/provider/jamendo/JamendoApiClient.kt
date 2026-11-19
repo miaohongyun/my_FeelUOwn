@@ -86,6 +86,7 @@ class JamendoApiClient(
                 downloadUrl = item.text("audiodownload"),
                 imageUrl = item.text("image"),
                 shareUrl = item.text("shareurl"),
+                licenseCcUrl = item.text("license_ccurl"),
             )
         }
     }
