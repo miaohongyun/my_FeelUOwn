@@ -5,3 +5,9 @@
 config/source-catalog/*.json -text
 config/source-catalog/*.json.sig -text
 config/source-catalog/*.schema.json -text
+
+# 第三方脚本按原始字节存证：SHA-256 是对下载时的字节计算的，
+# 任何换行转换都会让"记录哈希"与"实际文件"不符，破坏可复核性。
+config/source-catalog/third-party-raw/*.js -text
+provider/lxruntime/src/desktopTest/resources/third-party/*.js -text
+provider/lxruntime/src/androidHostTest/resources/third-party/*.js -text

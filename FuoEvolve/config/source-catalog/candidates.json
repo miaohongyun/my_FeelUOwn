@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-18T00:00:00Z",
-  "note": "本文件只用于人工审核记录，客户端不会读取，也不会安装其中任何条目。审核结论变化时只改这里，不改 source-catalog.json。",
+  "generatedAt": "2026-11-19T00:00:00Z",
+  "note": "本文件只用于人工审核记录，客户端不会读取，也不会安装其中任何条目。审核结论变化时只改这里，不改 source-catalog.json。所有新条目均为 autoInstall=false，且无 APPROVED：模拟测试通过不等于真实音源验证通过。",
   "candidates": [
     {
       "id": "gd-studio",
@@ -74,6 +74,219 @@
       "reviewStatus": "REJECT_PUBLIC_DISTRIBUTION",
       "autoInstall": false,
       "reason": "上游明确提示文件内嵌卡密，不得公开重新分发"
+    },
+    {
+      "id": "huibq",
+      "name": "Huibq_lxmusic源",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "huibq.js",
+      "version": "v1.2.0",
+      "sha256": "4e11dde4bef04654ca1ef1287759ee90aa0455d51aed4b4e8cee0753c0d1a5c9",
+      "platforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "单一公开 API + 公开 key；模拟解析 ID 一致；无真实网络验证"
+    },
+    {
+      "id": "feimao",
+      "name": "肥猫不肥",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "肥猫不肥.js",
+      "version": "unknown",
+      "sha256": "5755672cebf555f379238082fd3746f423d6fca0bffe3f747baa65c24e9ddb25",
+      "platforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "公开占位 key；需 console；模拟解析通过"
+    },
+    {
+      "id": "yahua",
+      "name": "野花音源",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "野花音源.js",
+      "version": "1.0.0",
+      "sha256": "4f677c4c655ffe353116db8921fd8b14aa06bb6c94787f317863ec33a637e2c4",
+      "platforms": [
+        "kw",
+        "wy",
+        "mg",
+        "tx",
+        "kg"
+      ],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "混淆脚本，执行期域名 flower.tempmusics.tk；模拟解析通过"
+    },
+    {
+      "id": "yecao",
+      "name": "野草音源",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "野草音源.js",
+      "version": "1.0.0",
+      "sha256": "dfbba18d9e949a9fcfc74e4ca8a8be64ae7105524110314ed29159372307ce3f",
+      "platforms": [
+        "kw"
+      ],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "混淆脚本，执行期域名 grass.tempmusics.tk；模拟解析通过"
+    },
+    {
+      "id": "zhizun",
+      "name": "至尊源",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "zhizun.js",
+      "version": "v0.8.4_beta5",
+      "sha256": "ddc095aca3dc4df5a00ea6df3b84a31d17c1055fad3e1ee09edd6308ccc17210",
+      "platforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "裸 IP 110.42.36.53:1314；空 key；模拟解析通过"
+    },
+    {
+      "id": "zicheng2",
+      "name": "梓澄公益音源二代",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "梓澄公益音源二代v1.2.3.4.5.js",
+      "version": "1.2.3.4.5",
+      "sha256": "80b7b7b1882d572221ade7e1acf4dd452207ee36e245aca6d31defec78ad3269",
+      "platforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "裸 IP 103.239.247.51:9763；公开占位 key；模拟解析通过"
+    },
+    {
+      "id": "juhe_lerd_v3",
+      "name": "聚合API接口(by lerd)",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "聚合API V3(by lerd).js",
+      "version": "3",
+      "sha256": "f0c56c0b274403a4b2f7fe4fe919bc0bd72e469587117a64f448ee23737e9de2",
+      "platforms": [],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "init 需真实 API code=200，模拟环境无法过初始化"
+    },
+    {
+      "id": "ikun",
+      "name": "ikun音源",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "ikun_latest.js",
+      "version": "v515",
+      "sha256": "4062659f76981a42b0d6309ef09488660931cd14edd5acda147f5aa5d765539c",
+      "platforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "公开分享 key；成功码 200；需 console；模拟解析通过"
+    },
+    {
+      "id": "dujia_v4",
+      "name": "[独家音源]",
+      "repository": "ejungd/music",
+      "path": "[独家音源] v4.0.js",
+      "version": "4",
+      "sha256": "243415bed434b9e0d3562d724acc16b1d0703d7ee161a943b8ad0b9b1413f550",
+      "platforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "114KB；需 md5+console 自检；域名 punycode；模拟解析通过"
+    },
+    {
+      "id": "wuming",
+      "name": "無名",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "無名v0.0.3.js",
+      "version": "v0.0.3",
+      "sha256": "e881c26f25357aba1f8607f27bec566538a886910a9daf21455975a63ae419b9",
+      "platforms": [],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "crypto aes/rsa 未实现 + name/description 防篡改自检未过"
+    },
+    {
+      "id": "gongzhonghao2",
+      "name": "微信公众号：洛雪音乐",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "公众号音源2.js",
+      "version": "2",
+      "sha256": "866893ce8b37fd4a92f374c4b5d0f7781e6e6658e74b6a3fb0ec6c3ff9f30318",
+      "platforms": [],
+      "reviewStatus": "NEEDS_REVIEW",
+      "autoInstall": false,
+      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
+      "reason": "md5 自检后 init 超时（5s），需更长超时复测"
+    },
+    {
+      "id": "liuyin",
+      "name": "六音音源",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "sixyin1.2.1.js",
+      "version": "v1.2.1",
+      "sha256": "ea522bf3a5dd6febb6302d5a1ff1db63748348310a8e6828bf9cac69673c2cff",
+      "platforms": [],
+      "reviewStatus": "REJECT_AUTO_CATALOG",
+      "autoInstall": false,
+      "testLevel": "STATIC_ONLY",
+      "reason": "333KB 重度混淆 + new Function 动态执行 + 需真实 API"
+    },
+    {
+      "id": "xiaoxiongmao",
+      "name": "小熊猫音源",
+      "repository": "xzh767/lxmusic-source-all",
+      "path": "小熊猫v1.1.1.js",
+      "version": "v1.1.1",
+      "sha256": "233f39d327ca9595ef7f9d48964f59ef5c11d7ce3f7ed01042c7ce497add9cb7",
+      "platforms": [],
+      "reviewStatus": "QUARANTINE_API_REVIEW",
+      "autoInstall": false,
+      "testLevel": "STATIC_ONLY",
+      "reason": "updateUrl=xxx.com 且从 jsdelivr/GitHub 远程加载第二段 JS"
     }
   ]
 }

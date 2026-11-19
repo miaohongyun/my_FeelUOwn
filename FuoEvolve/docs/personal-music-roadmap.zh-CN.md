@@ -376,6 +376,100 @@ App 内嵌 JS 引擎执行 LX Music 自定义音源脚本**技术可行，已在
 | 脚本缓存键只有 `version:source.length`，同长度改码不失效 | 改为 `id:version:SHA256(source)`；复用 `provider:sourceupdate` 的纯 Kotlin SHA-256 | `LxScriptProviderTest` |
 | 搜索结果把 songId 赋给 `songmid`/`hash`/`strMediaMid` 所有键 → 《晴天》可能解析成别的歌 | `LxSongHit` 增加 `rawFields` 保留平台原始字段，按 identifier 缓存后原样透传给脚本；缺失时才回退 songId | `resolvePassesPlatformRawFieldsToScript` / `endToEndSearchThenLxRequestResolvesMatchingSongIdentity` |
 
-另外补齐了官方要求的 `setTimeout`/`clearTimeout`：计时回调留在 QuickJS context 内执行，宿主的延时协程挂在专用 scope 上，`close()` 时整体取消（关闭后回调不再执行、不泄漏协程）。测试覆盖正常触发/延迟/清除/并发/关闭失效/重载重置（`LxTimerTest` 5 项）。
+另外补齐了官方要求的 `setTimeout`/`clearTimeout`：计时回调留在 QuickJS context 内执行，宿主的延时协程挂在专用 scope 上，`close()` 时整体取消（关闭后回调不再执行、不泄漏协程）。测试覆盖正常触发/延迟/Promise reject 回传/清除/并发/关闭失效/重载重置/重复加载不泄漏（`LxTimerTest` 7 项）。
+
+> **2026-11-19 复查追加**：首轮 `clearTimeout` 只删 JS 侧标记、不通知宿主，被清除的长 timer 协程会一直挂到 runtime 关闭（真实资源泄漏）。修复为 `__lxDelay(id, ms)` + `__lxCancelTimer(id)`：每个 timer 用 `CompletableDeferred` 作取消信号，`select { onAwait / onTimeout }` 等待，`clearTimeout` 完成对应信号即精确唤醒退出。测试用 `activeTimerCount()` 直接断言登记表归零（**不**用"脚本未加载抛异常"冒充取消）。另有一个重要时序事实：quickjs-kt 的 asyncFunction 从 JS 调用到 Kotlin lambda 登记有约 100ms 调度延迟，且只有当某个 await 点 pump 了 job queue 时才推进——测试脚本的 handler Promise 必须由 timer 回调 resolve 才能稳定观测到 pending timer，这是 quickjs-kt 的调度特性，不是产品缺陷。
 
 > **仍未证明的部分**：以上测试用的是符合官方协议结构的脚本 + MockEngine 真实响应结构，不是真实社区脚本（例如 LX 的酷狗/QQ 混淆脚本）跑真实网络。要验证真实脚本兼容性，需要把 1~2 个在用的 `.js` 文件接入做专项审查——这类脚本可能依赖尚未实现的 `crypto` 原语，属于"明确失败"而非"静默出错"。`DNS 解析结果检查`（防 DNS rebinding）跨端无法在 commonMain 用纯 Kotlin 实现，当前靠"域名白名单 + 逐跳重定向校验"约束，真机阶段需确认平台网络栈不会把白名单域名解析到内网。
+
+### 6.11 LX 官方移动端 API 兼容矩阵（逐项核实，不虚构）
+
+依据 LX Music 官方移动端自定义音源文档与 `LxBridge.kt` / `LxScriptRuntime.kt` 现有实现逐项核对。
+**"已实现"仅指协议映射存在且有自动化验证，不等于"真实社区脚本兼容"**（见下方风险）。
+
+| 官方 API | 本实现状态 | 验证方式 / 说明 |
+| --- | --- | --- |
+| `lx.env = 'mobile'` | 已实现 | shim 注入固定值 |
+| `lx.EVENT_NAMES`（inited/request/updateAlert） | 已实现 | `LxScriptRuntimeTest` 读 inited；shim 支持 updateAlert 记录 |
+| `lx.on(event, handler)` / `lx.send(event, data)` | 已实现 | 全部单测；注意 `inited` 是脚本主动 send，宿主只读 |
+| `lx.request(url, options, cb)`，回调 `(err, resp, body)` | 已实现 | shim 同时给 `resp.body` 与第三参 body；`LxScriptRuntimeTest` 走宿主 Ktor + MockEngine |
+| `lx.utils.buffer.from` / `bufToString`（base64/hex/utf8） | 已实现 | `buffer helpers support hex utf8 and base64` |
+| `lx.utils.crypto.md5` | **未实现** | 调用即抛 `LxScriptException`（明确失败，不返回错值） |
+| `lx.utils.crypto.randomBytes` | **未实现** | 同上 |
+| `lx.utils.crypto.aesEncrypt`（aes-128-cbc/ecb） | **未实现** | 同上 |
+| `lx.utils.crypto.rsaEncrypt` | **未实现** | 同上 |
+| `lx.utils.zlib.inflate` / `deflate` | **未实现** | 返回 rejected Promise；官方移动版本身也未实现 |
+| 宿主 `setTimeout` / `clearTimeout` | 已实现 | `LxTimerTest` 7 项；可取消、close 全释放 |
+| 宿主网络能力 | 已实现（受限） | 仅 http/https、非空白名单、私网/IPv6/非标准 IPv4 拦截、逐跳重定向校验 |
+
+**未验证 / 明确风险（无真实脚本时不能宣称兼容）**：
+
+1. **真实社区脚本本身**：仓库内所有测试脚本都是按官方协议结构手写的，没有任何一份来自社区的 `.js`。混淆脚本、依赖未实现 `crypto` 原语的脚本、`lx.request` 用法偏离官方签名的脚本，均**未验证**。
+2. **真实网络解析**：搜索/解析都用 MockEngine 返回结构，未打过酷我/酷狗/QQ 的真实接口；真实响应字段、加密参数、反爬策略均**未知**。
+3. **歌曲身份**：`endToEndSearchThenLxRequestResolvesMatchingSongIdentity` 验证的是"脚本自报 mid == 请求 mid"的闭环，依赖脚本如实核验；若真实脚本不核验身份，宿主层目前**不做**音频内容与点选曲目的二次比对。
+4. **宿主 QuickJS 差异**：quickjs-kt 1.0.15 的 ES 特性覆盖、模块加载语义与真实 LX 脚本预期可能有差异，需真实脚本验证。
+
+### 6.12 中国大陆网络适配与隐私审查（代码级核实）
+
+| 审查项 | 结论 | 依据 |
+| --- | --- | --- |
+| GitHub Raw 主地址 + 2 个公共镜像 | 已实现 | `SourceUpdateDefaults.CATALOG_URL` / `MIRROR_URLS`（ghproxy.net、gh-proxy.com） |
+| 超时 | 已实现 | 目录 15s（`KtorCatalogFetcher`）、脚本 10s 可配、搜索 8s、初始化 5s |
+| 重试与退避 | 已实现 | 连续失败 1/4/12/24h 指数退避 + 抖动（`SourceUpdatePolicy`） |
+| 镜像熔断 | 已实现 | 单镜像 2 次失败熔断 30 分钟，到期半开恢复（`SourceMirrorPolicy`） |
+| 失败不影响已装脚本 | 已实现 | 目录拉取失败只累加失败计数，保留 `index.sources` 与当前 active（`SourceUpdateCoordinator`；测试 `skipsWhenCheckedRecentlyAndBacksOffAfterFailure`） |
+| 单音源故障隔离 | 已实现 | 搜索用 `supervisorScope + async`，单 Provider 异常转成本源 `failure`，取消语义保留（`KotlinProviderRepository.searchAll`） |
+| 签名/哈希校验 | 已实现 | Ed25519 验目录原始字节 + SHA-256 验脚本；独立 `.sig`；缺签名按策略拒绝 |
+| 日志隐私 | **无泄漏路径** | sourceupdate / lxruntime / jamendo / source 目录零 `println`/`Log.*`；唯一涉及 cookie/token 的是静态扫描规则文本与注释，不打印请求头/Cookie/Token |
+| 无代理 / 代理不可用降级 | 部分实现 | 客户端侧按"主地址→镜像→上次缓存"自动切换，无用户代理开关；镜像 `gh-proxy.com` 实测直连超时，靠熔断跳过。**真机在不同网络环境（无代理/代理失效/网络中断）的降级表现未验证** |
+| DNS rebinding | **未实现** | 无法在 commonMain 纯 Kotlin 做 DNS 解析结果校验，靠域名白名单 + 逐跳重定向；需真机确认平台 DNS 不把白名单域名解析到内网 |
+
+> 本章为代码级静态核实 + 已有单测证据，不含真机结论。Android 真机与真实音源验证仍缺位，见 §6.11 风险清单。
+
+## 七、公开 LX 音源脚本审查与适配（2026-11-19）
+
+### 7.1 取证与原则
+
+从 `xzh767/lxmusic-source-all`、`ejungd/music` 下载 13 份真实社区脚本，原样保存在
+`config/source-catalog/third-party-raw/`（记录来源路径/版本/SHA-256，详见
+`config/source-catalog/THIRD_PARTY_REVIEW.zh-CN.md`）。**没有修改任何第三方脚本**。
+
+核心原则：社区仓库是"候选来源"，不是"可信来源"。已签名的 `source-catalog.json` **保持空数组不变**
+（私钥不入库，无法在无私钥环境重新签名）；审查结论写入客户端不读的 `candidates.json`，
+全部 `autoInstall=false`，没有任何 APPROVED。
+
+### 7.2 为兼容官方 API 补齐的宿主能力
+
+| 补充 | 说明 |
+| --- | --- |
+| `console` | no-op（丢弃全部日志），避免第三方脚本日志（可能含 token/URL）进入宿主日志，同时消除 `ReferenceError` |
+| `lx.utils.crypto.md5` | 官方移动端文档列出的原语；纯 Kotlin `Md5.kt`，标准向量由外部 hashlib 交叉验证 |
+
+未实现：`crypto.randomBytes/aesEncrypt/rsaEncrypt`、`zlib`。依赖者明确报错。
+
+### 7.3 实际验证结果（模拟，不是真实网络）
+
+用真实脚本文件 + MockEngine 按各脚本公开 API 契约返回，8 份完成"初始化 → 播放地址解析 →
+请求 ID 与返回 URL 内 ID 一致"：Huibq、肥猫不肥、野花、野草、至尊、梓澄二代、独家、ikun。
+desktop 与 androidHost 双端均通过（`ThirdPartyScriptCompatTest`，含网络错误上抛与 close 释放）。
+
+通过**执行**发现两个混淆脚本的真实域名（静态 grep 因字符串拆分看不到）：野花 `flower.tempmusics.tk`、
+野草 `grass.tempmusics.tk`——这印证了"运行时域名白名单"与"静态扫描"必须互补。
+
+未通过：聚合API(by lerd) 需真实 init 响应；無名依赖未实现的 aes/rsa 且有名称自检；
+公众号音源2 初始化超时；六音 `new Function` 动态执行 + 重度混淆 → `REJECT_AUTO_CATALOG`；
+小熊猫从 jsdelivr/GitHub 远程加载第二段 JS → `QUARANTINE_API_REVIEW`。
+
+### 7.4 审查中发现并修复的并发缺陷
+
+`LxScriptRuntime.close()` 原先无锁遍历 `timerSignals` 并 clear；而 asyncFunction 的 finally 在
+`Dispatchers.Default` 上并发写同一 map。androidHost 实测 `ConcurrentModificationException`
+（desktop 调度时序不同未触发）。修复：`close()` 用 `Mutex.tryLock()` 保护，拿不到锁就只靠
+`timerScope.cancel()` 让各协程自行清理；测试改为等待异步清理后断言。
+
+### 7.5 未验证风险（不得宣称真实可用）
+
+1. 所有"通过"都是模拟响应；真实接口存活、格式、歌曲身份均未验证。
+2. 裸 IP（至尊/梓澄）与 punycode 域名（肥猫/独家）的备案/证书/可用性未核实。
+3. 混淆脚本只观测到一个域名，无法静态穷尽网络行为；需真机抓包。
+4. 聚合API接口（CF）与测试音乐源未找到对应文件，未用其他音源冒名替代。

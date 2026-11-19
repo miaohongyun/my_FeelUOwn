@@ -161,6 +161,52 @@ class SourceInstallTransactionTest {
         assertTrue(rejected.reason.contains("WARN"), rejected.reason)
         assertTrue(store.loadIndex().sources.isEmpty())
     }
+
+    @Test
+    fun smokeTestExceptionLeavesActiveUntouched() = runTest {
+        // 模拟"冒烟阶段进程异常/脚本抛错"：事务捕获为 SmokeTestFailed，
+        // active 与已装版本都必须保持原样，staging 被清理。
+        val (store, files) = newStore()
+        val v1 = SourceFixtures.SCRIPT
+        val v2 = "$v1\n// v2"
+        // 只有 v2（含 "// v2" 标记）在冒烟时抛错，v1 正常安装。
+        val transaction = SourceInstallTransaction(
+            store, now = { 1L },
+            smokeTest = { _, content -> if (content.contains("// v2")) throw IllegalStateException("QuickJS 崩溃") else null },
+        )
+        assertIs<InstallOutcome.Installed>(transaction.install(entryFor(v1, "1.0.0"), v1, enable = true))
+
+        val outcome = transaction.install(entryFor(v2, "2.0.0"), v2)
+        val failed = assertIs<InstallOutcome.SmokeTestFailed>(outcome)
+        assertTrue(failed.reason.contains("崩溃"))
+        assertEquals("1.0.0", store.loadIndex().sources.getValue("fixture-source").activeVersion)
+        assertEquals(v1, store.readActiveScript("fixture-source"))
+        // 崩溃路径也必须清掉 staging，避免残留 .tmp 污染下一次安装
+        assertFalse(files.snapshot().keys.any { it.contains("staging") })
+        assertFalse(store.listVersions("fixture-source").contains("2.0.0"))
+    }
+
+    @Test
+    fun restartRecoversActiveVersionAndIgnoresOrphans() = runTest {
+        // 模拟"写版本文件后被杀进程、index 还没切"以及"残留 staging"两种孤儿状态。
+        // 用新的 store 实例重新 loadIndex，模拟应用重启后的恢复路径。
+        val files = InMemorySourceFileStore()
+        val store = SourceVersionStore(files)
+        val transaction = SourceInstallTransaction(store, now = { 1L })
+        val v1 = SourceFixtures.SCRIPT
+        assertIs<InstallOutcome.Installed>(transaction.install(entryFor(v1, "1.0.0"), v1, enable = true))
+
+        // 人为制造孤儿：写一个未提交的 v2 版本文件 + 一个 staging 临时文件
+        store.writeVersion("fixture-source", "9.9.9", "$v1\n// orphan")
+        store.writeStaged("fixture-source", "9.9.9", "$v1\n// staged orphan")
+
+        // 重启：全新 store 指向同一份持久化文件
+        val restarted = SourceVersionStore(files)
+        val index = restarted.loadIndex()
+        assertEquals("1.0.0", index.sources.getValue("fixture-source").activeVersion)
+        assertEquals(v1, restarted.readActiveScript("fixture-source"), "恢复后执行的是已验证的 active 版本")
+        assertTrue(restarted.listVersions("fixture-source").contains("9.9.9"), "孤儿文件仍在磁盘上，但不会被激活")
+    }
 }
 
 class SourceUpdatePolicyTest {

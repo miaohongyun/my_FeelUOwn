@@ -13,8 +13,10 @@ package org.feeluown.mobile.provider.lx
  * - `__lxBufferFrom(text, format)` → ByteArray（QuickJS 侧即 Uint8Array）
  * - `__lxBufToString(bytes, format)` → String
  * - `__lxCryptoUnsupported(name)` → 明确告知该 crypto 原语尚未实现，而不是静默返回错值
- * - `__lxDelay(ms)` → suspend，宿主侧可取消的计时器；JS 的 setTimeout 基于它实现，
- *   runtime 关闭时所有 pending delay 一起取消，回调不会在 context 销毁后触发
+ * - `__lxDelay(id, ms)` → suspend，宿主侧可取消的计时器；JS 的 setTimeout 基于它实现，
+ *   runtime 关闭时所有 pending delay 一起取消，回调不会在 context 销毁后触发；
+ *   带 id 是为了让 clearTimeout 能精确取消单个协程而不是等它自然到时。
+ * - `__lxCancelTimer(id)` → 同步，取消指定 id 的 delay 协程
  *
  * 兼容性说明：官方文档写 `lx.request(url, options, callback)` 的回调是 `(err, resp, body)`，
  * 而社区脚本绝大多数写成 `(err, resp) => resp.body`。这里同时满足：第三个参数传 body，
@@ -46,6 +48,17 @@ internal object LxBridge {
   var initedPayload = null;
   var updateAlert = null;
 
+  // console 是标准调试 API，许多社区脚本用它打日志。这里刻意做成 no-op：
+  // 既不把第三方脚本的日志（可能含 token/URL）写进宿主日志，也不因 console 未定义
+  // 让整个脚本初始化失败。stdout 完全丢弃，符合"日志不泄漏隐私"的要求。
+  var noopConsole = {
+    log: function () {}, info: function () {}, warn: function () {}, error: function () {},
+    debug: function () {}, trace: function () {}, group: function () {}, groupEnd: function () {},
+    groupCollapsed: function () {}, table: function () {}, dir: function () {}, time: function () {},
+    timeEnd: function () {}, clear: function () {}, assert: function () {}
+  };
+  globalThis.console = noopConsole;
+
   // 受控计时器：回调留在 JS 侧执行（仍在 QuickJS context 内），宿主只负责"延时到了"这一信号。
   // clearTimeout 通过递增的 token 失效化，即便 delay 已到也不会再触发；
   // runtime 关闭时宿主取消所有 delay 协程，回调同样不会执行。
@@ -62,16 +75,21 @@ internal object LxBridge {
     if (!isFinite(ms) || ms < 0) ms = 0;
     if (ms > 2147483647) ms = 2147483647;
     timers[id] = true;
-    __lxDelay(ms).then(function () {
+    // 把 id 一起传给宿主：clearTimeout 时宿主可以取消对应的 delay 协程，
+    // 否则一个被清除的长 timer 会一直占着协程直到 runtime 关闭（资源泄漏）。
+    __lxDelay(id, ms).then(function () {
       if (!timers[id]) return;
       delete timers[id];
       try { fn(); } catch (e) { /* 脚本回调异常不影响宿主 */ }
-    }).catch(function () { /* runtime 关闭导致取消，忽略 */ });
+    }).catch(function () { /* runtime 关闭或 clearTimeout 导致取消，忽略 */ });
     return id;
   };
 
   globalThis.clearTimeout = function (id) {
-    if (id && timers[id]) delete timers[id];
+    if (id && timers[id]) {
+      delete timers[id];
+      __lxCancelTimer(id);
+    }
   };
 
   var EVENT_NAMES = {
@@ -92,7 +110,9 @@ internal object LxBridge {
       }
     },
     crypto: {
-      md5: function (input) { return __lxCryptoUnsupported('md5'); },
+      md5: function (input) {
+        return __lxMd5(input === undefined || input === null ? '' : String(input));
+      },
       randomBytes: function (size) { return __lxCryptoUnsupported('randomBytes'); },
       aesEncrypt: function (buffer, mode, key, iv) { return __lxCryptoUnsupported('aesEncrypt'); },
       rsaEncrypt: function (buffer, key) { return __lxCryptoUnsupported('rsaEncrypt'); }

@@ -12,12 +12,16 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.selects.onTimeout
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
@@ -31,6 +35,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import org.feeluown.mobile.sourceupdate.crypto.Md5
 
 /**
  * 一个 LX Music 自定义音源脚本的执行实例。
@@ -69,6 +74,17 @@ class LxScriptRuntime(
     private fun newTimerScope() = CoroutineScope(
         SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, _ -> Unit },
     )
+
+    /**
+     * 每个 setTimeout 对应一个"取消信号"：clearTimeout 让对应信号完成，
+     * 正在 select 中等待的延时立即被唤醒并退出，而不是让一个长 timer 一直挂到 runtime 关闭。
+     * 用 Mutex 保护以承受并发脚本回调。
+     */
+    private val timerSignals = mutableMapOf<Long, CompletableDeferred<Unit>>()
+    private val timerJobsMutex = Mutex()
+
+    /** 供测试断言"timer 已全部释放"：当前仍在计时/等待回调的 timer 数量。 */
+    internal suspend fun activeTimerCount(): Int = timerJobsMutex.withLock { timerSignals.size }
 
     /** 目录为该脚本声明的域名白名单；空集合时 [LxNetworkPolicy] 会拒绝一切网络请求。 */
     private var allowedHosts: Set<String> = emptySet()
@@ -208,7 +224,19 @@ class LxScriptRuntime(
 
     override fun close() {
         // 先取消所有 setTimeout 协程：它们的回调引用 JS context，必须在 context 销毁前停止。
+        // cancel 会让所有 withContext(timerScope) 抛 CancellationException，各 asyncFunction 的
+        // finally 会带锁从 timerSignals 移除自己——所以这里**不能**无锁遍历同一个 map
+        // （androidHost 上实测到 ConcurrentModificationException）。
         timerScope.cancel()
+        if (timerJobsMutex.tryLock()) {
+            try {
+                timerSignals.values.forEach { it.complete(Unit) }
+                timerSignals.clear()
+            } finally {
+                timerJobsMutex.unlock()
+            }
+        }
+        // tryLock 失败说明有绑定回调正在写表：它完成后会自行清理，close 不阻塞等待。
         val instance = quickJs ?: return
         quickJs = null
         loaded = false
@@ -287,20 +315,51 @@ class LxScriptRuntime(
         instance.function<String>("__lxBufToString") { args ->
             bufToString(args.getOrNull(0), args.getOrNull(1)?.toString() ?: "utf8")
         }
+        instance.function<String>("__lxMd5") { args ->
+            Md5.hex((args.firstOrNull()?.toString() ?: "").encodeToByteArray())
+        }
         instance.function<String>("__lxCryptoUnsupported") { args ->
             val name = args.firstOrNull()?.toString() ?: "crypto"
             throw LxScriptException(
                 "lx.utils.crypto.$name 尚未在 FuoEvolve 中实现；该脚本依赖此原语，无法安全解析",
             )
         }
-        // setTimeout 的延时原语。延时协程挂在 timerScope 上，close() 时整体取消：
-        // 回调（JS 侧）不会被通知，自然不会在 context 销毁后执行。
+        // setTimeout 的延时原语：参数 (id, delayMs)。
+        // 每个 timer 是一个挂在 timerScope 上的独立 Job，登记到 timerJobs：
+        // - clearTimeout → __lxCancelTimer(id) 精确取消该 Job；
+        // - close() → timerScope.cancel() 取消全部。
+        // 取消后 asyncFunction 抛 CancellationException → JS 侧 .catch 吞掉 → .then 里的回调不执行。
         instance.asyncFunction<Any?>("__lxDelay") { args ->
-            val millis = (args.firstOrNull()?.toString()?.toLongOrNull() ?: 0L)
+            val id = args.getOrNull(0)?.toString()?.toLongOrNull() ?: 0L
+            val millis = (args.getOrNull(1)?.toString()?.toLongOrNull() ?: 0L)
                 .coerceIn(0L, MAX_TIMER_DELAY_MS)
-            withContext(timerScope.coroutineContext) {
-                delay(millis)
+            val signal = CompletableDeferred<Unit>()
+            timerJobsMutex.withLock { timerSignals[id] = signal }
+            try {
+                // 在 timerScope 上等待"到时"或"被 clearTimeout 取消"，两路都会唤醒：
+                // close() 取消 timerScope 时，这里的 withContext 抛 CancellationException，
+                // asyncFunction → Promise reject → JS .catch 吞掉，回调不执行。
+                withContext(timerScope.coroutineContext) {
+                    select<Unit> {
+                        signal.onAwait { }
+                        onTimeout(millis) { }
+                    }
+                }
+            } finally {
+                // 用单参数 remove：双参数 remove(key, value) 在 Kotlin/Native 目标上不可用。
+                timerJobsMutex.withLock {
+                    if (timerSignals[id] === signal) timerSignals.remove(id)
+                }
             }
+            null
+        }
+        // clearTimeout 取消指定 timer：让对应信号完成，select 立即走 onAwait 分支退出，
+        // 不等待自然到时（否则轮询式长 timer 会一直占用协程直到 close）。
+        // 用 asyncFunction 是因为 Mutex.withLock 需要挂起；JS 侧不 await 也可，副作用照常发生。
+        instance.asyncFunction<Any?>("__lxCancelTimer") { args ->
+            val id = args.getOrNull(0)?.toString()?.toLongOrNull() ?: 0L
+            val signal = timerJobsMutex.withLock { timerSignals.remove(id) }
+            signal?.complete(Unit)
             null
         }
     }
