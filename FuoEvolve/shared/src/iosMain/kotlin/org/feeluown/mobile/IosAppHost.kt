@@ -1,6 +1,7 @@
 package org.feeluown.mobile
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -10,6 +11,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import org.feeluown.mobile.source.SourceCatalogRuntime
+import org.feeluown.mobile.source.SourceUpdateHost
 import platform.UIKit.UIViewController
 
 internal fun handleIosLocalPlaylistImportResult(
@@ -71,6 +74,10 @@ private fun IosApp(
             networkStatusOutput, audioRecognitionOutput, oauthDeviceCodeOutput,
         )
     }
+    // iOS 不承诺系统保证的每日后台执行，因此每次进入前台都补查一次（策略内部会判断是否到期）。
+    LaunchedEffect(container) {
+        container.checkSourceUpdatesOnLaunch()
+    }
     AppRoot(
         appViewModel = container.appViewModel,
         uiGraph = container.appUiGraph,
@@ -130,10 +137,31 @@ private class IosAppContainer(
     oauthDeviceCodeOutput: IosOAuthDeviceCodeOutput,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    // 设置必须先于 providerGraph 构造：动态音源的 client_id 与隔离列表都从设置投影而来。
+    private val settingsRepository = createIosAppSettingsRepository(scope)
+    private val sourceCatalogRuntime = SourceCatalogRuntime(
+        quarantine = { settingsRepository.state.value.settings.quarantinedScriptIds },
+    )
+    // 用 lazy：构造顺序上 providerGraph 还在后面，直接初始化会读到尚未赋值的字段。
+    private val sourceUpdateHost by lazy {
+        SourceUpdateHost(
+            runtime = sourceCatalogRuntime,
+            settings = settingsRepository,
+            providerRegistry = providerGraph.registry,
+        )
+    }
+
     private val providerGraph = createFuoProviderGraph(
         credentials = IosProviderCredentialStore(),
         persistentCache = IosProviderCacheStore(),
         isCellularConnection = networkStatusOutput::isCellularConnection,
+        dynamicProviders = DynamicProviderDependencies(
+            scriptSource = sourceCatalogRuntime.scripts,
+            jamendoClientId = {
+                settingsRepository.state.value.settings.jamendoClientId.takeIf(String::isNotBlank)
+            },
+        ),
     )
     private val playbackProvider = createAppPlaybackProviderPort(
         providerRegistry = providerGraph.registry,
@@ -144,7 +172,11 @@ private class IosAppContainer(
     private val localRepository = IosLocalMusicRepository(mediaLibraryOutput)
     private val localPlaylistRepository = IosLocalPlaylistRepository()
     private val downloadRepository = IosDownloadRepository(playbackProvider, downloadOutput)
-    private val settingsRepository = createIosAppSettingsRepository(scope)
+    /** 前台补查受控音源目录；失败只写日志，不影响进入应用。 */
+    suspend fun checkSourceUpdatesOnLaunch() {
+        runCatching { sourceUpdateHost.checkIfDue() }
+    }
+
     private val playbackEngine = IosNativeAudioEngine(scope, audioOutput, settingsRepository)
     private val providerSessionRepository = DefaultProviderSessionRepository(providerGraph.auth)
     private val navigator = AppNavigator()
@@ -355,6 +387,7 @@ private class IosAppContainer(
             debugLogViewerAvailable = debugLogFeatureController.isAvailable,
             navigator = navigator,
             scope = scope,
+            sourceUpdateHost = sourceUpdateHost,
         )
     }
 

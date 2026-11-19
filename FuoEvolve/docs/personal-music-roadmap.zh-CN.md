@@ -203,3 +203,161 @@
 | [`docs/cast-dlna.zh-CN.md`](cast-dlna.zh-CN.md) | 新增投屏技术文档：分层、SSDP/SOAP 链路、连播判定表、代理流与 `network_security_config` 的取舍、手机静音、平台差异、已知限制、测试注意事项、排障 |
 | [`docs/README.md`](README.md) | 新增文档索引，按「想做什么」分组，而不是按文件名 |
 | [`docs/FUOEVOLVE_PRIVATE_MUSIC_FIRST_PATCH.md`](FUOEVOLVE_PRIVATE_MUSIC_FIRST_PATCH.md) | 修正过时结论：原文写「无法下载 Gradle、不能报告编译通过」，现已补上真实验证结果并指向路线图 |
+
+## LX 音源脚本运行时（2026-11-18 晚，Phase 0 完成）
+
+### 结论
+
+App 内嵌 JS 引擎执行 LX Music 自定义音源脚本**技术可行，已在本仓库实测通过**。
+新增模块 `:provider:lxruntime`，8 项测试在 desktop 与 Android hostTest 双端全绿。
+
+### 引擎选型（原方案 §8.3 的答案）
+
+| 项 | 结论 |
+| --- | --- |
+| 依赖 | `io.github.dokar3:quickjs-kt:1.0.15`（Apache-2.0，Maven Central） |
+| 覆盖 | android（arm64-v8a / armeabi-v7a / x86 / x86_64 全带 .so）、jvm、iosArm64、iosSimulatorArm64 |
+| 超时中断 | `evaluationTimeoutMillis` 由 native 侧强制中断，`while(true){}` 实测可被打断 |
+| 前置状态 | **该依赖此前已用于 `:provider:ytmusic` 的 `YtMusicJsChallengeSolver`**，不是新引入 |
+
+### 协议基准：以官方移动端文档为准
+
+原方案称「不能仅凭社区脚本猜协议」。实际官方文档已给出移动端的**权威 API 子集**，比桌面端小一个数量级：
+
+- `lx.env` 固定 `mobile`；`EVENT_NAMES` 仅 `inited` / `request` / `updateAlert`
+- `lx.request(url, options, cb)`，回调 `(err, resp, body)`；社区脚本普遍写 `(err, resp) => resp.body`，本实现两者都兼容
+- `lx.utils.buffer.from` / `bufToString`：**仅** `base64` / `hex` / `utf8`
+- `lx.utils.crypto`：**仅** `aes-128-cbc` / `aes-128-ecb` / `md5` / `randomBytes` / `rsaEncrypt`
+- `lx.utils.zlib`：**官方标注移动版未实现**，因此不需要 Node 兼容层
+- 宿主环境 API：**只有** `setTimeout` / `clearTimeout`
+
+据此，原方案担心的「Buffer/crypto/zlib 全量 Node 兼容」不成立，工作量主要落在 `SetAVTransportURI` 之外的协议映射与 Provider 接入。
+
+### 与原方案的偏差（不照抄的部分）
+
+| 原方案 | 实际做法 | 原因 |
+| --- | --- | --- |
+| 3 个平台 runtime 实现类 | 单一 `LxScriptRuntime`（commonMain） | quickjs-kt 已用 KMP 抹平平台差异，再抽 expect/actual 是多余抽象 |
+| `provider/sourceupdate` 先行 | 暂缓 | 原方案自己承认「需真实脚本样本」，前置未满足 |
+| 强制 HTTPS | 允许明文、**拒绝私网** | 国内音乐接口多为 http（NSC 已放行明文）；真正的边界是 SSRF |
+| 9 个文件拆 LxScriptModels/Runtime/Adapter/Mapper… | 先 5 个文件收敛职责 | 未接入 Provider 前拆细只会产生空壳 |
+
+### 已验证项（`:provider:lxruntime`）
+
+| 测试 | 覆盖 |
+| --- | --- |
+| `initialize keeps only music sources` | `local` 与非 `music` 类型被排除，音质按官方顺序归一 |
+| `requestMusicUrl returns the url` | 加载 → inited → `request(musicUrl)` → 拿到 URL |
+| `script without inited is rejected` | 无 `inited` 判为初始化失败，不当可重试 |
+| `script that never registers request` | 未注册 handler 时派发明确报错 |
+| `busy loop is interrupted` | 死循环被 QuickJS 中断，不拖死播放 |
+| `lx request goes through the host and rejects private addresses` | 网络由宿主代理；`192.168.x.x` 等私网被拒（SSRF） |
+| `buffer helpers support hex utf8 and base64` | 三种编码往返一致 |
+
+### 关键实现点
+
+1. **Promise 取值**：脚本回调按官方要求返回 Promise，而 quickjs-kt 的普通 `evaluate` 不等待 Promise。
+   改为以 ES module 执行并利用顶层 `await`，结果落回全局变量再读。这是本模块唯一非显然的技巧。
+2. **超时只交给 QuickJS**：JS 求值是阻塞调用而非挂起点，协程 `withTimeout` 无法打断它，
+   在虚拟时间调度器（测试）下还会误判超时。因此 `evaluate` 只用 `evaluationTimeoutMillis`，
+   协程超时仅用于 `lx.request` 的网络等待。
+3. **crypto 明确失败**：`aesEncrypt` / `md5` / `rsaEncrypt` / `randomBytes` 目前抛
+   「尚未实现」而不是返回错值。依赖这些原语的脚本会明确报错，不会解出错误 URL。
+
+### Phase 1 已完成部分（见下一章）
+
+- `LxScriptProvider` 已接入 Provider Registry、搜索链路与设置页
+- 脚本安装、启停、隔离与远程自动更新均已实现
+- crypto 原语仍是明确失败：需要它的脚本会报错，不会解出错误 URL
+
+---
+
+## 六、受控音源目录与脚本自动更新（Phase B/C）
+
+> 依据：`FuoEvolve 中国大陆优先音源目录与自动接入实施方案 v1.0`
+> 结论先行：建立 **FuoEvolve 自己维护的受控目录**，社区仓库只当候选来源；
+> **首版目录 `sources: []` 保持空数组**，因为没有任何脚本通过完整审核。
+
+### 6.1 新增模块
+
+| 模块 | 职责 | 关键约束 |
+| --- | --- | --- |
+| `provider/lxruntime` | LX 脚本执行（QuickJS）+ 脚本 Provider | 只执行 `APPROVED` 且已启用的脚本；网络经宿主代理并校验域名白名单 |
+| `provider/sourceupdate` | 目录拉取、验签、静态扫描、版本仓库、退避策略 | 只装 `autoInstall && APPROVED`；失败绝不动 active 指针 |
+| `provider/jamendo` | 开放曲库搜索/播放 Provider | 标注 `jamendo-mp3`，不冒充原曲，默认不启用 |
+| `config/source-catalog` | 目录 JSON + 签名 + schema + 候选审核记录 + 签名工具 | 私钥不入库；`candidates.json` 客户端不读 |
+
+### 6.2 信任链
+
+```
+客户端内置公钥（SourceUpdateDefaults.TRUSTED_CATALOG_KEYS）
+   └─ 验 source-catalog.json.sig（Ed25519，独立 .sig 文件，不做 JSON 规范化）
+        └─ 解析目录结构（schemaVersion=1、ID 正则、https、非私网、autoInstall 必须 APPROVED）
+             └─ 下载脚本 → SHA-256 比对 → 静态扫描（eval/动态 import/Node/WebSocket/卡密/混淆/未声明域名）
+                  └─ staging 落盘 → 切 active → 冒烟测试（真实 QuickJS 初始化）
+                       └─ 失败：有上一版本则回滚，没有则移除
+```
+
+### 6.3 为什么签名单独一个文件
+
+把签名写进 JSON 就要先定义"规范化序列化"，而规范化一旦实现有偏差，
+就会出现"本机验得过、别的实现验不过"的隐性分歧。独立 `.sig` 文件签的是
+**原始字节**，任何实现都只需要 `verify(bytes, sig, pubkey)`，没有第二种解释。
+
+### 6.4 首版目录为空，但机制必须可验证
+
+`config/source-catalog/source-catalog.json` 的 `sources` 是空数组。为了让这条链路
+不是"写完没人跑过"，做了两件事：
+
+1. 用仓库外的 Node 私钥签了一份 `catalogVersion=42` 的**测试夹具目录**，
+   在 `commonTest` 里走完整链路（拉取 → 验签 → 解析 → 下载 → 安装 → 回滚）。
+2. `PublishedCatalogTest`（desktopTest）用 **JDK 自带 Ed25519** 独立验证仓库里
+   那份真实目录能被 **客户端内置公钥** 验证通过——产线会犯的"换 key 忘同步"
+   这类错误，在 CI 就会被拦下来。
+
+### 6.5 更新节奏与平台差异
+
+| 平台 | 调度 | 说明 |
+| --- | --- | --- |
+| Android | WorkManager 周期任务（24h，`NetworkType.CONNECTED`）+ 启动补查 | 系统可延迟；真正的"要不要检查"由策略判定，任务被提前唤醒只是空转 |
+| 桌面 | 应用启动时 `checkIfDue()` | 关掉应用不承诺执行 |
+| iOS | 每次进入前台 `checkIfDue()` | 系统不保证每日后台执行，按文档口径只承诺前台补查 |
+
+策略：正常间隔默认 24 小时（设置页可选 12/24/48/168）；失败退避 1h → 4h → 12h → 24h；
+目录请求带 ETag/If-None-Match；镜像连续失败 2 次熔断 30 分钟。
+
+### 6.6 设置项（全部可空，旧设置文件可解码）
+
+`sourceAutoUpdateEnabled`(true) / `sourceUpdateIntervalHours`(24) / `sourceMirrorPolicy`("hybrid") /
+`sourceCatalogVersion`(null) / `installedScriptVersions`(空) / `quarantinedScriptIds`(空)。
+
+`sourceCatalogVersion` 与 `installedScriptVersions` **只是展示镜像**：真正的安装状态在
+`sources/index.json`，决策一律读 index，避免设置文件与真实状态分叉。
+
+### 6.7 音源优先级
+
+原生 Provider → 已审核 LX 脚本 → 开放曲库（Jamendo）→ 用户自建服务，顺序体现在
+`ProviderComposition.factories()` 与 `DEFAULT_PROVIDER_ORDER_IDS`。
+
+`lxscript` **不在默认启用集合**里：空目录时它只会让搜索多一个永远为空的来源；
+但目录第一次真正装上已批准脚本时，`SourceUpdateHost` 会同时更新设置与内存注册表
+把它打开——否则"自动启用"只完成一半，用户还得自己去音源列表勾一下。
+
+### 6.8 已验证项
+
+| 测试 | 覆盖 |
+| --- | --- |
+| `ShaTest` / `CryptoTest` | SHA-256/512 标准向量；Ed25519 RFC 8032 TEST 1/2/3 + 200 字节多分块 + 篡改 |
+| `SourceCatalogTest`（63 项，双端） | 解析、静态扫描、产物哈希、签名、安装事务、回滚、退避、镜像熔断、协调器全链路 |
+| `PublishedCatalogTest` | 仓库内真实目录 ↔ 内置公钥一致；`autoInstall` 为空 |
+| `ResolverCatalogTest` | 解析器目录协议：kind/scheme/超时/重复 id/自托管告警 + 健康熔断 |
+| `LxScriptProviderTest`（11 项，双端） | 搜索委托、档位透传、FLAC 拒绝降级、目录批准平台裁剪、停用即失效、版本升级重载 |
+| `StoreLxInstalledScriptSourceTest` | index → 待执行脚本的过滤（启用 ∩ 批准 ∩ 非隔离 ∩ 文件存在） |
+| `SourceUpdateSettingsTest` | 默认值、旧 JSON 解码、间隔夹取、空策略回落 |
+
+### 6.9 已知限制
+
+- 首版没有任何脚本被批准，所以 `lxscript` 搜索恒为空（这是设计结果，不是缺陷）。
+- 搜索能力来自内置酷我搜索接口：LX 协议本身没有搜索事件。
+- `crypto` 原语（md5/aes/rsa）未实现；依赖它们的脚本会明确失败。
+- 目录托管在 `miaohongyun/my_FeelUOwn` 的 GitHub Raw；国内可达性靠 `ghproxy.net` / `gh-proxy.com` 两个公共镜像兜底，正式发布前建议自建镜像并固定 commit。

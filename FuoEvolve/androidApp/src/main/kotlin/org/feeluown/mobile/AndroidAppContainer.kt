@@ -22,6 +22,8 @@ import org.feeluown.mobile.persistence.listening.AndroidListeningHistoryDriverFa
 import org.feeluown.mobile.persistence.listening.SqlDelightListeningHistoryStore
 import org.feeluown.mobile.playback.api.PlaybackSession
 import org.feeluown.mobile.playback.api.PlaybackSessionStatus
+import org.feeluown.mobile.source.SourceCatalogRuntime
+import org.feeluown.mobile.source.SourceUpdateHost
 
 internal class AndroidAppContainer(
     private val application: Application,
@@ -40,10 +42,39 @@ internal class AndroidAppContainer(
             yield()
             if (settingsRepository.awaitSettings().bluetoothLyricsEnabled) playbackSession
         }
+        // 启动补查：距上次成功检查超过 24 小时时立刻在后台跑一次，不阻塞首屏。
+        appScope.launch {
+            yield()
+            runCatching { sourceUpdateHost.checkIfDue() }
+        }
     }
 
     private val providerCredentialStore: AndroidProviderCredentialStore by lazy {
         AndroidProviderCredentialStore(context)
+    }
+
+    /** 受控音源目录：安装状态、签名校验、脚本执行都从这一个入口走。 */
+    val sourceCatalogRuntime: SourceCatalogRuntime by lazy {
+        SourceCatalogRuntime(
+            quarantine = { settingsRepository.state.value.settings.quarantinedScriptIds },
+        )
+    }
+
+    val sourceUpdateHost: SourceUpdateHost by lazy {
+        SourceUpdateHost(
+            runtime = sourceCatalogRuntime,
+            settings = settingsRepository,
+            providerRegistry = providerGraph.registry,
+        )
+    }
+
+    private val dynamicProviders: DynamicProviderDependencies by lazy {
+        DynamicProviderDependencies(
+            scriptSource = sourceCatalogRuntime.scripts,
+            jamendoClientId = {
+                settingsRepository.state.value.settings.jamendoClientId.takeIf(String::isNotBlank)
+            },
+        )
     }
 
     private val providerGraph: FuoProviderGraph by lazy {
@@ -51,6 +82,7 @@ internal class AndroidAppContainer(
             credentials = providerCredentialStore,
             persistentCache = AndroidProviderCacheStore(context),
             isCellularConnection = ::isCellularConnection,
+            dynamicProviders = dynamicProviders,
         )
     }
 
@@ -360,6 +392,7 @@ internal class AndroidAppContainer(
             scope = appScope,
             bydInstrumentLyricsAvailable = isBydInstrumentLyricsAvailable(),
             appUpdateController = appUpdateController,
+            sourceUpdateHost = sourceUpdateHost,
         )
     }
 

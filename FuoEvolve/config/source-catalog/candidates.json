@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-18T00:00:00Z",
+  "note": "本文件只用于人工审核记录，客户端不会读取，也不会安装其中任何条目。审核结论变化时只改这里，不改 source-catalog.json。",
+  "candidates": [
+    {
+      "id": "gd-studio",
+      "name": "GD Studio",
+      "repository": "shellsec/lx-music-source",
+      "path": "sources/gd-studio/gdstudio音乐源.js",
+      "reviewStatus": "REVIEW_CANDIDATE",
+      "autoInstall": false,
+      "reason": "可读源码、单一主 API 入口；仍需确认 music-api.gdstudio.xyz 的使用条款、授权范围与运行时行为"
+    },
+    {
+      "id": "lx-base",
+      "name": "LX 基础源",
+      "repository": "pdone/lx-music-source",
+      "path": "lx/latest.js",
+      "reviewStatus": "REVIEW_CANDIDATE",
+      "autoInstall": false,
+      "reason": "目录名带 LX 不代表官方发布，需核对确切仓库、许可证与维护状态"
+    },
+    {
+      "id": "appx64-clear-music",
+      "name": "Appx64 Clear Music",
+      "repository": "shellsec/lx-music-source",
+      "path": "sources/appx64/Appx64 Clear Music.js",
+      "reviewStatus": "QUARANTINE_CREDENTIAL_REVIEW",
+      "autoInstall": false,
+      "reason": "包含 qqCookie 配置和多个后端，需检查凭据流向"
+    },
+    {
+      "id": "fish-music",
+      "name": "fish_music",
+      "repository": "shellsec/lx-music-source",
+      "path": "sources/fish-music/fish_music.js",
+      "reviewStatus": "QUARANTINE_OBFUSCATED",
+      "autoInstall": false,
+      "reason": "约 639 KB 且高度混淆，当前不可充分审计"
+    },
+    {
+      "id": "lx-animemusic",
+      "name": "lx-animemusic",
+      "repository": "shellsec/lx-music-source",
+      "path": "sources/animemusic/lx-animemusic.js",
+      "reviewStatus": "QUARANTINE_API_REVIEW",
+      "autoInstall": false,
+      "reason": "外部 API + API_KEY + 远程更新开关，需核对条款与数据收集范围"
+    },
+    {
+      "id": "xinghai",
+      "name": "星海音乐源",
+      "repository": "shellsec/lx-music-source",
+      "path": "sources/xinghai/星海音乐源.js",
+      "reviewStatus": "QUARANTINE_LICENSE_AND_API_REVIEW",
+      "autoInstall": false,
+      "reason": "含可选卡密/License 配置与多域名更新接口"
+    },
+    {
+      "id": "changqing-svip",
+      "name": "长青 SVIP",
+      "repository": "shellsec/lx-music-source",
+      "path": "sources/changqing/长青SVIP音源(二改修复版).js",
+      "reviewStatus": "REJECT_AUTO_CATALOG",
+      "autoInstall": false,
+      "reason": "SVIP/会员权益绕过定位 + 混淆 + 外部更新"
+    },
+    {
+      "id": "hyw-public",
+      "name": "HYWmusic 公益版",
+      "repository": "shellsec/lx-music-source",
+      "path": "sources/hyw/HYWmusic_公益版.js",
+      "reviewStatus": "REJECT_PUBLIC_DISTRIBUTION",
+      "autoInstall": false,
+      "reason": "上游明确提示文件内嵌卡密，不得公开重新分发"
+    }
+  ]
+}

@@ -11,6 +11,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import java.util.Properties
+import org.feeluown.mobile.source.SourceCatalogRuntime
+import org.feeluown.mobile.source.SourceUpdateHost
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,6 +41,9 @@ fun DesktopAppHost(
     }
     LaunchedEffect(container, externalInputs) {
         externalInputs?.collect(container::openExternalInput)
+    }
+    LaunchedEffect(container) {
+        container.startBackgroundTasks()
     }
     fun requestProviderWebLogin(provider: ProviderInfo) {
         val config = provider.loginConfig
@@ -117,11 +122,32 @@ private class DesktopAppContainer(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val providerCredentialStore = createDesktopProviderCredentialStore()
+    private val sourceCatalogRuntime by lazy {
+        SourceCatalogRuntime(
+            quarantine = { settingsRepository.state.value.settings.quarantinedScriptIds },
+        )
+    }
+    private val sourceUpdateHost by lazy {
+        SourceUpdateHost(
+            runtime = sourceCatalogRuntime,
+            settings = settingsRepository,
+            providerRegistry = providerGraph.registry,
+        )
+    }
+    private val dynamicProviders by lazy {
+        DynamicProviderDependencies(
+            scriptSource = sourceCatalogRuntime.scripts,
+            jamendoClientId = {
+                settingsRepository.state.value.settings.jamendoClientId.takeIf(String::isNotBlank)
+            },
+        )
+    }
     private val providerGraph by lazy {
         createFuoProviderGraph(
             credentials = providerCredentialStore,
             persistentCache = createDesktopProviderCacheStore(),
             isCellularConnection = { false },
+            dynamicProviders = dynamicProviders,
         )
     }
     val providerCredentialBackup by lazy {
@@ -375,6 +401,7 @@ private class DesktopAppContainer(
             debugLogViewerAvailable = debugLogFeatureController.isAvailable,
             navigator = navigator,
             scope = scope,
+            sourceUpdateHost = sourceUpdateHost,
         )
     }
 
@@ -610,6 +637,15 @@ private class DesktopAppContainer(
             )
             if (saved) appViewModel.showFeedback("本地歌单已导出")
         }
+    }
+
+    /**
+     * 启动后的后台维护：受控音源目录补查（设计文档 4.2「启动时距上次成功超过 24 小时立即补查」）。
+     *
+     * 桌面端只在应用生命周期内调度，关掉应用不承诺执行——这一点与 Android 的 WorkManager 不同。
+     */
+    fun startBackgroundTasks() {
+        scope.launch { runCatching { sourceUpdateHost.checkIfDue() } }
     }
 
     fun close() {

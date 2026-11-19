@@ -132,6 +132,21 @@ data class AppSettings(
     val waveformAnimationDisabled: Boolean = false,
     val appUpdateChannel: AppUpdateChannel = AppUpdateChannel.Stable,
     val autoCheckAppUpdates: Boolean = true,
+    /** 是否允许自动检查受控音源目录并安装通过门禁的脚本更新。 */
+    val sourceAutoUpdateEnabled: Boolean = DEFAULT_SOURCE_AUTO_UPDATE_ENABLED,
+    /** 正常检查间隔（小时）；失败时另有 1/4/12/24 小时的退避。 */
+    val sourceUpdateIntervalHours: Int = DEFAULT_SOURCE_UPDATE_INTERVAL_HOURS,
+    /** 目录拉取策略。首版只有 hybrid：主地址 → 镜像 → 上次成功缓存。 */
+    val sourceMirrorPolicy: String = DEFAULT_SOURCE_MIRROR_POLICY,
+    /**
+     * 最近一次成功加载的目录版本，仅用于设置页展示。
+     * 真正的安装状态以 `sources/index.json` 为准，这里不回读做决策。
+     */
+    val sourceCatalogVersion: Long? = null,
+    /** 已安装脚本版本快照，同样只作展示镜像，不参与安装判断。 */
+    val installedScriptVersions: Map<String, String> = emptyMap(),
+    /** 用户手动隔离的脚本 ID：即使目录重新批准也不会自动启用。 */
+    val quarantinedScriptIds: Set<String> = emptySet(),
     val playlistPlaybackStatsVersion: Int = 0,
     val playlistPlaybackStats: Map<String, PlaylistPlaybackStat> = emptyMap(),
 )
@@ -156,6 +171,14 @@ const val DEFAULT_DOWNLOAD_PARALLELISM = 2
 
 /** 内置 Jamendo client_id；个人使用，留空保存可停用该来源。 */
 const val DEFAULT_JAMENDO_CLIENT_ID = "5ace5988"
+
+const val DEFAULT_SOURCE_AUTO_UPDATE_ENABLED = true
+const val DEFAULT_SOURCE_UPDATE_INTERVAL_HOURS = 24
+const val DEFAULT_SOURCE_MIRROR_POLICY = "hybrid"
+/** 允许的检查间隔范围：小于 1 小时会触发上游限流，超过一周等于放弃更新。 */
+const val MIN_SOURCE_UPDATE_INTERVAL_HOURS = 1
+const val MAX_SOURCE_UPDATE_INTERVAL_HOURS = 168
+
 /**
  * Default sources for a fresh installation. QQ Music and Bilibili complement NetEase
  * for Chinese-language discovery; YouTube Music remains opt-in because availability
@@ -165,9 +188,16 @@ const val DEFAULT_JAMENDO_CLIENT_ID = "5ace5988"
  * It is enabled by default so the local build can search "flac"/"电台" and play real streams
  * out of the box; on ordinary keyword searches its search() returns no tracks and makes no
  * network call, so it does not pollute normal discovery results.
+ *
+ * "lxscript" is deliberately absent from the default set: with an empty catalog it can only
+ * return nothing, and showing an always-empty source in search would be noise. It is switched on
+ * automatically the first time the controlled catalog actually installs an approved script
+ * (see SourceUpdateHost). "jamendo" is likewise opt-in: it returns open-catalog tracks that are
+ * not the original recording, so it must stay an explicit user choice rather than polluting
+ * search results.
  */
 val DEFAULT_ENABLED_PROVIDER_IDS = setOf("netease", "qqmusic", "bilibili", "modeb")
-val DEFAULT_PROVIDER_ORDER_IDS = listOf("netease", "qqmusic", "bilibili", "ytmusic", "modeb")
+val DEFAULT_PROVIDER_ORDER_IDS = listOf("netease", "qqmusic", "bilibili", "lxscript", "ytmusic", "modeb", "jamendo")
 
 data class SettingsState(
     val isLoaded: Boolean = false,

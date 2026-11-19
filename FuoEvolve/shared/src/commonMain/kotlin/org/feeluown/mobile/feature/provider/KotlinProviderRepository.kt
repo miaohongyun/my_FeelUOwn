@@ -34,6 +34,7 @@ class KotlinProviderRepository :
     private val credentials: ProviderCredentialStore
     private val isCellularConnection: () -> Boolean
     private val providerMap: Map<String, Lazy<KotlinMusicProvider>>
+    private val dynamicProviders: DynamicProviderDependencies
     private var enabledProviderIds: Set<String> = DEFAULT_ENABLED_PROVIDER_IDS
     private var initialized = false
     private var wifiAudioQualityPolicy = DEFAULT_WIFI_AUDIO_QUALITY_POLICY
@@ -43,18 +44,21 @@ class KotlinProviderRepository :
         http = ProviderHttpClient()
         credentials = InMemoryProviderCredentialStore()
         isCellularConnection = { false }
-        providerMap = createProviderMap(http, credentials)
+        dynamicProviders = DynamicProviderDependencies()
+        providerMap = createProviderMap(http, credentials, dynamicProviders)
     }
 
     internal constructor(
         http: ProviderHttpClient,
         credentials: ProviderCredentialStore,
         isCellularConnection: () -> Boolean = { false },
+        dynamicProviders: DynamicProviderDependencies = DynamicProviderDependencies(),
     ) {
         this.http = http
         this.credentials = credentials
         this.isCellularConnection = isCellularConnection
-        providerMap = createProviderMap(http, credentials)
+        this.dynamicProviders = dynamicProviders
+        providerMap = createProviderMap(http, credentials, dynamicProviders)
     }
 
     override suspend fun initialize() {
@@ -66,7 +70,8 @@ class KotlinProviderRepository :
         }
     }
 
-    override suspend fun availableProviders(): List<ProviderInfo> = ProviderComposition.providerInfos()
+    override suspend fun availableProviders(): List<ProviderInfo> =
+        ProviderComposition.providerInfos(dynamicProviders)
 
     override suspend fun updateEnabledProviders(providerIds: Set<String>) {
         val next = providerIds
@@ -368,8 +373,9 @@ class KotlinProviderRepository :
 private fun createProviderMap(
     http: ProviderHttpClient,
     credentials: ProviderCredentialStore,
+    dynamicProviders: DynamicProviderDependencies,
 ): Map<String, Lazy<KotlinMusicProvider>> = ProviderComposition
-    .createProviderFactories(http, credentials)
+    .createProviderFactories(http, credentials, dynamicProviders)
     .mapValues { (_, factory) -> lazy(factory) }
 
 private fun searchHitKey(hit: ProviderSearchHit): String = when (hit) {
@@ -387,18 +393,22 @@ fun createKotlinProviderRepository(
     credentials: ProviderCredentialStore,
     persistentCache: ProviderPersistentCache? = null,
     isCellularConnection: () -> Boolean = { false },
+    dynamicProviders: DynamicProviderDependencies = DynamicProviderDependencies(),
 ): KotlinProviderRepository = createKotlinProviderRepository(
     http = ProviderHttpClient(persistentCache = persistentCache),
     credentials = credentials,
     isCellularConnection = isCellularConnection,
+    dynamicProviders = dynamicProviders,
 )
 
 internal fun createKotlinProviderRepository(
     http: ProviderHttpClient,
     credentials: ProviderCredentialStore,
     isCellularConnection: () -> Boolean = { false },
+    dynamicProviders: DynamicProviderDependencies = DynamicProviderDependencies(),
 ): KotlinProviderRepository = KotlinProviderRepository(
     http = http,
     credentials = credentials,
     isCellularConnection = isCellularConnection,
+    dynamicProviders = dynamicProviders,
 )

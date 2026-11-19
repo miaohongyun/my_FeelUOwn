@@ -2,6 +2,8 @@ package org.feeluown.mobile
 
 import android.app.Application
 import org.feeluown.mobile.provider.modeb.installModeBStorageDirectory
+import org.feeluown.mobile.source.SourceUpdateHost
+import org.feeluown.mobile.sourceupdate.installSourceStorageDirectory
 
 /**
  * Thin Android process host.
@@ -17,6 +19,9 @@ class FuoEvolveApplication : Application() {
         installAndroidAppLogger(this)
         // Mode B config cache + circuit-breaker cooldown must survive process restarts.
         installModeBStorageDirectory(java.io.File(filesDir, "mode_b"))
+        // 受控音源目录：staging/active/backup 版本仓库落在 filesDir，卸载才清空。
+        installSourceStorageDirectory(java.io.File(filesDir, "source_catalog"))
+        AndroidSourceUpdateWorker.enqueue(this)
         installPlaylistMigrationBackgroundScheduler { request ->
             AndroidPlaylistMigrationWorker.enqueue(applicationContext, request)
         }
@@ -38,6 +43,9 @@ class FuoEvolveApplication : Application() {
 
     internal val settingsRepository: AppSettingsRepository
         get() = container().settingsRepository
+
+    internal val sourceUpdateHost: SourceUpdateHost
+        get() = container().sourceUpdateHost
 
     internal val appUiGraph: AppUiGraph
         get() = container().appUiGraph

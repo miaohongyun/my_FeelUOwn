@@ -52,6 +52,11 @@ kotlin {
             implementation(project(":provider:netease"))
             implementation(project(":provider:qqmusic"))
             implementation(project(":provider:ytmusic"))
+            // LX 脚本与目录更新的类型会出现在 shared 的公开 API 上（SourceUpdateHost /
+            // DynamicProviderDependencies），因此必须 api 透出，否则各平台宿主看不到这些类型。
+            api(project(":provider:lxruntime"))
+            api(project(":provider:sourceupdate"))
+            implementation(project(":provider:jamendo"))
             api(project(":persistence:settings"))
             api(project(":feature:recognition"))
             api(project(":feature:search"))

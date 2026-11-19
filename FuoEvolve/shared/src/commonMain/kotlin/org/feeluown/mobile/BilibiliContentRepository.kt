@@ -132,9 +132,10 @@ fun createFuoProviderGraph(
     credentials: ProviderCredentialStore,
     persistentCache: ProviderPersistentCache? = null,
     isCellularConnection: () -> Boolean = { false },
+    dynamicProviders: DynamicProviderDependencies = DynamicProviderDependencies(),
 ): FuoProviderGraph {
     val http = ProviderHttpClient(persistentCache = persistentCache)
-    val base = createKotlinProviderRepository(http, credentials, isCellularConnection)
+    val base = createKotlinProviderRepository(http, credentials, isCellularConnection, dynamicProviders)
     val content = BilibiliContentRepository(base, base) {
         ProviderComposition.createBilibiliContentProvider(http, credentials)
     }

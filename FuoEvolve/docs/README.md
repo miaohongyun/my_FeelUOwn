@@ -13,7 +13,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [personal-music-roadmap.zh-CN.md](personal-music-roadmap.zh-CN.md) | 改造目标、已落地代码、双向版本匹配、账户音质探测、统一音质模型、验证记录 |
+| [personal-music-roadmap.zh-CN.md](personal-music-roadmap.zh-CN.md) | 改造目标、已落地代码、双向版本匹配、账户音质探测、统一音质模型、受控音源目录与脚本自动更新、验证记录 |
 | [cast-dlna.zh-CN.md](cast-dlna.zh-CN.md) | 投屏模块的分层、SSDP/SOAP 链路、连播判定、代理流、手机静音、已知限制 |
 
 ## 我想改架构

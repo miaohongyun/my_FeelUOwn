@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FuoEvolve source catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "catalogVersion", "sources"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "catalogVersion": { "type": "integer", "minimum": 0 },
+    "generatedAt": { "type": "string" },
+    "minAppVersion": { "type": "string" },
+    "signatureAlgorithm": { "type": "string", "enum": ["Ed25519"] },
+    "keyId": { "type": "string" },
+    "sources": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "version", "scriptUrl", "sha256"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "version": { "type": "string", "minLength": 1 },
+          "scriptUrl": { "type": "string", "pattern": "^https://" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "sourceRepo": { "type": "string" },
+          "sourcePath": { "type": "string" },
+          "license": { "type": "string" },
+          "reviewStatus": {
+            "type": "string",
+            "enum": [
+              "APPROVED",
+              "REVIEW_CANDIDATE",
+              "QUARANTINE_CREDENTIAL_REVIEW",
+              "QUARANTINE_OBFUSCATED",
+              "QUARANTINE_API_REVIEW",
+              "QUARANTINE_LICENSE_AND_API_REVIEW",
+              "REJECT_AUTO_CATALOG",
+              "REJECT_PUBLIC_DISTRIBUTION"
+            ]
+          },
+          "reviewedAt": { "type": "string" },
+          "allowedHosts": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^\\*?\\.?[a-z0-9.-]+$" }
+          },
+          "platforms": { "type": "array", "items": { "type": "string" } },
+          "capabilities": { "type": "array", "items": { "type": "string" } },
+          "permissions": { "type": "array", "items": { "type": "string", "enum": ["network"] } },
+          "autoInstall": { "type": "boolean" },
+          "autoEnable": { "type": "boolean" },
+          "sizeBytes": { "type": "integer", "minimum": 1 },
+          "notes": { "type": "string" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "autoInstall": { "const": true } } },
+            "then": { "properties": { "reviewStatus": { "const": "APPROVED" } } }
+          },
+          {
+            "if": { "properties": { "autoEnable": { "const": true } } },
+            "then": { "properties": { "autoInstall": { "const": true } } }
+          }
+        ]
+      }
+    }
+  }
+}

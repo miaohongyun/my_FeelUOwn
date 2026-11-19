@@ -95,6 +95,13 @@ data class PersistedSettingsV1(
     val waveformAnimationDisabled: Boolean? = null,
     val appUpdateChannel: String? = null,
     val autoCheckAppUpdates: Boolean? = null,
+    /** 受控音源目录自动更新：开关、间隔、策略与展示用快照。 */
+    val sourceAutoUpdateEnabled: Boolean? = null,
+    val sourceUpdateIntervalHours: Int? = null,
+    val sourceMirrorPolicy: String? = null,
+    val sourceCatalogVersion: Long? = null,
+    val installedScriptVersions: Map<String, String>? = null,
+    val quarantinedScriptIds: Set<String>? = null,
     val playlistPlaybackStatsVersion: Int? = null,
     val playlistPlaybackStats: Map<String, PersistedPlaylistPlaybackStat>? = null,
 )

@@ -16,3 +16,6 @@ signing/
 *.jks
 *.keystore
 __pycache__
+
+# JVM attach 进程文件（调试时生成，勿入库）
+.attach_pid*

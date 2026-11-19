@@ -86,6 +86,8 @@ import kotlinx.serialization.Serializable
 import org.feeluown.mobile.LocalPlaybackQueueUiPort
 import org.feeluown.mobile.MusicTrack
 import org.feeluown.mobile.TrackSourceType
+import org.feeluown.mobile.source.InstalledScriptStatus
+import org.feeluown.mobile.sourceupdate.sourceUpdateNowMillis
 import kotlin.math.abs
 
 @Serializable
@@ -726,6 +728,11 @@ private fun PlaybackFeatureSettings(
             },
         )
     }
+
+    SourceCatalogSettings(
+        state = state.sourceUpdate,
+        controller = settingsController,
+    )
 
     SettingsGroup(title = "播放策略") {
         SettingsToggleRow(
@@ -1433,6 +1440,143 @@ private fun CustomPlaybackUrlSettings(busy: Boolean) {
 private fun customUrlTitle(url: String): String {
     val name = url.substringBefore('?').substringBefore('#').substringAfterLast('/')
     return name.substringBeforeLast('.').ifBlank { "自定义音频" }
+}
+
+/**
+ * 受控音源目录（设计文档 4.2 / 8.3）。
+ *
+ * 这里刻意把所有"危险"信息摊开：目录版本、上次成功时间、每个脚本的审核状态与错误，
+ * 而不是只给一个"已是最新"。用户要能自己判断"为什么这首歌搜不到"。
+ */
+@Composable
+private fun SourceCatalogSettings(
+    state: SourceUpdateUiState,
+    controller: SettingsFeatureController,
+) {
+    SettingsGroup(title = "音源脚本目录") {
+        SettingsToggleRow(
+            title = "自动检查脚本更新",
+            supportingText = if (state.available) {
+                "每天检查一次受控目录（自带签名校验与静态扫描）；失败按 1/4/12/24 小时退避，不影响已装版本"
+            } else {
+                "当前平台未启用脚本运行时，仅展示原生音源"
+            },
+            checked = state.enabled,
+            enabled = state.available && !state.busy,
+        ) { enabled -> controller.setSourceAutoUpdateEnabled(enabled) }
+        SettingsDivider(startPadding = FuoSpacing.lg)
+        SettingsChoiceRow(
+            title = "检查间隔",
+            supportingText = "仅影响正常检查；失败重试按 1/4/12/24 小时自动退避",
+            value = if (state.intervalHours >= 168) "每周" else "${state.intervalHours} 小时",
+            options = listOf(12, 24, 48, 168),
+            selected = state.intervalHours,
+            optionLabel = { hours -> if (hours >= 168) "每周" else "$hours 小时" },
+            enabled = state.available && state.enabled && !state.busy,
+            onSelect = { hours -> controller.setSourceUpdateIntervalHours(hours) },
+        )
+        SettingsDivider(startPadding = FuoSpacing.lg)
+        SettingsRow(
+            title = if (state.busy) "正在检查…" else "立即检查",
+            supportingText = state.message ?: sourceCatalogStatusText(state),
+            enabled = state.available && !state.busy,
+            trailingContent = {
+                Text(
+                    if (state.busy) "请稍候" else "检查",
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            },
+            onClick = { if (state.available && !state.busy) controller.checkSourceUpdatesNow() },
+        )
+        if (state.installed.isEmpty()) {
+            SettingsDivider(startPadding = FuoSpacing.lg)
+            SettingsRow(
+                title = "尚未安装任何脚本",
+                supportingText = "受控目录当前为空：社区脚本需通过签名、静态扫描与人工审核后才会上架，客户端不内置任何脚本",
+                enabled = false,
+            )
+        } else {
+            state.installed.forEach { script ->
+                SettingsDivider(startPadding = FuoSpacing.lg)
+                SourceScriptRow(
+                    script = script,
+                    busy = state.busy,
+                    onToggle = { enabled ->
+                        // 隔离状态下的"打开"= 解除隔离并启用，避免用户找不到恢复入口。
+                        if (enabled && script.quarantined) {
+                            controller.setSourceScriptQuarantined(script.id, false)
+                        }
+                        controller.setSourceScriptEnabled(script.id, enabled)
+                    },
+                    onQuarantine = { quarantined ->
+                        controller.setSourceScriptQuarantined(script.id, quarantined)
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceScriptRow(
+    script: InstalledScriptStatus,
+    busy: Boolean,
+    onToggle: (Boolean) -> Unit,
+    onQuarantine: (Boolean) -> Unit,
+) {
+    val active = script.enabled && !script.quarantined
+    SettingsRow(
+        title = "${script.name} ${script.version}",
+        supportingText = when {
+            script.quarantined -> "已隔离：自动更新不会重新启用它${script.lastError?.let { err -> "；上次错误：$err" }.orEmpty()}"
+            script.lastError != null -> "已停用（${script.lastError}）"
+            script.enabled -> "已启用 · 已通过目录审核"
+            else -> "已停用 · 已通过目录审核"
+        },
+        enabled = !busy,
+        trailingContent = {
+            Switch(
+                checked = active,
+                enabled = !busy,
+                onCheckedChange = onToggle,
+            )
+        },
+        onClick = { if (!busy) onToggle(!active) },
+    )
+    if (script.quarantined) {
+        SettingsRow(
+            title = "解除隔离",
+            supportingText = "解除后该脚本可再次被自动更新启用",
+            enabled = !busy,
+            trailingContent = { Text("解除", color = MaterialTheme.colorScheme.primary) },
+            onClick = { if (!busy) onQuarantine(false) },
+        )
+    }
+}
+
+/** 状态行文案：没有可信信息就直说"还没检查过"，不伪造时间。 */
+private fun sourceCatalogStatusText(state: SourceUpdateUiState): String {
+    if (!state.available) return "未启用脚本运行时"
+    if (!state.enabled) return "自动更新已关闭，可手动检查"
+    val status = state.status
+    if (status.lastSuccessMillis <= 0L) return "尚未成功检查过目录"
+    val scripts = if (state.installed.isEmpty()) "未安装脚本" else "已安装 ${state.installed.size} 个脚本"
+    val version = if (status.catalogVersion > 0) "目录版本 ${status.catalogVersion}" else "目录版本未知"
+    val failures = if (status.consecutiveFailures > 0) " · 连续失败 ${status.consecutiveFailures} 次" else ""
+    return "$version · $scripts · 上次成功 ${relativeTimeText(status.lastSuccessMillis)}$failures"
+}
+
+/** 相对时间避免引入跨平台日期格式化；设置页只需要"多久以前"这个粒度。 */
+private fun relativeTimeText(millis: Long): String {
+    if (millis <= 0L) return "从未"
+    val deltaMillis = (sourceUpdateNowMillis() - millis).coerceAtLeast(0L)
+    val minutes = deltaMillis / 60_000L
+    return when {
+        minutes < 1L -> "刚刚"
+        minutes < 60L -> "$minutes 分钟前"
+        minutes < 60L * 24L -> "${minutes / 60L} 小时前"
+        else -> "${minutes / (60L * 24L)} 天前"
+    }
 }
 
 /**

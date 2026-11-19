@@ -1,0 +1,7 @@
+# 受控音源目录按**原始字节**做 Ed25519 验签与 SHA-256 比对。
+# 这个仓库在 Windows 上默认 core.autocrlf=true，会把检出时的 LF 转成 CRLF，
+# 一旦字节变了，签名就永远验不过（而且只对 Windows 用户失败，极难定位）。
+# 因此这几类文件禁止任何换行转换。
+config/source-catalog/*.json -text
+config/source-catalog/*.json.sig -text
+config/source-catalog/*.schema.json -text

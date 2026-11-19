@@ -397,6 +397,14 @@ internal fun HttpClientConfig<*>.installProviderClientDefaults() {
 
 internal expect fun createProviderHttpClient(): HttpClient
 
+/**
+ * 给**独立编译的 provider 模块**（如 `provider:lxruntime`）复用统一网络配置的公开入口。
+ *
+ * 只需这一层：配置本身（超时、UA、重试策略）只应有一份，否则不同模块会对同一网络
+ * 表现出不同行为，排查问题时极难定位。
+ */
+fun createSharedProviderHttpClient(): HttpClient = createProviderHttpClient()
+
 fun currentTimeMillis(): Long = platformCurrentTimeMillis()
 
 internal expect fun platformCurrentTimeMillis(): Long

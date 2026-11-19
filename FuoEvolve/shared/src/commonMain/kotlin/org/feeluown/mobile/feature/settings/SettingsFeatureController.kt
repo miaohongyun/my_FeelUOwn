@@ -12,6 +12,10 @@ import org.feeluown.mobile.feature.settings.SettingsAudioQualityPort as CoreAudi
 import org.feeluown.mobile.feature.settings.SettingsCachePort as CoreCachePort
 import org.feeluown.mobile.feature.settings.SettingsDownloadPort as CoreDownloadPort
 import org.feeluown.mobile.feature.settings.SettingsFeatureOwner as CoreOwner
+import org.feeluown.mobile.source.InstalledScriptStatus
+import org.feeluown.mobile.source.SourceCatalogStatus
+import org.feeluown.mobile.source.SourceUpdateHost
+import org.feeluown.mobile.sourceupdate.UpdateReport
 import org.feeluown.mobile.feature.settings.SettingsFeaturePreferences as CorePreferences
 import org.feeluown.mobile.feature.settings.SettingsFeatureState as CoreState
 import org.feeluown.mobile.feature.settings.SettingsLocalMusicPort as CoreLocalMusicPort
@@ -27,6 +31,7 @@ data class SettingsFeatureUiState(
     val downloadTasks: List<DownloadTask> = emptyList(),
     val localMusic: LocalMusicUiState = LocalMusicUiState(viewMode = LocalMusicViewMode.All),
     val appUpdate: AppUpdateUiState = AppUpdateUiState(),
+    val sourceUpdate: SourceUpdateUiState = SourceUpdateUiState(),
     val statusBarLyricsAvailable: Boolean = false,
     val bydInstrumentLyricsAvailable: Boolean = false,
     val bluetoothLyricsAvailable: Boolean = false,
@@ -74,6 +79,14 @@ interface SettingsFeatureController {
     fun setBluetoothLyricsAvailability(available: Boolean) = Unit
     fun setBluetoothLyricsEnabled(enabled: Boolean) = Unit
     fun setProviderPlaybackReportingEnabled(providerId: String, enabled: Boolean)
+    /** 音源脚本目录：状态、开关、手动检查与单脚本控制。无宿主注入时全部是空实现。 */
+    fun refreshSourceUpdateStatus() = Unit
+    fun setSourceAutoUpdateEnabled(enabled: Boolean) = Unit
+    fun setSourceUpdateIntervalHours(hours: Int) = Unit
+    fun checkSourceUpdatesNow() = Unit
+    fun setSourceScriptEnabled(scriptId: String, enabled: Boolean) = Unit
+    fun setSourceScriptQuarantined(scriptId: String, quarantined: Boolean) = Unit
+
     fun setAppUpdateChannel(channel: AppUpdateChannel) = Unit
     fun setAutoCheckAppUpdates(enabled: Boolean) = Unit
     fun checkAppUpdates() = Unit
@@ -97,6 +110,7 @@ fun createSettingsFeatureController(
     scope: CoroutineScope,
     bydInstrumentLyricsAvailable: Boolean = false,
     appUpdateController: AppUpdateController = NoopAppUpdateController,
+    sourceUpdateHost: SourceUpdateHost? = null,
 ): SettingsFeatureController {
     val owner = createSettingsFeatureOwner(
         preferences = BoundSettingsPreferencesPort(settingsRepository),
@@ -114,6 +128,7 @@ fun createSettingsFeatureController(
         appUpdateController = appUpdateController,
         scope = scope,
         bydInstrumentLyricsAvailable = bydInstrumentLyricsAvailable,
+        sourceUpdateHost = sourceUpdateHost,
     )
 }
 
@@ -123,16 +138,23 @@ private class BoundSettingsFeatureController(
     private val appUpdateController: AppUpdateController,
     private val scope: CoroutineScope,
     private val bydInstrumentLyricsAvailable: Boolean,
+    private val sourceUpdateHost: SourceUpdateHost? = null,
 ) : SettingsFeatureController {
     private val bluetoothLyricsAvailable = MutableStateFlow(false)
+    private val sourceUpdateState = MutableStateFlow(SourceUpdateUiState(available = sourceUpdateHost != null))
+
+    init {
+        refreshSourceUpdateStatus()
+    }
 
     override val uiState: StateFlow<SettingsFeatureUiState> = combine(
         owner.state,
         settingsRepository.state,
         appUpdateController.uiState,
         bluetoothLyricsAvailable,
-    ) { state, settingsState, appUpdateState, bluetoothAvailable ->
-        toUiState(state, settingsState.settings, appUpdateState, bluetoothAvailable)
+        sourceUpdateState,
+    ) { state, settingsState, appUpdateState, bluetoothAvailable, sourceUpdate ->
+        toUiState(state, settingsState.settings, appUpdateState, bluetoothAvailable, sourceUpdate)
     }.stateIn(
         scope,
         SharingStarted.Eagerly,
@@ -141,6 +163,7 @@ private class BoundSettingsFeatureController(
             settingsRepository.state.value.settings,
             appUpdateController.uiState.value,
             bluetoothLyricsAvailable.value,
+            sourceUpdateState.value,
         ),
     )
 
@@ -248,6 +271,72 @@ private class BoundSettingsFeatureController(
     override fun checkAppUpdates() = appUpdateController.checkNow()
     override fun downloadAndInstallAppUpdate() = appUpdateController.downloadAndInstall()
     override fun saveAppUpdateToDownloads() = appUpdateController.saveToDownloads()
+    override fun refreshSourceUpdateStatus() {
+        val host = sourceUpdateHost ?: return
+        scope.launch {
+            val status = runCatching { host.status() }.getOrNull() ?: return@launch
+            val settings = settingsRepository.state.value.settings
+            sourceUpdateState.value = sourceUpdateState.value.copy(
+                available = true,
+                enabled = settings.sourceAutoUpdateEnabled,
+                intervalHours = settings.sourceUpdateIntervalHours,
+                status = status,
+                installed = status.installed,
+                busy = false,
+            )
+        }
+    }
+
+    override fun setSourceAutoUpdateEnabled(enabled: Boolean) {
+        val host = sourceUpdateHost ?: return
+        scope.launch {
+            host.setAutoUpdateEnabled(enabled)
+            sourceUpdateState.value = sourceUpdateState.value.copy(enabled = enabled)
+        }
+    }
+
+    override fun setSourceUpdateIntervalHours(hours: Int) {
+        val host = sourceUpdateHost ?: return
+        scope.launch {
+            host.setIntervalHours(hours)
+            sourceUpdateState.value = sourceUpdateState.value.copy(
+                intervalHours = hours.coerceIn(MIN_SOURCE_UPDATE_INTERVAL_HOURS, MAX_SOURCE_UPDATE_INTERVAL_HOURS),
+            )
+        }
+    }
+
+    override fun checkSourceUpdatesNow() {
+        val host = sourceUpdateHost ?: return
+        scope.launch {
+            sourceUpdateState.value = sourceUpdateState.value.copy(busy = true, message = null)
+            val report = runCatching { host.checkIfDue(force = true) }
+                .getOrElse { error -> org.feeluown.mobile.sourceupdate.UpdateReport.Failed(error.message ?: "检查失败") }
+            val status = runCatching { host.status() }.getOrNull()
+            sourceUpdateState.value = sourceUpdateState.value.copy(
+                busy = false,
+                message = report.toDisplayMessage(),
+                status = status ?: sourceUpdateState.value.status,
+                installed = status?.installed ?: sourceUpdateState.value.installed,
+            )
+        }
+    }
+
+    override fun setSourceScriptEnabled(scriptId: String, enabled: Boolean) {
+        val host = sourceUpdateHost ?: return
+        scope.launch {
+            runCatching { host.setScriptEnabled(scriptId, enabled) }
+            refreshSourceUpdateStatus()
+        }
+    }
+
+    override fun setSourceScriptQuarantined(scriptId: String, quarantined: Boolean) {
+        val host = sourceUpdateHost ?: return
+        scope.launch {
+            runCatching { host.setScriptQuarantined(scriptId, quarantined) }
+            refreshSourceUpdateStatus()
+        }
+    }
+
     override fun dismissFeedback(feedback: String) = owner.dismissFeedback(feedback)
 
     private fun toUiState(
@@ -255,12 +344,17 @@ private class BoundSettingsFeatureController(
         appSettings: AppSettings,
         appUpdateState: AppUpdateUiState,
         bluetoothAvailable: Boolean,
+        sourceUpdate: SourceUpdateUiState,
     ) = SettingsFeatureUiState(
         settings = appSettings,
         cacheUsage = state.cacheUsage,
         downloadTasks = state.downloadTasks,
         localMusic = state.localMusic,
         appUpdate = appUpdateState,
+        sourceUpdate = sourceUpdate.copy(
+            enabled = appSettings.sourceAutoUpdateEnabled,
+            intervalHours = appSettings.sourceUpdateIntervalHours,
+        ),
         statusBarLyricsAvailable = state.statusBarLyricsAvailable,
         bydInstrumentLyricsAvailable = bydInstrumentLyricsAvailable,
         bluetoothLyricsAvailable = bluetoothAvailable,
@@ -360,3 +454,31 @@ internal fun cacheLimitFor(audioMb: Int, imageMb: Int): CacheLimit = CacheLimit(
     audioMaxBytes = audioMb.coerceAtLeast(0).toLong() * 1024L * 1024L,
     imageMaxBytes = imageMb.coerceAtLeast(0).toLong() * 1024L * 1024L,
 )
+
+/**
+ * 音源脚本目录在设置页的展示状态。
+ *
+ * [status] 与 [installed] 来自 `sources/index.json`，是权威安装状态；
+ * [enabled]/[intervalHours] 来自应用设置，只是用户偏好。
+ */
+data class SourceUpdateUiState(
+    val available: Boolean = false,
+    val enabled: Boolean = true,
+    val intervalHours: Int = DEFAULT_SOURCE_UPDATE_INTERVAL_HOURS,
+    val busy: Boolean = false,
+    val message: String? = null,
+    val status: SourceCatalogStatus = SourceCatalogStatus(),
+    val installed: List<InstalledScriptStatus> = emptyList(),
+)
+
+/** 把检查结果翻译成一句用户能看懂的话，而不是把异常原样抛到界面上。 */
+internal fun UpdateReport.toDisplayMessage(): String = when (this) {
+    is UpdateReport.UpToDate -> "目录已是最新（版本 $catalogVersion）"
+    is UpdateReport.Installed -> when {
+        scriptIds.isEmpty() -> "检查完成，有 ${errors.size} 个脚本未能安装"
+        errors.isEmpty() -> "已更新 ${scriptIds.size} 个脚本：${scriptIds.joinToString()}"
+        else -> "已更新 ${scriptIds.size} 个脚本；${errors.size} 个失败：${errors.first()}"
+    }
+    is UpdateReport.Skipped -> "本次未检查：$reason"
+    is UpdateReport.Failed -> "检查失败：$reason"
+}

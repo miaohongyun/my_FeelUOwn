@@ -178,6 +178,12 @@ internal fun AppSettings.toPersistedSettings(): PersistedSettingsV1 = PersistedS
     waveformAnimationDisabled = waveformAnimationDisabled,
     appUpdateChannel = appUpdateChannel.name,
     autoCheckAppUpdates = autoCheckAppUpdates,
+    sourceAutoUpdateEnabled = sourceAutoUpdateEnabled,
+    sourceUpdateIntervalHours = sourceUpdateIntervalHours,
+    sourceMirrorPolicy = sourceMirrorPolicy,
+    sourceCatalogVersion = sourceCatalogVersion,
+    installedScriptVersions = installedScriptVersions.takeIf { it.isNotEmpty() },
+    quarantinedScriptIds = quarantinedScriptIds.takeIf { it.isNotEmpty() },
     playlistPlaybackStatsVersion = playlistPlaybackStatsVersion,
     playlistPlaybackStats = playlistPlaybackStats.mapValues { (_, stat) ->
         PersistedPlaylistPlaybackStat(stat.playCount, stat.lastPlayedAtMillis)
@@ -245,6 +251,13 @@ internal fun PersistedSettingsV1.toAppSettings(): AppSettings {
         waveformAnimationDisabled = waveformAnimationDisabled ?: defaults.waveformAnimationDisabled,
         appUpdateChannel = appUpdateChannel.enumOr(defaults.appUpdateChannel),
         autoCheckAppUpdates = autoCheckAppUpdates ?: defaults.autoCheckAppUpdates,
+        sourceAutoUpdateEnabled = sourceAutoUpdateEnabled ?: defaults.sourceAutoUpdateEnabled,
+        sourceUpdateIntervalHours = (sourceUpdateIntervalHours ?: defaults.sourceUpdateIntervalHours)
+            .coerceIn(MIN_SOURCE_UPDATE_INTERVAL_HOURS, MAX_SOURCE_UPDATE_INTERVAL_HOURS),
+        sourceMirrorPolicy = sourceMirrorPolicy?.takeIf { it.isNotBlank() } ?: defaults.sourceMirrorPolicy,
+        sourceCatalogVersion = sourceCatalogVersion,
+        installedScriptVersions = installedScriptVersions ?: defaults.installedScriptVersions,
+        quarantinedScriptIds = quarantinedScriptIds ?: defaults.quarantinedScriptIds,
         playlistPlaybackStatsVersion = playlistPlaybackStatsVersion ?: defaults.playlistPlaybackStatsVersion,
         playlistPlaybackStats = playlistPlaybackStats
             ?.mapValues { (_, stat) -> PlaylistPlaybackStat(stat.playCount, stat.lastPlayedAtMillis) }

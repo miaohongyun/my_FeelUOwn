@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-18T00:00:00Z",
+  "resolvers": [
+    {
+      "id": "jamendo-official",
+      "name": "Jamendo 开放曲库",
+      "kind": "open-catalog",
+      "baseUrl": "https://api.jamendo.com/v3.0",
+      "authMode": "client_id",
+      "timeoutMs": 8000,
+      "allowedHosts": ["api.jamendo.com"],
+      "enabledByDefault": true,
+      "priority": 200,
+      "healthCheckPath": "/tracks",
+      "notes": "只提供 Jamendo 授权范围内的音乐，曲目覆盖与商业流行曲库不同；需要用户自行申请 client_id"
+    }
+  ]
+}
