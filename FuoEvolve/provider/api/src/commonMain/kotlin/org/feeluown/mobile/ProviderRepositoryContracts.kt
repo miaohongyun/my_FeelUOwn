@@ -78,6 +78,15 @@ interface ProviderRegistryRepository {
     suspend fun updateEnabledProviders(providerIds: Set<String>) = Unit
     suspend fun providers(): List<ProviderInfo>
     suspend fun providerCapabilities(): List<ProviderCapabilities> = emptyList()
+
+    /**
+     * 立即释放某个动态脚本 Provider 为 [scriptId] 持有的运行时（如 QuickJS context）。
+     *
+     * 默认无操作：内建 Provider 没有"脚本运行时"这一层。真正持有脚本 runtime 的实现
+     * 覆盖它，供音源应用层在用户停用/隔离/删除/更新脚本时主动回收内存，而不是等到
+     * 下一次搜索才惰性淘汰。
+     */
+    suspend fun releaseDynamicScriptRuntime(scriptId: String) = Unit
 }
 
 /** Read-only provider surface needed by search consumers. */

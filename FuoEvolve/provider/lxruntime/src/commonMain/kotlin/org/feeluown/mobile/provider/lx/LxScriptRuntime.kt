@@ -8,7 +8,6 @@ import io.ktor.client.HttpClient
 import io.ktor.client.request.request
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
-import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import kotlinx.coroutines.CancellationException
@@ -24,6 +23,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.concurrent.Volatile
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -35,7 +35,10 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import org.feeluown.mobile.sourceupdate.BoundedBodyRead
+import org.feeluown.mobile.sourceupdate.HttpBodyLimits
 import org.feeluown.mobile.sourceupdate.crypto.Md5
+import org.feeluown.mobile.sourceupdate.readBodyBounded
 
 /**
  * 一个 LX Music 自定义音源脚本的执行实例。
@@ -45,8 +48,27 @@ import org.feeluown.mobile.sourceupdate.crypto.Md5
  * - 网络不由脚本直连：脚本调 `lx.request` → JS shim → Kotlin `__lxHttp` → Ktor。这样
  *   宿主能做 scheme/私网校验、超时和体积上限，脚本拿不到 socket。
  * - 超时靠 `evaluationTimeoutMillis`，QuickJS 会强制中断死循环，而不是让播放流程一直挂着。
- * - `crypto` / `zlib` 暂不实现：官方移动端对 zlib 也是「未实现」，crypto 只支持
- *   aes-128-cbc/ecb + md5 + rsaEncrypt。这类脚本在 FuoEvolve 上会明确失败而不是给出错误 URL。
+ * - `crypto` / `zlib` 仅实现 `md5` 与 `buffer`(base64/hex/utf8)：官方移动端对 zlib 标注
+ *   「未实现」；AES/RSA/randomBytes 当前没有**已批准且真实可用**的脚本依赖（唯一依赖它们的
+ *   無名/小熊猫均为 REJECT/QUARANTINE 且接口已失效），因此不盲目补齐。这些原语在桥接层
+ *   调用时明确抛错，不返回伪造值；依赖它们的脚本无法初始化，而不是给出错误 URL。
+ *
+ * ## 生命周期与并发（[RuntimeSession]）
+ *
+ * 每次 [load] 创建一个不可变的 [RuntimeSession]，它独占自己的 QuickJs 实例、timer scope、
+ * timer 表和生命周期状态。所有绑定闭包捕获的是**那一次 load 的 session**（局部 val），
+ * 不再读取外层可变属性。因此：
+ * - 旧 context 的 asyncFunction 即使晚于 close 恢复，也只能操作自己那份（已取消的）session，
+ *   绝不会把延时挂到新 session 的 scope / 写进新 session 的 timer 表；
+ * - [close] 只关闭"当前 session"，且 session 内部用 [Session.closed] 幂等保护；
+ * - 连续 close、close 与 clearTimeout 并发、close 与 load 并发都不会交叉污染。
+ *
+ * quickjs-kt 1.0.15 的实证行为（反编译 QuickJs.class）：
+ * - asyncFunction 的协程挂在**库自己的** coroutineScope 上（不是我们的 timer scope），并登记到
+ *   库的 asyncJobs；`close()` 用 AtomicBoolean CAS 幂等，遍历 asyncJobs 逐个 cancel；
+ * - resolve/reject JS Promise 前检查 `isClosed()`，close 后不再向 JS 写 Promise；
+ * - `close()` **不 join** asyncFunction 协程，只 cancel 后立刻销毁 native context。
+ * 因此宿主侧必须自己保证 timer 协程与登记表收尾——这正是 [RuntimeSession] 的职责。
  */
 @OptIn(ExperimentalEncodingApi::class)
 class LxScriptRuntime(
@@ -56,40 +78,27 @@ class LxScriptRuntime(
 
     /**
      * 关闭自动重定向的客户端视图：重定向由 [sendFollowingAllowedRedirects] 手动处理，
-     * 每一跳都重新过域名白名单。
+     * 每一跳都重新过域名白名单。此客户端无状态，可跨 session 共享。
      */
     private val noRedirectClient = httpClient.config { followRedirects = false }
 
-    private var quickJs: QuickJs? = null
-    private var scriptName: String = ""
-    private var loaded = false
+    /** 当前会话；load 时整体替换。所有可变状态都封在 session 内。 */
+    private var session: RuntimeSession? = null
 
-    /**
-     * 计时器专用 scope：脚本 setTimeout 产生的所有 delay 协程都挂在它上面。
-     * close() 时整体取消，保证"脚本关闭后回调不再执行"且不会泄漏协程。
-     * 每次 load() 重建，避免 cancel 后的 scope 被复用。
-     */
-    private var timerScope = newTimerScope()
+    /** 已创建会话的快照（只读观测，供生命周期测试断言旧 session 不残留、不污染新 session）。 */
+    private val sessionHistory = mutableListOf<RuntimeSession>()
 
-    private fun newTimerScope() = CoroutineScope(
-        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, _ -> Unit },
-    )
+    val isLoaded: Boolean get() = session?.let { !it.closed } ?: false
 
-    /**
-     * 每个 setTimeout 对应一个"取消信号"：clearTimeout 让对应信号完成，
-     * 正在 select 中等待的延时立即被唤醒并退出，而不是让一个长 timer 一直挂到 runtime 关闭。
-     * 用 Mutex 保护以承受并发脚本回调。
-     */
-    private val timerSignals = mutableMapOf<Long, CompletableDeferred<Unit>>()
-    private val timerJobsMutex = Mutex()
+    /** 会话快照：id 递增、是否已关闭、当前仍在表的 timer 数。仅测试使用。 */
+    internal data class SessionSnapshot(val id: Int, val closed: Boolean, val activeTimers: Int)
 
-    /** 供测试断言"timer 已全部释放"：当前仍在计时/等待回调的 timer 数量。 */
-    internal suspend fun activeTimerCount(): Int = timerJobsMutex.withLock { timerSignals.size }
-
-    /** 目录为该脚本声明的域名白名单；空集合时 [LxNetworkPolicy] 会拒绝一切网络请求。 */
-    private var allowedHosts: Set<String> = emptySet()
-
-    val isLoaded: Boolean get() = loaded
+    internal suspend fun sessionSnapshots(): List<SessionSnapshot> {
+        val snapshot = sessionHistory.toList()
+        return snapshot.mapIndexed { index, s ->
+            SessionSnapshot(index + 1, s.closed, s.activeTimerCount())
+        }
+    }
 
     /** 加载并执行脚本源码。执行期间的顶层异常按官方语义视为「初始化失败」。 */
     suspend fun load(
@@ -101,29 +110,27 @@ class LxScriptRuntime(
         require(source.encodeToByteArray().size <= LxProtocol.MAX_SCRIPT_BYTES) {
             "脚本体积超过 ${LxProtocol.MAX_SCRIPT_BYTES} 字节上限"
         }
+        // 先关闭旧 session（若并发 load，另一个 load 的 session 也会被这里关闭；见类注释）。
         close()
-        timerScope = newTimerScope()
-
-        scriptName = name
-        this.allowedHosts = allowedHosts
-        val instance = QuickJs.create(Dispatchers.Default)
-        instance.evaluationTimeoutMillis = timeoutMs
+        val newSession = RuntimeSession(name, allowedHosts, timeoutMs)
+        sessionHistory += newSession
+        val instance = newSession.quickJs
         try {
-            registerBindings(instance)
+            registerBindings(instance, newSession)
             instance.evaluate<Any?>(LxBridge.source(name), filename = "lx_bridge.js")
             instance.evaluate<Any?>(source, filename = name)
-            loaded = true
+            // 只有全部成功后才发布；失败时旧 session 已在上面 close，保持"无可用 runtime"。
+            session = newSession
         } catch (e: QuickJsException) {
-            runCatching { instance.close() }
+            newSession.close()
             throw LxScriptException("脚本 [$name] 执行失败: ${e.message}", e)
         } catch (e: CancellationException) {
-            runCatching { instance.close() }
+            newSession.close()
             throw e
         } catch (e: Exception) {
-            runCatching { instance.close() }
+            newSession.close()
             throw LxScriptException("脚本 [$name] 加载失败: ${e.message}", e)
         }
-        quickJs = instance
     }
 
     /**
@@ -133,17 +140,18 @@ class LxScriptRuntime(
      * 不能当"还没准备好"重试。
      */
     suspend fun initialize(timeoutMs: Long = LxProtocol.DEFAULT_INIT_TIMEOUT_MS): LxScriptMeta {
-        val instance = requireInstance()
+        val s = requireSession()
+        val instance = s.quickJs
         instance.evaluationTimeoutMillis = timeoutMs
-        val raw = evaluateOrTimeout(instance, timeoutMs) { instance.evaluate<String?>("__lxInited()") }
-            ?: throw LxProtocolException("脚本 [$scriptName] 未发送 inited 事件")
+        val raw = evaluateOrTimeout(s, timeoutMs) { instance.evaluate<String?>("__lxInited()") }
+            ?: throw LxProtocolException("脚本 [${s.name}] 未发送 inited 事件")
 
         val payload = runCatching { json.parseToJsonElement(raw).jsonObject }
             .getOrElse { throw LxProtocolException("inited 载荷不是合法 JSON: ${it.message}") }
 
         payload["status"]?.jsonPrimitive?.contentOrNull?.let { status ->
             if (status.equals("false", ignoreCase = true)) {
-                throw LxProtocolException("脚本 [$scriptName] 在 inited 中报告初始化失败")
+                throw LxProtocolException("脚本 [${s.name}] 在 inited 中报告初始化失败")
             }
         }
 
@@ -169,9 +177,9 @@ class LxScriptRuntime(
         }
 
         if (sources.isEmpty()) {
-            throw LxProtocolException("脚本 [$scriptName] 的 inited 未声明任何可用的 music 源")
+            throw LxProtocolException("脚本 [${s.name}] 的 inited 未声明任何可用的 music 源")
         }
-        return LxScriptMeta(scriptName = scriptName, sources = sources)
+        return LxScriptMeta(scriptName = s.name, sources = sources)
     }
 
     /**
@@ -185,7 +193,8 @@ class LxScriptRuntime(
         quality: String,
         timeoutMs: Long = LxProtocol.DEFAULT_EVALUATION_TIMEOUT_MS,
     ): String {
-        val instance = requireInstance()
+        val s = requireSession()
+        val instance = s.quickJs
         instance.evaluationTimeoutMillis = timeoutMs
 
         val payload = buildJsonObject {
@@ -200,7 +209,7 @@ class LxScriptRuntime(
             )
         }
 
-        val result = evaluateOrTimeout(instance, timeoutMs) {
+        val result = evaluateOrTimeout(s, timeoutMs) {
             // 脚本的 request 回调按官方要求必须返回 Promise。QuickJS 侧普通 evaluate 不会
             // 等待 Promise，所以这里用 ES module 执行顶层 await，把异步结果落回全局变量。
             instance.evaluate<Any?>(DISPATCH_MODULE_TEMPLATE.replace(DISPATCH_PAYLOAD, quote(payload.toString())), filename = "lx_dispatch.mjs", asModule = true)
@@ -209,44 +218,88 @@ class LxScriptRuntime(
 
         val errorText = instance.evaluate<String?>("globalThis.__lxDispatchError")
         if (!errorText.isNullOrBlank()) {
-            throw LxScriptException("脚本 [$scriptName] 对 $platform/$quality 失败: $errorText")
+            throw LxScriptException("脚本 [${s.name}] 对 $platform/$quality 失败: $errorText")
         }
 
         return extractUrl(result)
-            ?: throw LxScriptException("脚本 [$scriptName] 对 $platform/$quality 未返回可播放 URL")
+            ?: throw LxScriptException("脚本 [${s.name}] 对 $platform/$quality 未返回可播放 URL")
     }
 
     /** 脚本是否注册了 request 事件（用于加载后快速判断脚本是否完整）。 */
     suspend fun hasRequestHandler(): Boolean {
-        val instance = requireInstance()
+        val instance = requireSession().quickJs
         return runCatching { instance.evaluate<Boolean>("__lxHasHandler('request')") }.getOrDefault(false)
     }
 
+    /**
+     * 关闭当前 session。幂等：重复调用不重复销毁 context。
+     *
+     * 与 clearTimeout 并发安全：timer 表的所有写都在 [RuntimeSession.timerMutex] 内；
+     * 这里用 tryLock 拿不到就跳过主动清理，依赖各 asyncFunction 的 finally 自行移除
+     * （它们用的是同一把锁，且只操作自己 session 的表）。
+     */
     override fun close() {
-        // 先取消所有 setTimeout 协程：它们的回调引用 JS context，必须在 context 销毁前停止。
-        // cancel 会让所有 withContext(timerScope) 抛 CancellationException，各 asyncFunction 的
-        // finally 会带锁从 timerSignals 移除自己——所以这里**不能**无锁遍历同一个 map
-        // （androidHost 上实测到 ConcurrentModificationException）。
-        timerScope.cancel()
-        if (timerJobsMutex.tryLock()) {
-            try {
-                timerSignals.values.forEach { it.complete(Unit) }
-                timerSignals.clear()
-            } finally {
-                timerJobsMutex.unlock()
-            }
-        }
-        // tryLock 失败说明有绑定回调正在写表：它完成后会自行清理，close 不阻塞等待。
-        val instance = quickJs ?: return
-        quickJs = null
-        loaded = false
-        runCatching { instance.close() }
+        session?.close()
+        // 不置空 session：保留它让 activeTimerCount 在 close 后仍可观测该会话的残留表，
+        // 也让"close 后旧 asyncFunction 不会写新表"可被测试断言。下次 load 会整体替换。
     }
 
     // ---- 内部实现 ----
 
-    private fun requireInstance(): QuickJs =
-        quickJs ?: throw IllegalStateException("脚本尚未加载")
+    private fun requireSession(): RuntimeSession =
+        session?.takeIf { !it.closed }
+            ?: throw IllegalStateException("脚本尚未加载")
+
+    /**
+     * 一次 load 对应的不可变执行会话。timer scope / timer 表 / 生命周期都属于它，
+     * 所有绑定闭包捕获它本身（val），因此不存在"旧异步任务读新 scope"的可能。
+     */
+    private inner class RuntimeSession(
+        val name: String,
+        val allowedHosts: Set<String>,
+        timeoutMs: Long,
+    ) {
+        val quickJs: QuickJs = QuickJs.create(Dispatchers.Default).also {
+            it.evaluationTimeoutMillis = timeoutMs
+        }
+        val timerScope: CoroutineScope = newTimerScope()
+        val timerSignals = mutableMapOf<Long, CompletableDeferred<Unit>>()
+        val timerMutex = Mutex()
+
+        /** 幂等关闭标志；只读可见性用 @Volatile 足够（close 由单线程调用，库内部另有 CAS）。 */
+        @Volatile
+        var closed = false
+            private set
+
+        suspend fun activeTimerCount(): Int = timerMutex.withLock { timerSignals.size }
+
+        fun close() {
+            if (closed) return
+            closed = true
+            // 先取消 timer scope：withContext(timerScope) 抛 CancellationException，
+            // select 不会走 onAwait 正常返回，因此 JS .then 回调不会执行。
+            timerScope.cancel()
+            if (timerMutex.tryLock()) {
+                try {
+                    // 用 cancel（不是 complete）：让任何尚未进入 select 的等待者也走异常路径，
+                    // 绝不因为"信号正常完成"而触发 JS 回调。
+                    timerSignals.values.forEach { it.cancel() }
+                    timerSignals.clear()
+                } finally {
+                    timerMutex.unlock()
+                }
+            }
+            // 库的 close() 幂等且会 cancel 自己的 asyncJobs；这里 try/catch 兜底。
+            runCatching { quickJs.close() }
+        }
+    }
+
+    private fun newTimerScope() = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, _ -> Unit },
+    )
+
+    /** 供测试断言"当前会话 timer 已全部释放"。没加载过或已 close 时按 0 计。 */
+    internal suspend fun activeTimerCount(): Int = session?.activeTimerCount() ?: 0
 
     /**
      * 求值超时**只**依赖 QuickJS 自己的 `evaluationTimeoutMillis`（它会在 native 侧强制中断
@@ -254,25 +307,25 @@ class LxScriptRuntime(
      * 既无法打断它，又会在虚拟时间调度器（如测试环境）下与真实时间抢跑造成误判。
      */
     private suspend fun <T> evaluateOrTimeout(
-        instance: QuickJs,
+        s: RuntimeSession,
         timeoutMs: Long,
         block: suspend () -> T,
     ): T {
-        instance.evaluationTimeoutMillis = timeoutMs
+        s.quickJs.evaluationTimeoutMillis = timeoutMs
         return try {
             block()
         } catch (e: QuickJsException) {
             val message = e.message.orEmpty()
             if (message.contains("interrupt", ignoreCase = true) || message.contains("timeout", ignoreCase = true)) {
-                throw LxScriptTimeoutException("脚本 [$scriptName] 求值超时 (${timeoutMs}ms)")
+                throw LxScriptTimeoutException("脚本 [${s.name}] 求值超时 (${timeoutMs}ms)")
             }
-            throw LxScriptException("脚本 [$scriptName] 执行异常: $message", e)
+            throw LxScriptException("脚本 [${s.name}] 执行异常: $message", e)
         } catch (e: CancellationException) {
             throw e
         } catch (e: LxScriptTimeoutException) {
             throw e
         } catch (e: Exception) {
-            throw LxScriptException("脚本 [$scriptName] 执行异常: ${e.message}", e)
+            throw LxScriptException("脚本 [${s.name}] 执行异常: ${e.message}", e)
         }
     }
 
@@ -303,11 +356,11 @@ class LxScriptRuntime(
         return null
     }
 
-    private fun registerBindings(instance: QuickJs) {
+    private fun registerBindings(instance: QuickJs, s: RuntimeSession) {
         instance.asyncFunction<String>("__lxHttp") { args ->
             val requestJson = args.firstOrNull()?.toString()
                 ?: throw LxScriptException("__lxHttp 缺少请求参数")
-            performHttp(requestJson)
+            performHttp(requestJson, s)
         }
         instance.function<Any?>("__lxBufferFrom") { args ->
             bufferFrom(args.getOrNull(0)?.toString().orEmpty(), args.getOrNull(1)?.toString() ?: "utf8")
@@ -324,47 +377,45 @@ class LxScriptRuntime(
                 "lx.utils.crypto.$name 尚未在 FuoEvolve 中实现；该脚本依赖此原语，无法安全解析",
             )
         }
-        // setTimeout 的延时原语：参数 (id, delayMs)。
-        // 每个 timer 是一个挂在 timerScope 上的独立 Job，登记到 timerJobs：
-        // - clearTimeout → __lxCancelTimer(id) 精确取消该 Job；
-        // - close() → timerScope.cancel() 取消全部。
-        // 取消后 asyncFunction 抛 CancellationException → JS 侧 .catch 吞掉 → .then 里的回调不执行。
+        // setTimeout 的延时原语：参数 (id, delayMs)。所有状态都取自捕获的 session s，
+        // 旧 context 的 asyncFunction 只敢碰旧 session，不会误入 load() 之后的新 session。
         instance.asyncFunction<Any?>("__lxDelay") { args ->
             val id = args.getOrNull(0)?.toString()?.toLongOrNull() ?: 0L
             val millis = (args.getOrNull(1)?.toString()?.toLongOrNull() ?: 0L)
                 .coerceIn(0L, MAX_TIMER_DELAY_MS)
             val signal = CompletableDeferred<Unit>()
-            timerJobsMutex.withLock { timerSignals[id] = signal }
+            // session 已关闭就不再登记：避免 close 之后表被新增条目污染（activeTimerCount 归零才可断言）。
+            val registered = s.timerMutex.withLock {
+                if (s.closed) false else { s.timerSignals[id] = signal; true }
+            }
+            if (!registered) return@asyncFunction null
             try {
-                // 在 timerScope 上等待"到时"或"被 clearTimeout 取消"，两路都会唤醒：
-                // close() 取消 timerScope 时，这里的 withContext 抛 CancellationException，
-                // asyncFunction → Promise reject → JS .catch 吞掉，回调不执行。
-                withContext(timerScope.coroutineContext) {
+                withContext(s.timerScope.coroutineContext) {
                     select<Unit> {
                         signal.onAwait { }
                         onTimeout(millis) { }
                     }
                 }
             } finally {
-                // 用单参数 remove：双参数 remove(key, value) 在 Kotlin/Native 目标上不可用。
-                timerJobsMutex.withLock {
-                    if (timerSignals[id] === signal) timerSignals.remove(id)
+                // 单参数 remove（双参 remove(key,value) 在 Kotlin/Native 不可用）；identity 判断
+                // 防止误删"同 id 但属于重试"的新信号。
+                s.timerMutex.withLock {
+                    if (s.timerSignals[id] === signal) s.timerSignals.remove(id)
                 }
             }
             null
         }
-        // clearTimeout 取消指定 timer：让对应信号完成，select 立即走 onAwait 分支退出，
-        // 不等待自然到时（否则轮询式长 timer 会一直占用协程直到 close）。
-        // 用 asyncFunction 是因为 Mutex.withLock 需要挂起；JS 侧不 await 也可，副作用照常发生。
+        // clearTimeout：让对应信号"正常完成"，select 走 onAwait 退出（脚本主动清除，
+        // JS .then 里 timers[id] 已 delete，回调不会重复执行）。仅作用于捕获的 session。
         instance.asyncFunction<Any?>("__lxCancelTimer") { args ->
             val id = args.getOrNull(0)?.toString()?.toLongOrNull() ?: 0L
-            val signal = timerJobsMutex.withLock { timerSignals.remove(id) }
+            val signal = s.timerMutex.withLock { s.timerSignals.remove(id) }
             signal?.complete(Unit)
             null
         }
     }
 
-    private suspend fun performHttp(requestJson: String): String {
+    private suspend fun performHttp(requestJson: String, s: RuntimeSession): String {
         val request = json.parseToJsonElement(requestJson).jsonObject
         val url = request["url"]?.jsonPrimitive?.contentOrNull
             ?: throw LxScriptException("lx.request 缺少 url")
@@ -372,7 +423,7 @@ class LxScriptRuntime(
         val body = request["body"]?.jsonPrimitive?.contentOrNull
         val headerObject = request["headers"] as? JsonObject
 
-        val rejection = LxNetworkPolicy.rejectionReason(url, allowedHosts)
+        val rejection = LxNetworkPolicy.rejectionReason(url, s.allowedHosts)
         if (rejection != null) throw LxScriptException("lx.request 被拒绝: $rejection")
 
         val timeoutMs = (request["timeout"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L)
@@ -381,28 +432,30 @@ class LxScriptRuntime(
 
         return try {
             // 放到 Default 上计时，避免虚拟时间调度器把 timeout 提前触发。
-            val responseOrNull = withContext(Dispatchers.Default) {
+            // 请求 + 流式读取一起纳入超时；超限立即中断，不把超大响应整体读入内存。
+            val outcome = withContext(Dispatchers.Default) {
                 withTimeoutOrNull(timeoutMs + SUPPORT_MARGIN_MS) {
-                    sendFollowingAllowedRedirects(url, method, body, headerObject)
+                    val response = sendFollowingAllowedRedirects(url, method, body, headerObject, s.allowedHosts)
+                    val read = readBodyBounded(response, HttpBodyLimits.LX_HTTP_RESPONSE_BYTES)
+                    Triple(response.status.value, response.headers.entries().associate { it.key to it.value.joinToString(",") }, read)
                 }
             }
-            val response = responseOrNull
+            val (status, responseHeaders, read) = outcome
                 ?: throw LxScriptException("lx.request 超时 (${timeoutMs}ms): $url")
-
-            val text = response.bodyAsText()
-            val status = response.status.value
-            val truncated = if (text.length > MAX_RESPONSE_CHARS) text.substring(0, MAX_RESPONSE_CHARS) else text
+            if (read !is BoundedBodyRead.Ok) {
+                throw LxScriptException(
+                    "lx.request 响应超过 ${HttpBodyLimits.LX_HTTP_RESPONSE_BYTES} 字节上限: $url",
+                )
+            }
 
             buildJsonObject {
                 put("statusCode", status)
                 put("status", status)
-                put("body", inferBody(truncated))
+                put("body", inferBody(read.text))
                 put(
                     "headers",
                     buildJsonObject {
-                        response.headers.entries().forEach { (key, values) ->
-                            put(key, values.joinToString(","))
-                        }
+                        responseHeaders.forEach { (key, value) -> put(key, value) }
                     },
                 )
             }.toString()
@@ -421,15 +474,13 @@ class LxScriptRuntime(
      * 为什么关掉 Ktor 的自动重定向：脚本能控制 URL，而"目录批准的域名"是安全边界。
      * 自动跟随会让 `api.example.com -> evil.com` 这种 302 直接绕过白名单，
      * 等于白名单形同虚设（设计文档 11 明确要求拦截跨域重定向）。
-     *
-     * 相对 Location 在这里手工解析：Ktor 的 `URLBuilder` 对 `../` 的合并语义
-     * 与 RFC 3986 不完全一致，与其赌它的行为，不如把这三种常见形态写清楚。
      */
     private suspend fun sendFollowingAllowedRedirects(
         url: String,
         method: String,
         body: String?,
         headers: JsonObject?,
+        allowedHosts: Set<String>,
     ): HttpResponse {
         var currentUrl = url
         var hops = 0
@@ -531,7 +582,7 @@ class LxScriptRuntime(
     private companion object {
         const val DEFAULT_REQUEST_TIMEOUT_MS = 10_000L
         const val MAX_REQUEST_TIMEOUT_MS = 30_000L
-        const val MAX_RESPONSE_CHARS = 512 * 1024
+        // lx.request 响应上限见 HttpBodyLimits.LX_HTTP_RESPONSE_BYTES（四类响应各自独立）。
         /** 单次 setTimeout 延时上限（毫秒），防止脚本设置一个永不结束的超长计时器。 */
         const val MAX_TIMER_DELAY_MS = 2_147_483_647L
         /** 给 QuickJS 自身的中断留一点余量，避免和协程超时互相抢跑。 */

@@ -46,7 +46,8 @@ class SourceUpdateCoordinator(
             return UpdateReport.Skipped("未配置音源目录地址")
         }
 
-        val load = updater.load(catalogUrls.first(), index.etag)
+        // 反重放：以本地已接受版本为下限；任何更旧的签名目录都会被 updater 拒绝。
+        val load = updater.load(catalogUrls.first(), index.etag, minCatalogVersion = index.catalogVersion)
         return when (load) {
             is CatalogLoad.Failed -> {
                 // 必须重新读一次索引：这一轮可能已经有脚本装完，用旧快照会把它抹掉。
@@ -68,6 +69,24 @@ class SourceUpdateCoordinator(
 
             is CatalogLoad.Loaded -> {
                 val catalog = load.catalog
+                // 双保险：即使 updater 有 bug 或其他调用方传入了更旧目录，这里也绝不接受。
+                if (catalog.catalogVersion < index.catalogVersion) {
+                    return UpdateReport.Failed(
+                        "拒绝旧目录重放：本地已接受版本 ${index.catalogVersion}，收到 ${catalog.catalogVersion}",
+                    )
+                }
+                // 同版本内容变化：版本策略要求"内容变了必须提升 catalogVersion"。
+                // 首次安装（无已接受版本）不受此约束。
+                val catalogHash = load.catalogSha256
+                if (!index.isFirstInstall &&
+                    catalog.catalogVersion == index.catalogVersion &&
+                    index.acceptedCatalogSha256 != null &&
+                    !index.acceptedCatalogSha256.equals(catalogHash, ignoreCase = true)
+                ) {
+                    return UpdateReport.Failed(
+                        "拒绝同版本内容变化的目录：catalogVersion=${catalog.catalogVersion} 但内容哈希与已接受版本不一致",
+                    )
+                }
                 val minVersion = catalog.minAppVersion
                 if (!minVersion.isNullOrBlank() && compareVersions(appVersion, minVersion) < 0) {
                     store.saveIndex(store.loadIndex().copy(lastCheckMillis = now, consecutiveFailures = 0))
@@ -86,7 +105,8 @@ class SourceUpdateCoordinator(
                         continue
                     }
 
-                    val download = fetcher.fetch(entry.scriptUrl)
+                    // 脚本下载与目录 JSON 用各自独立的上限常量，不共用。
+                    val download = fetcher.fetch(entry.scriptUrl, maxBytes = HttpBodyLimits.SCRIPT_DOWNLOAD_BYTES)
                     val body = download.body
                     if (!download.ok || body == null) {
                         errors += "${entry.id}: 下载失败 ${download.error} ${download.detail.orEmpty()}".trim()
@@ -109,6 +129,7 @@ class SourceUpdateCoordinator(
                         lastSuccessMillis = now,
                         consecutiveFailures = 0,
                         etag = load.etag,
+                        acceptedCatalogSha256 = catalogHash,
                     ),
                 )
                 return if (installed.isEmpty() && errors.isEmpty()) {

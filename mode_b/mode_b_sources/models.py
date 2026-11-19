@@ -133,7 +133,17 @@ class HealthPolicy:
 
         threshold = raw.get("failureThreshold", 3)
         cooldown = raw.get("cooldownSeconds", 600)
-        timeout = raw.get("requestTimeoutSeconds", 5.0)
+        # Kotlin 侧 HealthPolicy 用的是 requestTimeoutMillis，Python 侧历史上用
+        # requestTimeoutSeconds。两端读同一份配置时必须都能拿到值：显式 seconds 优先，
+        # 其次把 millis 换算成秒，两者都没有才用默认 5 秒。不做这一步时，只写 millis
+        # 的配置在 Python 端会静默退回 5 秒（历史上的巧合掩盖了这个分叉）。
+        if "requestTimeoutSeconds" in raw:
+            timeout = raw["requestTimeoutSeconds"]
+        elif "requestTimeoutMillis" in raw:
+            millis = raw["requestTimeoutMillis"]
+            timeout = millis / 1000.0 if _is_real_int(millis) or isinstance(millis, float) else millis
+        else:
+            timeout = 5.0
         probe_on_trip = raw.get("probeOnTrip", False)
         probe_params = raw.get("probeParams", {})
 
@@ -142,7 +152,7 @@ class HealthPolicy:
         if not _is_real_int(cooldown) or cooldown < 1:
             raise ConfigValidationError("cooldownSeconds 必须是 >= 1 的整数")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise ConfigValidationError("requestTimeoutSeconds 必须是正数")
+            raise ConfigValidationError("requestTimeoutSeconds / requestTimeoutMillis 必须是正数")
         if not isinstance(probe_on_trip, bool):
             raise ConfigValidationError("probeOnTrip 必须是布尔值")
         if not isinstance(probe_params, dict) or not all(

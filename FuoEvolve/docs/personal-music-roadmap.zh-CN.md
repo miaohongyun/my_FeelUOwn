@@ -394,18 +394,18 @@ App 内嵌 JS 引擎执行 LX Music 自定义音源脚本**技术可行，已在
 | `lx.on(event, handler)` / `lx.send(event, data)` | 已实现 | 全部单测；注意 `inited` 是脚本主动 send，宿主只读 |
 | `lx.request(url, options, cb)`，回调 `(err, resp, body)` | 已实现 | shim 同时给 `resp.body` 与第三参 body；`LxScriptRuntimeTest` 走宿主 Ktor + MockEngine |
 | `lx.utils.buffer.from` / `bufToString`（base64/hex/utf8） | 已实现 | `buffer helpers support hex utf8 and base64` |
-| `lx.utils.crypto.md5` | **未实现** | 调用即抛 `LxScriptException`（明确失败，不返回错值） |
-| `lx.utils.crypto.randomBytes` | **未实现** | 同上 |
-| `lx.utils.crypto.aesEncrypt`（aes-128-cbc/ecb） | **未实现** | 同上 |
-| `lx.utils.crypto.rsaEncrypt` | **未实现** | 同上 |
-| `lx.utils.zlib.inflate` / `deflate` | **未实现** | 返回 rejected Promise；官方移动版本身也未实现 |
-| 宿主 `setTimeout` / `clearTimeout` | 已实现 | `LxTimerTest` 7 项；可取消、close 全释放 |
+| `lx.utils.crypto.md5` | 已实现 | 纯 Kotlin `Md5.hex`，RFC 标准向量 + hashlib 交叉验证；独家音源用其做自检 |
+| `lx.utils.crypto.randomBytes` | 未实现 | 调用即抛 `LxScriptException`（明确失败，不返回伪造随机数）；无已批准脚本依赖 |
+| `lx.utils.crypto.aesEncrypt`（aes-128-cbc/ecb） | 未实现 | 同上；唯一依赖者無名/小熊猫均为 REJECT/QUARANTINE 且接口已失效 |
+| `lx.utils.crypto.rsaEncrypt` | 未实现 | 同上 |
+| `lx.utils.zlib.inflate` / `deflate` | 未实现 | 返回 rejected Promise；官方移动版本身也未实现 |
+| 宿主 `setTimeout` / `clearTimeout` | 已实现（含库限制） | `LxTimerTest` 13 项；可取消、close 全释放；quickjs-kt session 语义限制见 §8.1 |
 | 宿主网络能力 | 已实现（受限） | 仅 http/https、非空白名单、私网/IPv6/非标准 IPv4 拦截、逐跳重定向校验 |
 
 **未验证 / 明确风险（无真实脚本时不能宣称兼容）**：
 
-1. **真实社区脚本本身**：仓库内所有测试脚本都是按官方协议结构手写的，没有任何一份来自社区的 `.js`。混淆脚本、依赖未实现 `crypto` 原语的脚本、`lx.request` 用法偏离官方签名的脚本，均**未验证**。
-2. **真实网络解析**：搜索/解析都用 MockEngine 返回结构，未打过酷我/酷狗/QQ 的真实接口；真实响应字段、加密参数、反爬策略均**未知**。
+1. **真实社区脚本本身**：`config/source-catalog/third-party-raw/` 已保存 13 份社区 `.js` 原版并做静态审查，其中 8 份完成"初始化→URL 解析"的 **MockEngine 模拟测试**（见第七章）。但**没有任何一份完成真实网络解析**，混淆脚本、依赖未实现 `crypto` 原语的脚本在真机上的行为仍**未验证**。
+2. **真实网络解析**：搜索/解析的自动化都用 MockEngine 返回结构。§10.1 对候选接口做了真实 DNS/HTTP 探测（属网络可达性，非协议解析），结论是多数候选端点已失效；真实返回字段与歌曲身份仍未验证。
 3. **歌曲身份**：`endToEndSearchThenLxRequestResolvesMatchingSongIdentity` 验证的是"脚本自报 mid == 请求 mid"的闭环，依赖脚本如实核验；若真实脚本不核验身份，宿主层目前**不做**音频内容与点选曲目的二次比对。
 4. **宿主 QuickJS 差异**：quickjs-kt 1.0.15 的 ES 特性覆盖、模块加载语义与真实 LX 脚本预期可能有差异，需真实脚本验证。
 
@@ -473,3 +473,231 @@ desktop 与 androidHost 双端均通过（`ThirdPartyScriptCompatTest`，含网�
 2. 裸 IP（至尊/梓澄）与 punycode 域名（肥猫/独家）的备案/证书/可用性未核实。
 3. 混淆脚本只观测到一个域名，无法静态穷尽网络行为；需真机抓包。
 4. 聚合API接口（CF）与测试音乐源未找到对应文件，未用其他音源冒名替代。
+
+## 八、运行时可靠性与目录反重放（P0/P1）
+
+### 8.1 timer 生命周期：真实缺陷与 quickjs-kt 限制
+
+**反编译实证**（quickjs-kt 1.0.15 `QuickJs.class`）：
+- asyncFunction 的协程挂在库自己的 `coroutineScope`（`jobDispatcher`），登记进 `asyncJobs`；
+  `close()` 用 `AtomicBoolean` CAS 幂等、遍历 `asyncJobs` 逐个 `cancel()`，但**不 join**；
+- resolve/reject JS Promise 前检查 `isClosed()`——close 后不会向已销毁 context 写 Promise。
+
+**修复的真实缺陷**：
+1. `timerScope` 原是外层可变属性，`load()` 在 `close()` 后重建；`__lxDelay` 在执行时才读它，
+   旧 context 的 asyncFunction 有窗口把延时挂到**新 scope**。改为不可变 `RuntimeSession`：
+   每次 load 独占 QuickJs / timerScope / timer表 / closed 标志，所有绑定闭包捕获该 session。
+2. `close()` 原先 `signal.complete(Unit)` 会让 `select` 走 `onAwait` 正常返回 → JS `.then`
+   回调有机会执行。改为 `signal.cancel()`，并在 session 关闭后拒绝新 timer 登记。
+
+**必须记录的库限制（未彻底解决，实测 + 反编译双重确认）**：
+1. async binding 的 Kotlin lambda 只在 JS `evaluate` 期间被调度；脚本**顶层 fire-and-forget**
+   的 setTimeout 不会被后续 module evaluate 的 job queue pump 到——不登记宿主表、不执行宿主协程、
+   不触发 JS 回调。
+2. 更关键：quickjs-kt 在**每个 evaluation session 结束时 cancel 该 session 的全部 asyncJobs**
+   （实测：requestMusicUrl 返回后 timer 表从 2 归零，长 timer 的 JS 回调再也不触发）。
+   因此"close 前仍有 pending timer"在该库上不成立——库已先于 close 取消。
+   这意味着真实脚本若把 setTimeout 用作跨 request 的后台心跳/轮询，在 quickjs-kt 1.0.15 上
+   **无法按预期运行**。这是库的事件循环/session 语义，不是本层能"彻底修复"的。
+3. 我们仍保留宿主侧兜底：session 独立、close 幂等、cancel timerScope、信号 cancel 而非
+   complete；但不得宣称"已彻底解决 timer 生命周期"——库限制仍在，见上。
+
+**测试**（`LxTimerTest`）：每条 close 场景四重证据——请求 Job 结束、activeTimerCount 归零、
+所有 session closed 且无残留、JS 回调（`lx.request` 计数）未执行覆盖顶层/多 timer/
+handler timer/clearTimeout 后 close/到期与 close 竞态/clear 与到期竞态/close 后 reload
+隔离/双 close/20 次 load→request→close 循环。后台请求全部用 `Deferred` 持有并 `cancelAndJoin`。
+
+### 8.2 目录反重放：catalogVersion 单调性
+
+**真实缺陷**：`SourceUpdateCoordinator` 直接写 `catalog.catalogVersion`，从不与本地已接受
+版本比较；`SourceCatalogUpdater` 取"第一个成功镜像"，不比较版本。旧签名目录可回退本地状态。
+
+**修复**：
+- `SourceIndex` 新增 `acceptedCatalogSha256`（带默认值，兼容旧索引）与 `isFirstInstall`。
+- `SourceCatalogUpdater.load(url, etag, minCatalogVersion)`：签名有效的候选若版本低于下限
+  一律拒绝；遍历所有允许镜像，选**版本最高**者返回；所有候选都被拒则明确 Failed（含"重放"字样）。
+- `SourceUpdateCoordinator`：传 `index.catalogVersion` 作下限，Loaded 后再做一次单调性双保险；
+  同版本内容变化（hash 不同）拒绝；首次安装放行；签名失败/Failed 不改索引版本与已装脚本。
+- 版本恢复规则：应用重装/数据恢复导致索引丢失时判为首次安装，允许当前合法目录重新锚定。
+
+`catalogVersion` 是目录版本，与脚本自身的 `version` 完全独立，二者不混用。
+
+## 九、响应大小上限与多平台搜索（任务3/4）
+
+### 9.1 响应大小上限：从"读后截断"改为"流式中断"
+
+**真实缺陷**：三处响应读取都是先 `bodyAsText()` 把整个响应读进内存，再 `substring`/长度判断。
+内存峰值发生在裁剪之前，被劫持/异常的超大响应可以直接打满内存。
+
+**修复**：新增 `BoundedHttpBody.kt`（sourceupdate，lxruntime 已依赖），`readBodyBounded`：
+1. Content-Length 明确 > 上限 → 提前拒绝，一个字节都不读；
+2. 无 CL / 伪造为小值 / chunked → `bodyAsChannel()` 流式逐块读，累计字节数，超限立即
+   `channel.cancel()` 中断，不读剩余数据；
+3. 分块 ByteArray 累积后一次性 `decodeToString`，避免 UTF-8 多字节字符被块边界切断；
+4. 取消（CancellationException）原样上抛，finally 确保释放底层连接。
+
+四类**独立**上限常量（`HttpBodyLimits`，禁止互相借用）：
+目录 JSON 1 MiB / 脚本下载 1 MiB / `lx.request` 响应 512 KiB / 搜索接口响应 512 KiB。
+三处调用点（KtorCatalogFetcher / LxScriptRuntime.performHttp / KuwoSongSearcher 及各平台 Searcher）
+分别接入，读取纳入各自的超时窗口。
+
+**测试**（`BoundedHttpBodyTest` 6 项）：正常响应、CL 超上限提前拒绝、无 CL 流式截断、
+虚假 CL（Ktor 层 Content-Length mismatch 校验 + 流式双保险）、超大 chunked、UTF-8 跨块不破损。
+
+### 9.2 多平台搜索：适配器架构（模拟验证，非真实接口）
+
+**真实缺陷**：默认只有 `KuwoSongSearcher`（kw）。脚本在 inited 声明 kg/tx/wy/mg 不等于播放器
+能搜这些平台——旧实现 `if (platform !in searcher.supportedPlatforms) continue` 让这些平台
+静默变成"没结果"，用户和 UI 都无法区分"不可搜索"与"搜不到"。
+
+**修复**：
+- `LxSongSearchRegistry`：平台→独立 Searcher 映射，`searchablePlatforms` 明确暴露真实可搜平台，
+  未注册平台返回空且不冒充；单平台异常被隔离成空列表（取消上抛）。
+- 新增 4 个独立 Searcher（各自 ID 字段映射，原始字段原样保留进 `LxSongHit.rawFields`）：
+  kg=`FileHash`、tx=`songmid`、wy=`id`（毫秒 duration 转秒）、mg=`musicId`。
+- `LxScriptMusicProvider` 改用 registry，按平台路由；搜索命中 `hit.platform` 必须等于请求平台，
+  否则丢弃（防来源冒充）；新增 `searchablePlatforms()` 供 UI 标记"不可搜索"。
+- **默认注册表仍只启用 kw**：其它平台虽已实现，但只有真实响应结构 fixture 的模拟测试，
+  未验证接口存活/字段变化/鉴权要求，默认不注册，避免把未验证能力暴露给全体用户。
+
+**验证等级**：`LxPlatformSearcherTest`（8 项）+ `LxMultiPlatformProviderTest`（4 项），
+全部 **SIMULATED**（真实结构 fixture + MockEngine），未打真实接口。真实接口验证、
+是否触发风控/会员限制、字段是否变化，均待后续独立任务，不得宣称真实可用。
+
+## 十、真实接口可达性探测、应用接入闭环与 DNS/crypto 策略（任务5/6/7，2026-11-19）
+
+### 10.1 真实接口可达性探测（任务5：只做可达性，不伪造协议成功）
+
+**取证环境**：本机经 `127.0.0.1:7897` 代理。这**不是中国大陆直连**，因此"大陆可访问性"不能据此宣称；
+DNS 用 Cloudflare DoH 取权威记录，HTTP 状态经代理观测，两者都只代表本机+该时刻。
+
+对 8 个候选端点做了真实 DNS + HTTP 探测（`curl`，2026-11-19）：
+
+| 候选 | 端点 | 权威 DNS | HTTP 观测 | 结论 |
+| --- | --- | --- | --- | --- |
+| Huibq | `lxmusicapi.onrender.com` | 解析正常（CNAME→Cloudflare） | **503 `Service Suspended`，页面明确 "suspended by its owner"** | 服务已停，接口不可用 |
+| ikun | `api.ikunshare.com` | **NXDOMAIN**（DoH status 3） | TLS 握手失败/超时 | 域名失效，接口不可用 |
+| 野花 | `flower.tempmusics.tk` | NXDOMAIN | TLS 握手失败 | 域名失效 |
+| 野草 | `grass.tempmusics.tk` | NXDOMAIN | TLS 握手失败 | 域名失效 |
+| 至尊 | `110.42.36.53:1314`（裸 IP） | 无域名 | 经代理 502（代理无法直连裸 IP:端口） | 本机不可达，需大陆真机 |
+| 梓澄二代 | `103.239.247.51:9763`（裸 IP） | 无域名 | 经代理 502 | 本机不可达，需大陆真机 |
+| 肥猫 | `music.xn--z7x900a.live`（punycode=肥猫） | A 记录存在 | 根路径返回 nginx 默认页，`/url/kw/228908/128k` 返回 404 | 域名在，但 API 路径不通 |
+| 独家 | `88.lxmusic.xn--fiqs8s`（punycode=中国） | A 记录存在 | 根路径 `{"code":0,"msg":"success","data":null}`，但 `/url/...` 返回 404 | 服务存活，解析路径待核 |
+
+**必须说清的边界**：
+- 这些只是**网络可达性 + DNS 状态**，不是 `REAL_INIT` / `REAL_SEARCH` / `REAL_URL_RESOLVE` /
+  `REAL_AUDIO_RESPONSE` / `REAL_TRACK_IDENTITY_VERIFIED`。本次**没有**让任何脚本在真实接口上完成
+  "搜索→解析→音频响应→歌曲身份一致"全链路，因此**没有任何候选达到可提升审核状态的等级**。
+- 判定：审查表 13 份脚本（其中 8 份做了可达性探测；`candidates.json` 另含早期候选共 21 条）全部维持原 `reviewStatus`、`autoInstall=false`，`source-catalog.json` 仍为空数组。
+- "值得继续投入"的客观结论：Huibq/ikun/野花/野草接口已失效，投入产出比最低，暂缓；独家/肥猫域名仍解析、
+  独家根路径有 JSON 响应，是**唯一**值得在大陆真机上复核解析路径的候选；裸 IP 两项必须真机+抓包。
+- 未绕过任何会员/付费/访问控制，仅探测公开端点连通性；punycode 域名解码为"肥猫"/"中国"已记录。
+
+### 10.2 应用接入闭环（任务6：补齐主动运行时回收）
+
+**核查结论**：LX 功能**已真正接入**三端生产路径，不是孤立模块。证据链：
+- 真实实现 `StoreLxInstalledScriptSource`（`shared/.../source/SourceCatalogRuntime.kt:201`）从
+  `SourceVersionStore` 读取"已启用+已批准+非隔离"脚本；`EmptyLxInstalledScriptSource` 只作默认兜底/测试。
+- `LxScriptProviderFactory` 经 `ProviderComposition → KotlinProviderRepository.providerMap → FuoProviderGraph`
+  注册；Android/iOS/Desktop 宿主都显式注入 `sourceCatalogRuntime.scripts`。
+- 首个脚本装好后 `SourceUpdateHost.enableLxProviderIfNeeded()` 同时更新内存 registry 与持久化设置。
+- 状态落在 `sources/index.json`，重启后由 `ProviderCatalogFeature` 恢复；设置页区分已安装/已启用/已停用/已隔离/错误。
+- 待审核脚本在安装层就被拒绝，故 UI 不展示"待审核"——这是安全设计，不是遗漏。
+
+**本轮修复的真实缺口**：`LxScriptProvider.releaseAll()` 全项目无调用点；停用/隔离/更新脚本后，
+QuickJS context 只靠下一次 `search()/resolve()` 的 `pruneHandles()` **惰性**回收。用户关掉脚本后，
+旧 context 会一直驻留到下次使用，与"停用即释放"的语义不符。
+
+**修复**：
+- `LxScriptMusicProvider.releaseScript(scriptId)`：按 id 立即 `runtime.close()` 并从 handle 表摘除，
+  幂等（重复释放返回 false）；同时清掉该 id 的连续失败计数，重新启用时状态干净。
+- `ProviderRegistryRepository.releaseDynamicScriptRuntime(scriptId)` 新增默认空实现（内建 Provider 无需处理），
+  `KotlinProviderRepository` 覆盖为"仅当 LX Provider 已实例化才释放"，避免为回收而创建空 Provider。
+- `SourceUpdateHost`：仅在**用户显式**停用（`setScriptEnabled(false)`）、隔离（`setScriptQuarantined(true)`）
+  时主动释放；**后台自动更新不主动 close**（`checkForUpdates` 由启动/每日任务触发，可能撞上用户正在
+  进行的 `resolve()`，close 会抽走 context 造成当次解析失败）。更新场景仍由 handle 身份里的源码
+  SHA-256 保证"版本一变、下次使用时自然淘汰旧 context"，已满足"更新自动淘汰旧 runtime"。
+- 新增 `SourceUpdateHostRuntimeReleaseTest`（recording registry 断言按 id 调用）与
+  `LxScriptProviderTest.releaseScriptClosesHandleAndNextSearchRebuildsIt`（断言被释放的
+  QuickJS session 确实 closed、再次搜索重建新 runtime）。
+
+**已知时序边界（第二轮审查发现并记录）**：`releaseScript` 与 `resolve()` 里对 runtime 的使用
+不在同一把锁内；用户恰好在解析进行中点停用时，那一次解析会返回 null（异常被吞掉，不 native 崩溃）。
+这是显式停用语义下可接受的代价，且后台更新路径不调用 `releaseScript`，不会在无感知时打断播放。
+
+**仍未实现（如实记录）**：脚本删除/回滚目前只改 store，靠下次使用的 cacheKey 变化淘汰旧 runtime；
+未做"删除即主动释放"（删除入口未在应用层暴露，属后续独立项）。
+
+### 10.3 DNS 与 crypto（任务7：按真实需求，明确失败，不虚报防护）
+
+**DNS rebinding**：commonMain 无法可靠做解析后 IP 校验；项目**没有**注入 `DnsResolver`/平台 socket hook，
+TLS 证书验证保持系统默认不被削弱。现状是三层**字符串层**防护：
+- `LxNetworkPolicy`（最严）：空白名单拒绝全部、http/https、userinfo 伪装、IPv6 字面量、非标准 IPv4
+  归一化后判私网、逐跳重定向重新校验——这是 `lx.request` 的实际边界。
+- `SourceCatalogModels.urlProblem`（目录条目）：https + localhost/私网 IPv4，强度弱于前者。
+- `SourceMirrorPolicy.isAllowed`（下载通道）：https + allowlist。
+
+**本轮修复的真实缺口**：`SourceMirrorPolicy.isAllowed` 原为 `if (allowlist.isEmpty()) return true`（fail-open）——
+漏配内置名单时会放行任意主机。已改为**空白名单拒绝全部**，与任务9"空白网络白名单生产环境拒绝全部网络"
+一致；补 `emptyAllowlistFailsClosed` 测试，并把依赖默认空名单的测试夹具改为显式 `TEST_ALLOWLIST`。
+
+**不得宣称的部分**：DNS rebinding（校验时看字符串、连接时由 OkHttp/Darwin 自行解析）在 commonMain
+**未实现**，各平台是否会被解析到内网地址仍需真机 DNS 抓包确认。三套 URL 策略强度不一致也如实保留，
+不在本轮做跨模块重构（无真实可用脚本，重构收益低于风险）。
+
+**crypto 策略**：按"仅实现有官方协议依据 + 真实脚本需求"的原则逐项核对第三/七章审查的 13 份脚本：
+- 已实现且有真实需求：`md5`（独家音源自检用）、`buffer`（base64/hex/utf8）。
+- 未实现且**无已批准真实脚本依赖**：`randomBytes` / `aesEncrypt` / `rsaEncrypt`——唯一依赖它们的
+  **無名**（name 自检失败）与**小熊猫**（远程加载第二段 JS）都不是 APPROVED，且接口已失效。
+  本轮**不盲目补齐**。这些原语在桥接层调用即抛 `LxScriptException`，明确失败，不返回伪造随机数/错值。
+- `zlib` 官方移动端也标注未实现，维持 rejected Promise。
+- 修正文档与代码注释里两处过时描述：roadmap 曾写"`md5` 未实现"（实际已实现）、
+  `LxScriptRuntime` 头注释曾写"支持 aes/rsa"（实际不支持）——均以本节为准。
+
+### 10.4 审核记录一致性修正（2026-11-19）
+
+第二轮核对发现 `candidates.json` 的 `testLevel` 与实际结果不一致：聚合API（MockEngine 返回 `{}`）、
+無名（名称自检未过）、公众号音源2（初始化 5s 超时）三者**初始化均失败**，却都记成了
+`SIMULATED_INIT_AND_URL_PARSE`。修正：
+- 在 `candidates.json` 增加 `testLevelDefinitions`，明确 10 级单调等级
+  （`NOT_OBTAINED` < `STATIC_ONLY` < `RUNTIME_LOAD` < `SIMULATED_INIT` < `SIMULATED_URL_RESOLVE`
+  < `REAL_INIT` < `REAL_SEARCH` < `REAL_URL_RESOLVE` < `REAL_AUDIO_RESPONSE`
+  < `REAL_TRACK_IDENTITY_VERIFIED`），并规定 `testLevel` 必须是**已完成的最高等级**，
+  不得按预期或部分测试推断。
+- 三者下调为 `RUNTIME_LOAD`（能加载但未发出有效 inited）；8 份早期仅登记的仓库候选标
+  `NOT_OBTAINED`；真正通过兼容测试的 8 份用更精确的 `SIMULATED_URL_RESOLVE`。
+- 每条补齐 `testLevelEvidence` / `declaredPlatforms` / `simulatedUrlResolvePlatforms` /
+  `requiredHostApis` / `discoveredDomains` / `staticReview` / `simulatedResult` /
+  `realTestResult` / `license`，共 21 条齐全。
+- **实测通过平台只记 kw**：兼容测试虽断言 inited 声明的全部 5 个平台存在，但 URL 解析断言
+  只对各脚本声明平台的第一个（kw）执行，其余平台未做解析验证，不得记为"已通过"。
+- `THIRD_PARTY_REVIEW.zh-CN.md` 表格同步增加"实测通过平台/testLevel"两列，与 JSON 完全一致。
+- 全部维持非 APPROVED、`autoInstall=false`，`source-catalog.json` 仍为空数组。
+
+### 10.5 多平台搜索启用、真实验证阶梯、回滚闭环（任务5-8，2026-11-19）
+
+**任务5 至少完成 kw+kg**：`KugouSongSearcher`（FileHash 稳定 ID、rawFields 原样保留）此前已实现且
+模拟测试通过。本轮经真实接口探测确认 `https://songsearch.kugou.com/song_search_v2` HTTP 200
+且返回真实《晴天》数据，故把 kg 加入生产默认注册表：`LxSongSearchRegistry.default()` 现返回
+kw+kg；`LxScriptProviderFactory` 默认注入该注册表。tx/wy/mg 仍只有模拟 fixture、未做真实接口，
+**不默认注册**。新增 2 项测试：真实捕获响应的 FileHash 身份解析、默认注册表仅暴露 kw+kg。
+注意：`REAL_SEARCH`（搜索）与脚本的 `REAL_URL_RESOLVE`/`REAL_AUDIO_RESPONSE` 是不同层级，
+不得因搜索可达就宣称脚本真实可用。
+
+**任务6 真实 init→音频响应**：新增 opt-in 测试 `RealInterfaceVerificationTest`（desktopTest）。
+默认不跑，`FUOE_REAL_VERIFY=1` + `LX_VERIFY_PROXY` 才执行真实网络，避免 CI 依赖端点存活。
+固化 9 级阶梯并断言"不得越级"。实际以 Kotlin 测试执行：`kg 搜索 REAL_SEARCH ok=true`，
+首条 FileHash=B3A52A7A…/晴天/周杰伦/269s，与 curl 取证一致。合规边界：音频只做 HEAD 探测、
+不下载完整商业音乐，故**本轮无任何候选达到** `REAL_URL_RESOLVE`/`REAL_AUDIO_RESPONSE`/
+`REAL_TRACK_IDENTITY_VERIFIED`；失效端点（503/NXDOMAIN/裸 IP/404）审核结论锁定，不得提升。
+
+**任务7 安装/启用/播放/禁用/回滚闭环**：此前安装（审核门槛+冒烟+先验证后激活）、启用（首个脚本
+自动开 LX Provider）、播放（resolve 走 Provider）、禁用（releaseScript 主动释放）已闭环。补最后一环
+回滚：`SourceCatalogRuntime.rollbackScript(id, reason)` 暴露底层 `store.rollback`，
+`SourceUpdateHost.rollbackScript()` 在回滚**成功后立即**调 `releaseDynamicScriptRuntime` 释放旧 context
+（否则回滚后到下次搜索前仍执行失败的旧版本）。新增 2 项测试：有上一版本时 active 切回+清
+previousVersion+记 lastError+释放 runtime；无上一版本时 no-op 且不释放。至此五环闭合。
+
+**任务8 DNS/crypto**：本轮复核无新增缺口，维持上一轮结论——DNS 三层字符串层防护 + fail-closed，
+DNS rebinding 在 commonMain 未实现如实记录；crypto 仅 md5/buffer，AES/RSA/randomBytes 无已批准
+脚本依赖、桥接层明确抛错，不盲目补齐。

@@ -19,6 +19,9 @@ internal object SourceFixtures {
     const val CATALOG_URL = "https://catalog.example.com/source-catalog.json"
     const val SCRIPT_URL = "https://catalog.example.com/scripts/fixture.js"
 
+    /** 测试用镜像 allowlist。fail-closed 后必须显式给出，不能依赖空名单放行。 */
+    val TEST_ALLOWLIST: Set<String> = setOf("catalog.example.com", "mirror.example.com")
+
     const val CATALOG_JSON: String =
         """{"schemaVersion":1,"catalogVersion":42,"signatureAlgorithm":"Ed25519","keyId":"test-key","sources":[{"id":"fixture-source","name":"Fixture Source","version":"1.0.0","scriptUrl":"https://catalog.example.com/scripts/fixture.js","sha256":"3122822d125357bef59e707fcad41570f0da16999b6f9cdfe5061f97deff53b4","reviewStatus":"APPROVED","license":"MIT","autoInstall":true,"autoEnable":true,"allowedHosts":["api.example.com"],"platforms":["kw"],"capabilities":["musicUrl"]}]}"""
 
@@ -63,7 +66,7 @@ internal class MapCatalogFetcher(
 
     val requested = mutableListOf<String>()
 
-    override suspend fun fetch(url: String, etag: String?): CatalogFetchResult {
+    override suspend fun fetch(url: String, etag: String?, maxBytes: Int?): CatalogFetchResult {
         requested += url
         failures[url]?.let { error ->
             return CatalogFetchResult(url, error = error, detail = "模拟失败")

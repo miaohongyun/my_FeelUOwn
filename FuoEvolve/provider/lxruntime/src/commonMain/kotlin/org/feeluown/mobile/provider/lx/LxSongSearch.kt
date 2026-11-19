@@ -2,7 +2,6 @@ package org.feeluown.mobile.provider.lx
 
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
-import io.ktor.client.statement.bodyAsText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -13,6 +12,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.feeluown.mobile.sourceupdate.BoundedBodyRead
+import org.feeluown.mobile.sourceupdate.HttpBodyLimits
+import org.feeluown.mobile.sourceupdate.readBodyBounded
 
 /**
  * 一首"可被 LX 脚本解析"的歌曲。
@@ -58,7 +60,7 @@ class KuwoSongSearcher(
     private val endpoint: String = DEFAULT_ENDPOINT,
     private val timeoutMillis: Long = 8_000L,
     private val json: Json = Json { ignoreUnknownKeys = true; isLenient = true },
-    private val maxResponseChars: Int = MAX_RESPONSE_CHARS,
+    private val maxResponseBytes: Int = HttpBodyLimits.SEARCH_RESPONSE_BYTES,
 ) : LxSongSearcher {
 
     /** 本适配器只负责酷我；其它平台由各自的适配器实现，[LxSongSearcher] 接口本身支持多平台集合。 */
@@ -77,10 +79,12 @@ class KuwoSongSearcher(
             append("&pn=0")
         }
         // 放在真实时间里计时：runTest 的虚拟时钟会让 withTimeoutOrNull 立刻到期。
-        val body = withContext(Dispatchers.Default) {
+        // 流式读取：Content-Length 提前拒绝 + 无/伪造 CL 时逐块累计，超限立即中断，
+        // 不会先用一个超大字符串占满内存再 substring。
+        val read = withContext(Dispatchers.Default) {
             withTimeoutOrNull(timeoutMillis) {
                 try {
-                    client.get(url).bodyAsText()
+                    readBodyBounded(client.get(url), maxResponseBytes)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -88,10 +92,9 @@ class KuwoSongSearcher(
                 }
             }
         } ?: return emptyList()
-        // 响应体积上限：被篡改/劫持的响应不能无界读进内存再解析。
-        val bounded = if (body.length > maxResponseChars) body.substring(0, maxResponseChars) else body
+        if (read !is BoundedBodyRead.Ok) return emptyList() // TooLarge：整条候选作废，不影响其它平台
 
-        return parse(bounded).take(limit)
+        return parse(read.text).take(limit)
     }
 
     fun parse(rawText: String): List<LxSongHit> {
@@ -154,7 +157,6 @@ class KuwoSongSearcher(
     companion object {
         const val PLATFORM = "kw"
         const val DEFAULT_ENDPOINT = "http://search.kuwo.cn/r.s"
-        /** 搜索响应体上限：防止被劫持的响应无限占内存。 */
-        const val MAX_RESPONSE_CHARS = 512 * 1024
+        // 搜索响应上限见 HttpBodyLimits.SEARCH_RESPONSE_BYTES（四类响应各自独立）。
     }
 }

@@ -66,7 +66,16 @@ class LxScriptMusicProvider(
     providerCredentials: ProviderCredentialStore,
     private val scriptSource: LxInstalledScriptSource,
     private val httpClient: HttpClient = createSharedProviderHttpClient(),
+    /** 兼容旧调用方：单一搜索适配器。传入 registry 时忽略此参数。 */
     private val searcher: LxSongSearcher = KuwoSongSearcher(httpClient),
+    /** 多平台搜索注册表；每个平台一个独立适配器，未注册平台标记为不可搜索。 */
+    private val searchRegistry: LxSongSearchRegistry? = null,
+    /**
+     * 没有显式 registry 时是否用默认注册表（kw+kg）而非兼容用的单一 searcher。
+     * 默认 false 保持旧调用方行为；生产工厂置 true，并复用本 Provider 的 httpClient，
+     * 避免为了建注册表而额外创建一个永不关闭的 HttpClient。
+     */
+    private val useDefaultSearchRegistry: Boolean = false,
     private val runtimeFactory: () -> LxScriptRuntime = { LxScriptRuntime(httpClient) },
 ) : BaseKotlinProvider(
     http = ProviderHttpClient(httpClient),
@@ -82,6 +91,14 @@ class LxScriptMusicProvider(
 
     private val mutex = Mutex()
     private val handles = mutableMapOf<String, Handle>()
+
+    /** 实际使用的注册表：显式注入 > 默认(kw+kg, 复用 httpClient) > 兼容用单一 searcher。 */
+    private val registry: LxSongSearchRegistry
+        get() = searchRegistry ?: if (useDefaultSearchRegistry) {
+            LxSongSearchRegistry.default(httpClient)
+        } else {
+            LxSongSearchRegistry(listOf(searcher))
+        }
 
     /**
      * 搜索命中 → 平台原始字段。identifier（`platform:songId`）本身只携带稳定主 ID，
@@ -105,19 +122,17 @@ class LxScriptMusicProvider(
         if (scripts.isEmpty()) return ProviderSearchResults()
 
         val results = LinkedHashMap<String, MusicTrack>()
+        val activeRegistry = registry
         for (script in scripts) {
             val handle = handleFor(script) ?: continue
             for (platform in script.grantedPlatforms(handle.meta)) {
-                if (platform !in searcher.supportedPlatforms) continue
-                val hits = try {
-                    searcher.search(query, platform)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    emptyList()
-                }
+                // 脚本声明了但注册表没有的平台 = 不可搜索，明确跳过（不是静默当没有结果）。
+                if (!activeRegistry.canSearch(platform)) continue
+                val hits = activeRegistry.search(query, platform)
                 for (hit in hits) {
-                    val identifier = "$platform:${hit.songId}"
+                    // 搜索结果不能冒充其它平台来源：以适配器声明的 platform 为准。
+                    val hitPlatform = hit.platform.takeIf { it == platform } ?: continue
+                    val identifier = "$hitPlatform:${hit.songId}"
                     rememberRawFields(identifier, hit.rawFields)
                     if (results.containsKey(identifier)) continue
                     results[identifier] = track(
@@ -172,13 +187,48 @@ class LxScriptMusicProvider(
     }
 
     /**
-     * 关闭所有常驻脚本实例。设置页停用脚本、或应用退出时调用，
+     * 当前真正能搜索的平台集合。UI/能力展示层据此把"脚本声明支持但不可搜索"的平台
+     * 明确标为不可搜索，而不是让用户搜了半天没结果还以为网络有问题。
+     */
+    fun searchablePlatforms(): Set<String> = registry.searchablePlatforms
+
+    /**
+     * 立即关闭某个脚本的 QuickJS context。
+     *
+     * 设置页停用/隔离/删除脚本时由应用层主动调用：仅依赖下次 search/resolve 的
+     * `pruneHandles` 属于惰性回收，用户关掉脚本后 context 仍会驻留到下次使用为止。
+     * 关闭后再次搜索会按需重建，因此不影响重新启用。
+     *
+     * 已知时序边界：调用方是用户的显式停用/隔离动作；若此刻另协程正在 `resolve()` 里调用该脚本，
+     * close 会使那一次解析返回 null（异常被吞掉，不会 native 崩溃）。这是用户主动停用 semantics
+     * 下可接受的代价，且不会由后台自动更新触发——更新走 cacheKey 惰性淘汰，不调用本方法。
+     *
+     * @return 确实关闭了一个常驻实例时为 true（供上层日志/测试确认释放生效）。
+     */
+    suspend fun releaseScript(scriptId: String): Boolean {
+        var released = false
+        mutex.withLock {
+            handles.remove(scriptId)?.let { handle ->
+                runCatching { handle.runtime.close() }
+                released = true
+            }
+            failures.remove(scriptId)
+        }
+        return released
+    }
+
+    /** 测试/诊断用：当前仍持有多少个常驻 QuickJS context（与写入方共用同一把锁）。 */
+    internal suspend fun activeHandleCount(): Int = mutex.withLock { handles.size }
+
+    /**
+     * 关闭所有常驻脚本实例。应用退出或整体禁用 LX Provider 时调用，
      * 避免 QuickJS context 一直占内存。
      */
     suspend fun releaseAll() {
         mutex.withLock {
             handles.values.forEach { runCatching { it.runtime.close() } }
             handles.clear()
+            failures.clear()
         }
     }
 
@@ -333,6 +383,11 @@ object LxQuality {
 
 class LxScriptProviderFactory(
     private val scriptSource: LxInstalledScriptSource,
+    /**
+     * 覆盖用注册表。默认 null = 让 Provider 用其自身 httpClient 构造默认注册表（kw+kg），
+     * 不额外创建 HttpClient。测试/部署可注入自定义集合覆盖。
+     */
+    private val searchRegistry: LxSongSearchRegistry? = null,
 ) : KotlinProviderFactory {
 
     override val providerId: String = LxScriptMusicProvider.ID
@@ -342,5 +397,7 @@ class LxScriptProviderFactory(
         LxScriptMusicProvider(
             providerCredentials = dependencies.credentials,
             scriptSource = scriptSource,
+            searchRegistry = searchRegistry,
+            useDefaultSearchRegistry = searchRegistry == null,
         )
 }

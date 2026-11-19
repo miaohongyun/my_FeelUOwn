@@ -13,6 +13,7 @@ import org.feeluown.mobile.provider.core.ProviderDeviceAuthorizationCapability
 import org.feeluown.mobile.provider.core.splitResourceId
 import org.feeluown.mobile.provider.core.network.ProviderHttpClient
 import org.feeluown.mobile.provider.core.network.ProviderPersistentCache
+import org.feeluown.mobile.provider.lx.LxScriptMusicProvider
 
 /**
  * Concrete application-side implementation of the provider capability interfaces. It intentionally
@@ -87,6 +88,14 @@ class KotlinProviderRepository :
     override suspend fun providers(): List<ProviderInfo> {
         initialize()
         return enabledProviderIds.mapNotNull { providerMap[it]?.value?.info }
+    }
+
+    override suspend fun releaseDynamicScriptRuntime(scriptId: String) {
+        // 只释放已经实例化的 Provider： Lazy.value 会顺带创建从未用过的 Provider，
+        // 用户停用脚本时没必要为了"释放"而先把一个空 Provider 造出来。
+        val lazyProvider = providerMap[LxScriptMusicProvider.ID] ?: return
+        if (!lazyProvider.isInitialized()) return
+        (lazyProvider.value as? LxScriptMusicProvider)?.releaseScript(scriptId)
     }
 
     override suspend fun providerCapabilities(): List<ProviderCapabilities> {

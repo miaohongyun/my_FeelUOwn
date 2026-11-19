@@ -1,12 +1,12 @@
 package org.feeluown.mobile.sourceupdate
 
+import org.feeluown.mobile.sourceupdate.crypto.Sha256
 import io.ktor.client.HttpClient
 import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.network.sockets.SocketTimeoutException
 import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.request.get
 import io.ktor.client.request.header
-import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import kotlinx.coroutines.CancellationException
@@ -27,7 +27,11 @@ data class CatalogFetchResult(
 }
 
 interface CatalogFetcher {
-    suspend fun fetch(url: String, etag: String? = null): CatalogFetchResult
+    /**
+     * @param maxBytes 本次读取的体积上限；目录/脚本下载各自传入独立常量。
+     *   null 表示用实现默认值。mock 实现可忽略。
+     */
+    suspend fun fetch(url: String, etag: String? = null, maxBytes: Int? = null): CatalogFetchResult
 }
 
 /**
@@ -41,11 +45,12 @@ interface CatalogFetcher {
  */
 class KtorCatalogFetcher(
     private val client: HttpClient,
-    private val maxBytes: Int = SourceCatalogParser.MAX_CATALOG_BYTES,
+    private val maxBytes: Int = HttpBodyLimits.CATALOG_JSON_BYTES,
     private val timeoutMillis: Long = 15_000L,
 ) : CatalogFetcher {
 
-    override suspend fun fetch(url: String, etag: String?): CatalogFetchResult {
+    override suspend fun fetch(url: String, etag: String?, maxBytes: Int?): CatalogFetchResult {
+        val byteLimit = maxBytes ?: this.maxBytes
         val response = try {
             withTimeoutOrNull(timeoutMillis) {
                 client.get(url) {
@@ -75,25 +80,29 @@ class KtorCatalogFetcher(
             )
         }
 
-        val contentLength = response.headers[HttpHeaders.ContentLength]?.toLongOrNull()
-        if (contentLength != null && contentLength > maxBytes) {
-            return CatalogFetchResult(
-                url,
-                error = CatalogFetchError.TOO_LARGE,
-                detail = "响应 $contentLength 字节，超过上限 $maxBytes",
-            )
-        }
-
-        val text = try {
-            response.bodyAsText()
+        // 流式读取：Content-Length 提前拒绝 + 无/伪造 CL 时逐块累计，超限立即中断，
+        // 不把超大响应整体读进内存再 substring。读取也纳入总超时。
+        val read = try {
+            withTimeoutOrNull(timeoutMillis) { readBodyBounded(response, byteLimit) }
+                ?: return CatalogFetchResult(url, error = CatalogFetchError.TIMEOUT, detail = "读取响应超时 ${timeoutMillis}ms")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             return CatalogFetchResult(url, error = CatalogFetchError.OTHER, detail = "读取响应失败: ${e.message}")
         }
-        if (text.encodeToByteArray().size > maxBytes) {
-            return CatalogFetchResult(url, error = CatalogFetchError.TOO_LARGE, detail = "响应超过上限 $maxBytes")
+        when (read) {
+            is BoundedBodyRead.TooLarge -> return CatalogFetchResult(
+                url,
+                error = CatalogFetchError.TOO_LARGE,
+                detail = if (read.fromContentLength) {
+                    "Content-Length ${read.observed} 字节，超过上限 ${read.limit}"
+                } else {
+                    "流式读取累计 ${read.observed} 字节，超过上限 ${read.limit}（已中断）"
+                },
+            )
+            is BoundedBodyRead.Ok -> Unit
         }
+        val text = (read as BoundedBodyRead.Ok).text
         if (text.isBlank()) {
             return CatalogFetchResult(url, error = CatalogFetchError.EMPTY, detail = "响应为空")
         }
@@ -117,6 +126,8 @@ sealed interface CatalogLoad {
         val warnings: List<String>,
         val sourceUrl: String,
         val etag: String?,
+        /** 已通过签名校验的目录原始字节 SHA-256，用于同版本内容变化检测。 */
+        val catalogSha256: String,
     ) : CatalogLoad
 
     data class NotModified(val etag: String?) : CatalogLoad
@@ -137,9 +148,23 @@ class SourceCatalogUpdater(
     private val clock: () -> Long = { 0L },
 ) {
 
-    suspend fun load(catalogUrl: String, etag: String? = null): CatalogLoad {
+    /**
+     * 拉取并校验目录。
+     *
+     * @param minCatalogVersion 本地已接受的目录版本；任何签名有效的候选若版本低于它，
+     *   一律拒绝（反重放）。同时本方法会遍历所有允许镜像，在全部签名有效的候选中
+     *   选**版本最高**者返回——避免"主地址返回旧版本就立即接受、错过镜像上的新版本"。
+     *   首次安装传 0。
+     */
+    suspend fun load(
+        catalogUrl: String,
+        etag: String? = null,
+        minCatalogVersion: Long = 0L,
+    ): CatalogLoad {
         val candidates = (listOf(catalogUrl) + mirrors.orderedMirrors(clock())).distinct()
         val attempts = mutableListOf<String>()
+        var best: CatalogLoad.Loaded? = null
+        var anyNotModified: CatalogLoad.NotModified? = null
 
         for (url in candidates) {
             if (!mirrors.isAllowed(url)) {
@@ -156,7 +181,8 @@ class SourceCatalogUpdater(
             val body = result.body
             if (result.notModified && body == null) {
                 mirrors.recordSuccess(url, clock())
-                return CatalogLoad.NotModified(result.etag ?: etag)
+                if (anyNotModified == null) anyNotModified = CatalogLoad.NotModified(result.etag ?: etag)
+                continue
             }
             if (body == null) {
                 mirrors.recordFailure(url, clock(), "响应为空")
@@ -186,12 +212,27 @@ class SourceCatalogUpdater(
                 SignatureVerification.Accepted, SignatureVerification.NotRequired -> Unit
             }
 
+            // 反重放：签名有效但版本低于本地已接受版本 → 绝不接受（即使来自"可信"镜像）。
+            if (valid.catalog.catalogVersion < minCatalogVersion) {
+                mirrors.recordSuccess(url, clock())
+                attempts += "$url: 目录版本 ${valid.catalog.catalogVersion} 低于本地已接受版本 $minCatalogVersion（疑似重放）"
+                continue
+            }
+
             mirrors.recordSuccess(url, clock())
-            return CatalogLoad.Loaded(valid.catalog, valid.warnings, url, result.etag ?: etag)
+            val loaded = CatalogLoad.Loaded(
+                valid.catalog, valid.warnings, url, result.etag ?: etag, Sha256.hex(body.encodeToByteArray()),
+            )
+            if (best == null || loaded.catalog.catalogVersion > best!!.catalog.catalogVersion) {
+                best = loaded
+            }
         }
 
+        // 有签名有效的新目录 → 取版本最高者；否则若拿到 304 → 视为未修改；再否则失败。
+        best?.let { return it }
+        anyNotModified?.let { return it }
         return CatalogLoad.Failed(
-            reason = "所有目录地址均不可用",
+            reason = if (attempts.any { "重放" in it }) "所有目录地址均不可用或为旧版本重放" else "所有目录地址均不可用",
             attempts = attempts,
         )
     }

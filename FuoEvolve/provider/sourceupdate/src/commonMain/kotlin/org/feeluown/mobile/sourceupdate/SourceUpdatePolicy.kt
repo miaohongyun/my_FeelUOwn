@@ -73,7 +73,10 @@ class SourceMirrorPolicy(
 
     fun isAllowed(url: String): Boolean {
         if (!url.startsWith("https://", ignoreCase = true)) return false
-        if (allowlist.isEmpty()) return true
+        // 空白名单必须拒绝全部下载通道，与 LxNetworkPolicy 的安全边界一致。
+        // 旧实现 `if (allowlist.isEmpty()) return true` 是 fail-open：一旦漏配内置名单，
+        // 攻击者可控的目录就能把下载引导到任意主机（虽然仍要过签名，但 SSRF/隐私泄露已发生）。
+        if (allowlist.isEmpty()) return false
         val host = hostOf(url) ?: return false
         return allowlist.any { it.equals(host, ignoreCase = true) }
     }

@@ -119,6 +119,16 @@ class SourceCatalogRuntime(
     }
 
     /**
+     * 把脚本从当前版本切回上一版本。
+     *
+     * 只做持久化状态变更（activeVersion=previousVersion、清 previousVersion、记 lastError）；
+     * 正在运行的 QuickJS context 由应用层 [SourceUpdateHost.rollbackScript] 负责立即释放，
+     * 否则回滚后到下次搜索前仍会执行旧（失败的）版本。没有上一版本时返回 false。
+     */
+    suspend fun rollbackScript(scriptId: String, reason: String): Boolean =
+        transaction.rollback(scriptId, reason)
+
+    /**
      * 冒烟测试：在独立 QuickJS context 里加载并初始化一遍脚本。
      *
      * 这是"新版初始化失败自动回滚"的唯一判据——只做静态检查无法发现语法错误、

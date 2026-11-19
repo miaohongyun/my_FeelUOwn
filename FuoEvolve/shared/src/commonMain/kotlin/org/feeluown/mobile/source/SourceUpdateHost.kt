@@ -46,6 +46,10 @@ class SourceUpdateHost(
         if (report !is UpdateReport.Skipped) {
             val status = runtime.status()
             if (status.installed.any { it.enabled }) enableLxProviderIfNeeded()
+            // 更新不在这里主动 close：checkForUpdates 由启动/每日任务在后台触发，可能正好撞上
+            // 用户解析中的 resolve()，close 会把它的 QuickJS context 抽走导致当次解析失败。
+            // 脚本 handle 的身份含源码 SHA-256，版本一变下次 search/resolve 自然淘汰旧 context，
+            // 这已经满足"更新自动淘汰旧 runtime"，无需主动打断正在进行的解析。
             settings.update { settings ->
                 settings.copy(
                     sourceCatalogVersion = status.catalogVersion.takeIf { it > 0 },
@@ -84,11 +88,27 @@ class SourceUpdateHost(
 
     suspend fun setScriptEnabled(scriptId: String, enabled: Boolean) {
         runtime.setScriptEnabled(scriptId, enabled)
+        if (!enabled) releaseRuntime(scriptId)
     }
 
-    /** 隔离一个脚本：立刻停用，且自动更新不会再启用它。 */
+    /**
+     * 回滚脚本到上一版本。
+     *
+     * 回滚成功后立即释放对应 QuickJS context：handle 的身份含源码 SHA-256，旧 context 不能
+     * 在下次搜索前继续服务。返回是否真的发生了回滚（无上一版本时为 false，不触发释放）。
+     */
+    suspend fun rollbackScript(scriptId: String, reason: String): Boolean {
+        val changed = runtime.rollbackScript(scriptId, reason)
+        if (changed) releaseRuntime(scriptId)
+        return changed
+    }
+
+    /** 隔离一个脚本：立刻停用并释放运行时，且自动更新不会再启用它。 */
     suspend fun setScriptQuarantined(scriptId: String, quarantined: Boolean) {
-        if (quarantined) runtime.setScriptEnabled(scriptId, false)
+        if (quarantined) {
+            runtime.setScriptEnabled(scriptId, false)
+            releaseRuntime(scriptId)
+        }
         settings.update { settings ->
             settings.copy(
                 quarantinedScriptIds = if (quarantined) {
@@ -98,5 +118,15 @@ class SourceUpdateHost(
                 },
             )
         }
+    }
+
+    /**
+     * 主动回收脚本运行时。
+     *
+     * Provider 尚未实例化时其 Lazy 内没有 handle，本调用是安全的空操作；之后重新启用
+     * 会按需新建。若已实例化，则立即关闭对应 QuickJS context，不必等下一次搜索。
+     */
+    private suspend fun releaseRuntime(scriptId: String) {
+        providerRegistry?.releaseDynamicScriptRuntime(scriptId)
     }
 }

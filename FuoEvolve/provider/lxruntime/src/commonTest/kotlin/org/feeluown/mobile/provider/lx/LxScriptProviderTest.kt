@@ -306,4 +306,41 @@ class LxScriptProviderTest {
         assertNotNull(payload)
         assertEquals("https://cdn.example.com/kw/228908.128k.mp3", payload.url)
     }
+
+    @Test
+    fun releaseScriptClosesHandleAndNextSearchRebuildsIt() = runTest {
+        // 应用停用/隔离脚本时主动释放：context 必须立刻消失，重新启用后按需重建。
+        // 关键证据不止"handle 从 map 摘掉"——那只会泄漏 QuickJS context：
+        // 同时断言被摘掉的那个 runtime 的 session 确实 closed。
+        val created = mutableListOf<LxScriptRuntime>()
+        val searcher = object : LxSongSearcher {
+            override val supportedPlatforms = setOf("kw")
+            override suspend fun search(keyword: String, platform: String, limit: Int) =
+                listOf(LxSongHit("kw", "228908", "晴天", "周杰伦", "叶惠美"))
+        }
+        val p = LxScriptMusicProvider(
+            providerCredentials = InMemoryProviderCredentialStore(),
+            scriptSource = scriptSource(fixtureScript()),
+            httpClient = offlineClient(),
+            searcher = searcher,
+            runtimeFactory = {
+                LxScriptRuntime(offlineClient()).also(created::add)
+            },
+        )
+
+        p.search("晴天")
+        assertEquals(1, created.size, "首次搜索应创建 1 个 runtime")
+        assertEquals(1, p.activeHandleCount())
+
+        val released = p.releaseScript("fixture")
+        assertTrue(released, "已实例化的脚本释放应返回 true")
+        assertEquals(0, p.activeHandleCount(), "releaseScript 后不应再持有 handle")
+        assertTrue(created.single().sessionSnapshots().single().closed, "被释放的 QuickJS session 必须已关闭")
+        assertEquals(false, p.releaseScript("fixture"), "重复释放应返回 false，且不抛异常")
+
+        p.search("晴天")
+        assertEquals(2, created.size, "释放后再次搜索必须新建 runtime，而非复用已关闭实例")
+        assertEquals(1, p.activeHandleCount())
+        assertTrue(created.last().isLoaded, "新 runtime 应处于已加载状态")
+    }
 }

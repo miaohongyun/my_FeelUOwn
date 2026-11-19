@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedAt": "2026-11-19T00:00:00Z",
-  "note": "本文件只用于人工审核记录，客户端不会读取，也不会安装其中任何条目。审核结论变化时只改这里，不改 source-catalog.json。所有新条目均为 autoInstall=false，且无 APPROVED：模拟测试通过不等于真实音源验证通过。",
+  "note": "本文件只用于人工审核记录，客户端不会读取，也不会安装其中任何条目。审核结论变化时只改这里，不改 source-catalog.json。所有新条目均为 autoInstall=false，且无 APPROVED：模拟测试通过不等于真实音源验证通过。 2026-11-19 追加 realEndpointProbe：8个候选的真实DNS/HTTP可达性观测，均不构成审核提升；source-catalog.json 仍为空数组。 2026-11-19 修正审核记录一致性：统一 testLevelDefinitions 九级定义；3 个初始化失败脚本由 SIMULATED_INIT_AND_URL_PARSE 下调为 RUNTIME_LOAD；8 个元数据候选标 NOT_OBTAINED；补齐 requiredHostApis/discoveredDomains/staticReview/simulatedResult/realTestResult/license/实际通过平台字段。全部维持非 APPROVED、autoInstall=false，source-catalog.json 仍空数组。",
   "candidates": [
     {
       "id": "gd-studio",
@@ -10,7 +10,15 @@
       "path": "sources/gd-studio/gdstudio音乐源.js",
       "reviewStatus": "REVIEW_CANDIDATE",
       "autoInstall": false,
-      "reason": "可读源码、单一主 API 入口；仍需确认 music-api.gdstudio.xyz 的使用条款、授权范围与运行时行为"
+      "reason": "可读源码、单一主 API 入口；仍需确认 music-api.gdstudio.xyz 的使用条款、授权范围与运行时行为",
+      "testLevel": "NOT_OBTAINED",
+      "testLevelEvidence": "仅登记 shellsec/pdone 仓库路径与风险提示，脚本原文未取证、未审查、未执行",
+      "requiredHostApis": [],
+      "discoveredDomains": [],
+      "staticReview": "未执行（脚本未取证）",
+      "simulatedResult": "未执行",
+      "realTestResult": "未执行",
+      "license": "未核实（脚本未取证）"
     },
     {
       "id": "lx-base",
@@ -19,7 +27,15 @@
       "path": "lx/latest.js",
       "reviewStatus": "REVIEW_CANDIDATE",
       "autoInstall": false,
-      "reason": "目录名带 LX 不代表官方发布，需核对确切仓库、许可证与维护状态"
+      "reason": "目录名带 LX 不代表官方发布，需核对确切仓库、许可证与维护状态",
+      "testLevel": "NOT_OBTAINED",
+      "testLevelEvidence": "仅登记 shellsec/pdone 仓库路径与风险提示，脚本原文未取证、未审查、未执行",
+      "requiredHostApis": [],
+      "discoveredDomains": [],
+      "staticReview": "未执行（脚本未取证）",
+      "simulatedResult": "未执行",
+      "realTestResult": "未执行",
+      "license": "未核实（脚本未取证）"
     },
     {
       "id": "appx64-clear-music",
@@ -28,7 +44,15 @@
       "path": "sources/appx64/Appx64 Clear Music.js",
       "reviewStatus": "QUARANTINE_CREDENTIAL_REVIEW",
       "autoInstall": false,
-      "reason": "包含 qqCookie 配置和多个后端，需检查凭据流向"
+      "reason": "包含 qqCookie 配置和多个后端，需检查凭据流向",
+      "testLevel": "NOT_OBTAINED",
+      "testLevelEvidence": "仅登记 shellsec/pdone 仓库路径与风险提示，脚本原文未取证、未审查、未执行",
+      "requiredHostApis": [],
+      "discoveredDomains": [],
+      "staticReview": "未执行（脚本未取证）",
+      "simulatedResult": "未执行",
+      "realTestResult": "未执行",
+      "license": "未核实（脚本未取证）"
     },
     {
       "id": "fish-music",
@@ -37,7 +61,15 @@
       "path": "sources/fish-music/fish_music.js",
       "reviewStatus": "QUARANTINE_OBFUSCATED",
       "autoInstall": false,
-      "reason": "约 639 KB 且高度混淆，当前不可充分审计"
+      "reason": "约 639 KB 且高度混淆，当前不可充分审计",
+      "testLevel": "NOT_OBTAINED",
+      "testLevelEvidence": "仅登记 shellsec/pdone 仓库路径与风险提示，脚本原文未取证、未审查、未执行",
+      "requiredHostApis": [],
+      "discoveredDomains": [],
+      "staticReview": "未执行（脚本未取证）",
+      "simulatedResult": "未执行",
+      "realTestResult": "未执行",
+      "license": "未核实（脚本未取证）"
     },
     {
       "id": "lx-animemusic",
@@ -46,7 +78,15 @@
       "path": "sources/animemusic/lx-animemusic.js",
       "reviewStatus": "QUARANTINE_API_REVIEW",
       "autoInstall": false,
-      "reason": "外部 API + API_KEY + 远程更新开关，需核对条款与数据收集范围"
+      "reason": "外部 API + API_KEY + 远程更新开关，需核对条款与数据收集范围",
+      "testLevel": "NOT_OBTAINED",
+      "testLevelEvidence": "仅登记 shellsec/pdone 仓库路径与风险提示，脚本原文未取证、未审查、未执行",
+      "requiredHostApis": [],
+      "discoveredDomains": [],
+      "staticReview": "未执行（脚本未取证）",
+      "simulatedResult": "未执行",
+      "realTestResult": "未执行",
+      "license": "未核实（脚本未取证）"
     },
     {
       "id": "xinghai",
@@ -55,7 +95,15 @@
       "path": "sources/xinghai/星海音乐源.js",
       "reviewStatus": "QUARANTINE_LICENSE_AND_API_REVIEW",
       "autoInstall": false,
-      "reason": "含可选卡密/License 配置与多域名更新接口"
+      "reason": "含可选卡密/License 配置与多域名更新接口",
+      "testLevel": "NOT_OBTAINED",
+      "testLevelEvidence": "仅登记 shellsec/pdone 仓库路径与风险提示，脚本原文未取证、未审查、未执行",
+      "requiredHostApis": [],
+      "discoveredDomains": [],
+      "staticReview": "未执行（脚本未取证）",
+      "simulatedResult": "未执行",
+      "realTestResult": "未执行",
+      "license": "未核实（脚本未取证）"
     },
     {
       "id": "changqing-svip",
@@ -64,7 +112,15 @@
       "path": "sources/changqing/长青SVIP音源(二改修复版).js",
       "reviewStatus": "REJECT_AUTO_CATALOG",
       "autoInstall": false,
-      "reason": "SVIP/会员权益绕过定位 + 混淆 + 外部更新"
+      "reason": "SVIP/会员权益绕过定位 + 混淆 + 外部更新",
+      "testLevel": "NOT_OBTAINED",
+      "testLevelEvidence": "仅登记 shellsec/pdone 仓库路径与风险提示，脚本原文未取证、未审查、未执行",
+      "requiredHostApis": [],
+      "discoveredDomains": [],
+      "staticReview": "未执行（脚本未取证）",
+      "simulatedResult": "未执行",
+      "realTestResult": "未执行",
+      "license": "未核实（脚本未取证）"
     },
     {
       "id": "hyw-public",
@@ -73,7 +129,15 @@
       "path": "sources/hyw/HYWmusic_公益版.js",
       "reviewStatus": "REJECT_PUBLIC_DISTRIBUTION",
       "autoInstall": false,
-      "reason": "上游明确提示文件内嵌卡密，不得公开重新分发"
+      "reason": "上游明确提示文件内嵌卡密，不得公开重新分发",
+      "testLevel": "NOT_OBTAINED",
+      "testLevelEvidence": "仅登记 shellsec/pdone 仓库路径与风险提示，脚本原文未取证、未审查、未执行",
+      "requiredHostApis": [],
+      "discoveredDomains": [],
+      "staticReview": "未执行（脚本未取证）",
+      "simulatedResult": "未执行",
+      "realTestResult": "未执行",
+      "license": "未核实（脚本未取证）"
     },
     {
       "id": "huibq",
@@ -91,8 +155,37 @@
       ],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "单一公开 API + 公开 key；模拟解析 ID 一致；无真实网络验证"
+      "testLevel": "SIMULATED_URL_RESOLVE",
+      "reason": "单一公开 API + 公开 key；模拟解析 ID 一致；无真实网络验证",
+      "realEndpointProbe": {
+        "date": "2026-11-19",
+        "environment": "本机经127.0.0.1:7897代理，非中国大陆直连",
+        "observation": "lxmusicapi.onrender.com DNS正常(CNAME→Cloudflare)，HTTP 503 Service Suspended \"suspended by its owner\"",
+        "verdict": "DEAD_ENDPOINT",
+        "level": "NETWORK_REACHABILITY_ONLY_NOT_REAL_API",
+        "note": "仅DNS+HTTP可达性，未做真实搜索/解析/音频/歌曲身份全链路；不构成审核状态提升"
+      },
+      "testLevelEvidence": "ThirdPartyScriptCompatTest 参数化用例：MockEngine 下 inited 成功 + requestMusicUrl 返回 URL，且请求 songId 与返回 URL 内 ID 一致",
+      "declaredPlatforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "simulatedUrlResolvePlatforms": [
+        "kw"
+      ],
+      "requiredHostApis": [
+        "console"
+      ],
+      "discoveredDomains": [
+        "lxmusicapi.onrender.com"
+      ],
+      "staticReview": "可读源码、单一公开 key API，无 Cookie/动态执行",
+      "simulatedResult": "通过(init + URL 解析 + ID 一致)",
+      "realTestResult": "DEAD_ENDPOINT",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "feimao",
@@ -110,8 +203,37 @@
       ],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "公开占位 key；需 console；模拟解析通过"
+      "testLevel": "SIMULATED_URL_RESOLVE",
+      "reason": "公开占位 key；需 console；模拟解析通过",
+      "realEndpointProbe": {
+        "date": "2026-11-19",
+        "environment": "本机经127.0.0.1:7897代理，非中国大陆直连",
+        "observation": "music.xn--z7x900a.live(肥猫) A记录存在，根路径nginx默认页，/url/kw/228908/128k 返回404",
+        "verdict": "API_PATH_NOT_WORKING",
+        "level": "NETWORK_REACHABILITY_ONLY_NOT_REAL_API",
+        "note": "仅DNS+HTTP可达性，未做真实搜索/解析/音频/歌曲身份全链路；不构成审核状态提升"
+      },
+      "testLevelEvidence": "ThirdPartyScriptCompatTest 参数化用例：MockEngine 下 inited 成功 + requestMusicUrl 返回 URL，且请求 songId 与返回 URL 内 ID 一致",
+      "declaredPlatforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "simulatedUrlResolvePlatforms": [
+        "kw"
+      ],
+      "requiredHostApis": [
+        "console"
+      ],
+      "discoveredDomains": [
+        "music.xn--z7x900a.live"
+      ],
+      "staticReview": "公开占位 key，无动态执行",
+      "simulatedResult": "通过(init + URL 解析 + ID 一致)",
+      "realTestResult": "API_PATH_NOT_WORKING",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "yahua",
@@ -129,8 +251,35 @@
       ],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "混淆脚本，执行期域名 flower.tempmusics.tk；模拟解析通过"
+      "testLevel": "SIMULATED_URL_RESOLVE",
+      "reason": "混淆脚本，执行期域名 flower.tempmusics.tk；模拟解析通过",
+      "realEndpointProbe": {
+        "date": "2026-11-19",
+        "environment": "本机经127.0.0.1:7897代理，非中国大陆直连",
+        "observation": "flower.tempmusics.tk DoH NXDOMAIN，TLS握手失败",
+        "verdict": "DEAD_DOMAIN",
+        "level": "NETWORK_REACHABILITY_ONLY_NOT_REAL_API",
+        "note": "仅DNS+HTTP可达性，未做真实搜索/解析/音频/歌曲身份全链路；不构成审核状态提升"
+      },
+      "testLevelEvidence": "ThirdPartyScriptCompatTest 参数化用例：MockEngine 下 inited 成功 + requestMusicUrl 返回 URL，且请求 songId 与返回 URL 内 ID 一致",
+      "declaredPlatforms": [
+        "kw",
+        "wy",
+        "mg",
+        "tx",
+        "kg"
+      ],
+      "simulatedUrlResolvePlatforms": [
+        "kw"
+      ],
+      "requiredHostApis": [],
+      "discoveredDomains": [
+        "flower.tempmusics.tk"
+      ],
+      "staticReview": "混淆脚本，执行期才暴露域名，字符串拆分",
+      "simulatedResult": "通过(init + URL 解析 + ID 一致)",
+      "realTestResult": "DEAD_DOMAIN",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "yecao",
@@ -144,8 +293,31 @@
       ],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "混淆脚本，执行期域名 grass.tempmusics.tk；模拟解析通过"
+      "testLevel": "SIMULATED_URL_RESOLVE",
+      "reason": "混淆脚本，执行期域名 grass.tempmusics.tk；模拟解析通过",
+      "realEndpointProbe": {
+        "date": "2026-11-19",
+        "environment": "本机经127.0.0.1:7897代理，非中国大陆直连",
+        "observation": "grass.tempmusics.tk DoH NXDOMAIN，TLS握手失败",
+        "verdict": "DEAD_DOMAIN",
+        "level": "NETWORK_REACHABILITY_ONLY_NOT_REAL_API",
+        "note": "仅DNS+HTTP可达性，未做真实搜索/解析/音频/歌曲身份全链路；不构成审核状态提升"
+      },
+      "testLevelEvidence": "ThirdPartyScriptCompatTest 参数化用例：MockEngine 下 inited 成功 + requestMusicUrl 返回 URL，且请求 songId 与返回 URL 内 ID 一致",
+      "declaredPlatforms": [
+        "kw"
+      ],
+      "simulatedUrlResolvePlatforms": [
+        "kw"
+      ],
+      "requiredHostApis": [],
+      "discoveredDomains": [
+        "grass.tempmusics.tk"
+      ],
+      "staticReview": "同类混淆，执行期才暴露域名",
+      "simulatedResult": "通过(init + URL 解析 + ID 一致)",
+      "realTestResult": "DEAD_DOMAIN",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "zhizun",
@@ -163,8 +335,37 @@
       ],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "裸 IP 110.42.36.53:1314；空 key；模拟解析通过"
+      "testLevel": "SIMULATED_URL_RESOLVE",
+      "reason": "裸 IP 110.42.36.53:1314；空 key；模拟解析通过",
+      "realEndpointProbe": {
+        "date": "2026-11-19",
+        "environment": "本机经127.0.0.1:7897代理，非中国大陆直连",
+        "observation": "裸IP 110.42.36.53:1314，经本机代理502(代理无法直连裸IP端口)",
+        "verdict": "UNVERIFIABLE_NEEDS_MAINLAND_DEVICE",
+        "level": "NETWORK_REACHABILITY_ONLY_NOT_REAL_API",
+        "note": "仅DNS+HTTP可达性，未做真实搜索/解析/音频/歌曲身份全链路；不构成审核状态提升"
+      },
+      "testLevelEvidence": "ThirdPartyScriptCompatTest 参数化用例：MockEngine 下 inited 成功 + requestMusicUrl 返回 URL，且请求 songId 与返回 URL 内 ID 一致",
+      "declaredPlatforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "simulatedUrlResolvePlatforms": [
+        "kw"
+      ],
+      "requiredHostApis": [
+        "console"
+      ],
+      "discoveredDomains": [
+        "110.42.36.53:1314"
+      ],
+      "staticReview": "裸 IP，空 key，无动态执行",
+      "simulatedResult": "通过(init + URL 解析 + ID 一致)",
+      "realTestResult": "UNVERIFIABLE_NEEDS_MAINLAND_DEVICE",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "zicheng2",
@@ -182,8 +383,37 @@
       ],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "裸 IP 103.239.247.51:9763；公开占位 key；模拟解析通过"
+      "testLevel": "SIMULATED_URL_RESOLVE",
+      "reason": "裸 IP 103.239.247.51:9763；公开占位 key；模拟解析通过",
+      "realEndpointProbe": {
+        "date": "2026-11-19",
+        "environment": "本机经127.0.0.1:7897代理，非中国大陆直连",
+        "observation": "裸IP 103.239.247.51:9763，经本机代理502",
+        "verdict": "UNVERIFIABLE_NEEDS_MAINLAND_DEVICE",
+        "level": "NETWORK_REACHABILITY_ONLY_NOT_REAL_API",
+        "note": "仅DNS+HTTP可达性，未做真实搜索/解析/音频/歌曲身份全链路；不构成审核状态提升"
+      },
+      "testLevelEvidence": "ThirdPartyScriptCompatTest 参数化用例：MockEngine 下 inited 成功 + requestMusicUrl 返回 URL，且请求 songId 与返回 URL 内 ID 一致",
+      "declaredPlatforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "simulatedUrlResolvePlatforms": [
+        "kw"
+      ],
+      "requiredHostApis": [
+        "console"
+      ],
+      "discoveredDomains": [
+        "103.239.247.51:9763"
+      ],
+      "staticReview": "裸 IP，公开占位 key",
+      "simulatedResult": "通过(init + URL 解析 + ID 一致)",
+      "realTestResult": "UNVERIFIABLE_NEEDS_MAINLAND_DEVICE",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "juhe_lerd_v3",
@@ -195,8 +425,19 @@
       "platforms": [],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "init 需真实 API code=200，模拟环境无法过初始化"
+      "testLevel": "RUNTIME_LOAD",
+      "reason": "init 需真实 API code=200，模拟环境无法过初始化",
+      "testLevelEvidence": "脚本可加载执行但未发出有效 inited，未达 SIMULATED_INIT；原记录 SIMULATED_INIT_AND_URL_PARSE 与实测不符，已下调",
+      "declaredPlatforms": [],
+      "simulatedUrlResolvePlatforms": [],
+      "requiredHostApis": [],
+      "discoveredDomains": [
+        "lerd.sukimon.me"
+      ],
+      "staticReview": "init 需真实 API code=200 才 send inited；MockEngine 返回 {} 导致初始化失败",
+      "simulatedResult": "失败(MockEngine {})",
+      "realTestResult": "未执行",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "ikun",
@@ -214,8 +455,37 @@
       ],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "公开分享 key；成功码 200；需 console；模拟解析通过"
+      "testLevel": "SIMULATED_URL_RESOLVE",
+      "reason": "公开分享 key；成功码 200；需 console；模拟解析通过",
+      "realEndpointProbe": {
+        "date": "2026-11-19",
+        "environment": "本机经127.0.0.1:7897代理，非中国大陆直连",
+        "observation": "api.ikunshare.com DoH NXDOMAIN(status 3)，TLS握手失败/超时",
+        "verdict": "DEAD_DOMAIN",
+        "level": "NETWORK_REACHABILITY_ONLY_NOT_REAL_API",
+        "note": "仅DNS+HTTP可达性，未做真实搜索/解析/音频/歌曲身份全链路；不构成审核状态提升"
+      },
+      "testLevelEvidence": "ThirdPartyScriptCompatTest 参数化用例：MockEngine 下 inited 成功 + requestMusicUrl 返回 URL，且请求 songId 与返回 URL 内 ID 一致",
+      "declaredPlatforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "simulatedUrlResolvePlatforms": [
+        "kw"
+      ],
+      "requiredHostApis": [
+        "console"
+      ],
+      "discoveredDomains": [
+        "api.ikunshare.com"
+      ],
+      "staticReview": "公开分享 key，成功码 200（与其他源不同）",
+      "simulatedResult": "通过(init + URL 解析 + ID 一致)",
+      "realTestResult": "DEAD_DOMAIN",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "dujia_v4",
@@ -233,8 +503,38 @@
       ],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "114KB；需 md5+console 自检；域名 punycode；模拟解析通过"
+      "testLevel": "SIMULATED_URL_RESOLVE",
+      "reason": "114KB；需 md5+console 自检；域名 punycode；模拟解析通过",
+      "realEndpointProbe": {
+        "date": "2026-11-19",
+        "environment": "本机经127.0.0.1:7897代理，非中国大陆直连",
+        "observation": "88.lxmusic.xn--fiqs8s(中国) A记录存在，根路径{\"code\":0,\"msg\":\"success\",\"data\":null}，/url/... 返回404",
+        "verdict": "ALIVE_NEEDS_REAL_RESOLVE_CHECK",
+        "level": "NETWORK_REACHABILITY_ONLY_NOT_REAL_API",
+        "note": "仅DNS+HTTP可达性，未做真实搜索/解析/音频/歌曲身份全链路；不构成审核状态提升"
+      },
+      "testLevelEvidence": "ThirdPartyScriptCompatTest 参数化用例：MockEngine 下 inited 成功 + requestMusicUrl 返回 URL，且请求 songId 与返回 URL 内 ID 一致",
+      "declaredPlatforms": [
+        "kw",
+        "kg",
+        "tx",
+        "wy",
+        "mg"
+      ],
+      "simulatedUrlResolvePlatforms": [
+        "kw"
+      ],
+      "requiredHostApis": [
+        "md5",
+        "console"
+      ],
+      "discoveredDomains": [
+        "88.lxmusic.xn--fiqs8s"
+      ],
+      "staticReview": "114KB，md5 用于自检，punycode 域名",
+      "simulatedResult": "通过(init + URL 解析 + ID 一致)",
+      "realTestResult": "ALIVE_NEEDS_REAL_RESOLVE_CHECK",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "wuming",
@@ -246,8 +546,28 @@
       "platforms": [],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "crypto aes/rsa 未实现 + name/description 防篡改自检未过"
+      "testLevel": "RUNTIME_LOAD",
+      "reason": "crypto aes/rsa 未实现 + name/description 防篡改自检未过",
+      "testLevelEvidence": "脚本可加载执行但未发出有效 inited，未达 SIMULATED_INIT；原记录 SIMULATED_INIT_AND_URL_PARSE 与实测不符，已下调",
+      "declaredPlatforms": [],
+      "simulatedUrlResolvePlatforms": [],
+      "requiredHostApis": [
+        "md5",
+        "aesEncrypt",
+        "rsaEncrypt",
+        "randomBytes"
+      ],
+      "discoveredDomains": [
+        "app.c.nf.migu.cn",
+        "gateway.kugou.com",
+        "interface.music.163.com",
+        "md.khkj.xyz",
+        "nmobi.kuwo.cn"
+      ],
+      "staticReview": "aes/rsa 未实现 + name/description 防篡改自检未过；初始化失败",
+      "simulatedResult": "失败(自检未过)",
+      "realTestResult": "未执行",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "gongzhonghao2",
@@ -259,8 +579,23 @@
       "platforms": [],
       "reviewStatus": "NEEDS_REVIEW",
       "autoInstall": false,
-      "testLevel": "SIMULATED_INIT_AND_URL_PARSE",
-      "reason": "md5 自检后 init 超时（5s），需更长超时复测"
+      "testLevel": "RUNTIME_LOAD",
+      "reason": "md5 自检后 init 超时（5s），需更长超时复测",
+      "testLevelEvidence": "脚本可加载执行但未发出有效 inited，未达 SIMULATED_INIT；原记录 SIMULATED_INIT_AND_URL_PARSE 与实测不符，已下调",
+      "declaredPlatforms": [],
+      "simulatedUrlResolvePlatforms": [],
+      "requiredHostApis": [
+        "md5",
+        "console"
+      ],
+      "discoveredDomains": [
+        "88.lxmusic.xn--fiqs8s",
+        "github.com"
+      ],
+      "staticReview": "md5 自检后仍需网络，5s 初始化超时 InternalError: interrupted",
+      "simulatedResult": "失败(初始化超时)",
+      "realTestResult": "未执行",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "liuyin",
@@ -273,7 +608,18 @@
       "reviewStatus": "REJECT_AUTO_CATALOG",
       "autoInstall": false,
       "testLevel": "STATIC_ONLY",
-      "reason": "333KB 重度混淆 + new Function 动态执行 + 需真实 API"
+      "reason": "333KB 重度混淆 + new Function 动态执行 + 需真实 API",
+      "testLevelEvidence": "仅静态审查；未成功执行脚本，无 inited，无 URL 解析",
+      "declaredPlatforms": [],
+      "simulatedUrlResolvePlatforms": [],
+      "requiredHostApis": [
+        "new Function(动态执行)"
+      ],
+      "discoveredDomains": [],
+      "staticReview": "333KB 重度 _0x 混淆 + new Function 动态执行 + 自检失败，REJECT",
+      "simulatedResult": "未通过/未执行",
+      "realTestResult": "未执行",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     },
     {
       "id": "xiaoxiongmao",
@@ -286,7 +632,43 @@
       "reviewStatus": "QUARANTINE_API_REVIEW",
       "autoInstall": false,
       "testLevel": "STATIC_ONLY",
-      "reason": "updateUrl=xxx.com 且从 jsdelivr/GitHub 远程加载第二段 JS"
+      "reason": "updateUrl=xxx.com 且从 jsdelivr/GitHub 远程加载第二段 JS",
+      "testLevelEvidence": "仅静态审查；未成功执行脚本，无 inited，无 URL 解析",
+      "declaredPlatforms": [],
+      "simulatedUrlResolvePlatforms": [],
+      "requiredHostApis": [
+        "md5",
+        "aesEncrypt",
+        "rsaEncrypt",
+        "randomBytes"
+      ],
+      "discoveredDomains": [
+        "cdn.jsdelivr.net",
+        "fastly.jsdelivr.net",
+        "gcore.jsdelivr.net",
+        "github.com"
+      ],
+      "staticReview": "updateUrl=xxx.com，从 jsdelivr/GitHub 远程加载第二段 JS，QUARANTINE",
+      "simulatedResult": "未通过/未执行",
+      "realTestResult": "未执行",
+      "license": "脚本未声明显式开源许可证（社区脚本，需人工确认授权）"
     }
-  ]
+  ],
+  "testLevelDefinitions": {
+    "note": "testLevel 必须表示已完成的最高等级，不得按预期或部分测试推断。等级单调，高等级隐含低等级全部满足。",
+    "levels": [
+      "NOT_OBTAINED - 仅登记仓库元数据，脚本原文未取证，未做任何审查/执行",
+      "STATIC_ONLY - 已取得脚本原文并完成静态审查，但未成功执行",
+      "RUNTIME_LOAD - 脚本能在 QuickJS 加载，但未通过完整初始化（未发出有效 inited）",
+      "SIMULATED_INIT - MockEngine 下初始化成功（inited 有效）",
+      "SIMULATED_URL_RESOLVE - 模拟环境下初始化+播放地址解析成功，且请求 ID 与返回 URL 内 ID 一致",
+      "REAL_INIT - 真实接口初始化成功",
+      "REAL_SEARCH - 真实搜索接口返回目标歌曲成功",
+      "REAL_URL_RESOLVE - 真实解析接口返回播放 URL 成功",
+      "REAL_AUDIO_RESPONSE - 真实播放地址返回音频响应成功",
+      "REAL_TRACK_IDENTITY_VERIFIED - 真实响应经歌曲身份核验一致"
+    ],
+    "simulatedNote": "SIMULATED_* 均为 MockEngine 模拟，不等于真实接口验证。realEndpointProbe 仅为真实网络可达性，不构成任何 REAL_* 提升。",
+    "verifiedOn2026_11_19": "SIMULATED_URL_RESOLVE 的 URL 解析实测仅覆盖各脚本声明平台的第一个（kw）；其余平台仅 inited 声明，未做解析断言，故 simulatedUrlResolvePlatforms 只记 kw。"
+  }
 }

@@ -265,8 +265,19 @@ class SourceMirrorPolicyTest {
     }
 
     @Test
+    fun emptyAllowlistFailsClosed() {
+        // fail-closed：漏配内置名单时不允许任何下载通道，不能回到"空白即全放行"。
+        val policy = SourceMirrorPolicy(mirrors = listOf("https://anything.example.com/c"))
+        assertFalse(policy.isAllowed("https://anything.example.com/c"))
+        assertEquals(emptyList(), policy.orderedMirrors(nowMillis = 0L))
+    }
+
+    @Test
     fun opensCircuitAfterRepeatedFailuresAndRecovers() {
-        val policy = SourceMirrorPolicy(mirrors = listOf("https://ok.example.com/c"))
+        val policy = SourceMirrorPolicy(
+            mirrors = listOf("https://ok.example.com/c"),
+            allowlist = setOf("ok.example.com"),
+        )
         val url = "https://ok.example.com/c"
         policy.recordFailure(url, nowMillis = 1_000L, reason = "timeout")
         assertTrue(policy.isAvailable(url, nowMillis = 2_000L))
@@ -301,7 +312,7 @@ class SourceUpdateCoordinatorTest {
         val transaction = SourceInstallTransaction(store, now = clock, smokeTest = smokeTest)
         val updater = SourceCatalogUpdater(
             fetcher = fetcher,
-            mirrors = SourceMirrorPolicy(mirrors = emptyList()),
+            mirrors = SourceMirrorPolicy(mirrors = emptyList(), allowlist = SourceFixtures.TEST_ALLOWLIST),
             signatureVerifier = verifier,
             clock = clock,
         )

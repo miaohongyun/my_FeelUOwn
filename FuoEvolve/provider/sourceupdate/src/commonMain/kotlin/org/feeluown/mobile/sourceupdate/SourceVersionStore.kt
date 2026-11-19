@@ -64,13 +64,25 @@ data class InstalledSource(
 @Serializable
 data class SourceIndex(
     val schemaVersion: Int = 1,
+    /** 本地已接受的目录版本（单调不减；反重放的核心锚点）。 */
     val catalogVersion: Long = 0,
     val lastCheckMillis: Long = 0,
     val lastSuccessMillis: Long = 0,
     val consecutiveFailures: Int = 0,
     val etag: String? = null,
     val sources: Map<String, InstalledSource> = emptyMap(),
-)
+    /** 已接受目录原始字节的 SHA-256：同版本内容变化必须拒绝（内容变了应提升 catalogVersion）。 */
+    val acceptedCatalogSha256: String? = null,
+) {
+    /**
+     * 是否为"首次安装"：既没有接受过任何目录版本，也没有已装脚本。
+     *
+     * 应用重装 / 数据恢复后索引回到默认值，会被判为首次安装，从而允许接受当前合法目录；
+     * 这是明确的版本恢复规则（无法从丢失的本地状态恢复旧版本号，只能重新锚定）。
+     */
+    val isFirstInstall: Boolean
+        get() = catalogVersion == 0L && acceptedCatalogSha256 == null && sources.isEmpty()
+}
 
 class SourceVersionStore(
     private val files: SourceFileStore,
