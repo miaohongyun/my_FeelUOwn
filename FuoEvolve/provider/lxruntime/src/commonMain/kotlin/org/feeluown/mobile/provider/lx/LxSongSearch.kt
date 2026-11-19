@@ -3,12 +3,14 @@ package org.feeluown.mobile.provider.lx
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -26,6 +28,13 @@ data class LxSongHit(
     val artist: String,
     val album: String,
     val durationSeconds: Int? = null,
+    /**
+     * 平台返回的原始字段（如酷我 `MUSICRID` / `DC_TARGETID`、酷狗 `hash`、腾讯 `strMediaMid`）。
+     *
+     * 各平台脚本读取的 musicInfo 字段并不相同，绝不能把 songId 赋给所有键——那会让"《晴天》
+     * 解析到另一首歌"。这里保留原样，交给脚本按自己的协议取用；[songId] 只作为稳定主 ID。
+     */
+    val rawFields: Map<String, String> = emptyMap(),
 )
 
 interface LxSongSearcher {
@@ -46,11 +55,13 @@ interface LxSongSearcher {
  */
 class KuwoSongSearcher(
     private val client: HttpClient,
-    private val endpoint: String = "http://search.kuwo.cn/r.s",
+    private val endpoint: String = DEFAULT_ENDPOINT,
     private val timeoutMillis: Long = 8_000L,
     private val json: Json = Json { ignoreUnknownKeys = true; isLenient = true },
+    private val maxResponseChars: Int = MAX_RESPONSE_CHARS,
 ) : LxSongSearcher {
 
+    /** 本适配器只负责酷我；其它平台由各自的适配器实现，[LxSongSearcher] 接口本身支持多平台集合。 */
     override val supportedPlatforms: Set<String> = setOf(PLATFORM)
 
     override suspend fun search(keyword: String, platform: String, limit: Int): List<LxSongHit> {
@@ -68,11 +79,19 @@ class KuwoSongSearcher(
         // 放在真实时间里计时：runTest 的虚拟时钟会让 withTimeoutOrNull 立刻到期。
         val body = withContext(Dispatchers.Default) {
             withTimeoutOrNull(timeoutMillis) {
-                runCatching { client.get(url).bodyAsText() }.getOrNull()
+                try {
+                    client.get(url).bodyAsText()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
             }
         } ?: return emptyList()
+        // 响应体积上限：被篡改/劫持的响应不能无界读进内存再解析。
+        val bounded = if (body.length > maxResponseChars) body.substring(0, maxResponseChars) else body
 
-        return parse(body).take(limit)
+        return parse(bounded).take(limit)
     }
 
     fun parse(rawText: String): List<LxSongHit> {
@@ -84,6 +103,9 @@ class KuwoSongSearcher(
                 ?: item.text("DC_TARGETID").takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
             val title = item.text("SONGNAME").ifBlank { item.text("NAME") }.ifBlank { return@mapNotNull null }
+            // 保留平台原始字段：身份核验靠"搜索命中的歌名/歌手 + 原始 ID"，
+            // 解析阶段再把同一份原始字段透传给脚本，避免用 songId 冒充所有字段导致解析错歌。
+            val raw = rawFieldsOf(item)
             LxSongHit(
                 platform = PLATFORM,
                 songId = songId,
@@ -91,7 +113,16 @@ class KuwoSongSearcher(
                 artist = unescape(item.text("ARTIST").ifBlank { item.text("FARTIST") }),
                 album = unescape(item.text("ALBUM")),
                 durationSeconds = item.text("DURATION").toIntOrNull(),
+                rawFields = raw,
             )
+        }
+    }
+
+    /** 抽出响应里的原始字段（已反转义），供脚本按平台协议取用。 */
+    private fun rawFieldsOf(item: JsonObject): Map<String, String> = buildMap {
+        for ((key, value) in item) {
+            val text = runCatching { value.jsonPrimitive.contentOrNull }.getOrNull() ?: continue
+            put(key, unescape(text))
         }
     }
 
@@ -122,5 +153,8 @@ class KuwoSongSearcher(
 
     companion object {
         const val PLATFORM = "kw"
+        const val DEFAULT_ENDPOINT = "http://search.kuwo.cn/r.s"
+        /** 搜索响应体上限：防止被劫持的响应无限占内存。 */
+        const val MAX_RESPONSE_CHARS = 512 * 1024
     }
 }

@@ -242,4 +242,68 @@ class LxScriptProviderTest {
         assertTrue(searcher.search("  ", "kw").isEmpty())
         assertTrue(searcher.parse("not json").isEmpty())
     }
+
+    @Test
+    fun kuwoSearcherKeepsRawFields() = runTest {
+        val body = """
+            {"abslist":[
+              {"MUSICRID":"MUSIC_228908","SONGNAME":"晴天","ARTIST":"周杰伦",
+               "ALBUM":"叶惠美","DURATION":"269","DC_TARGETID":"dc-9988"}
+            ]}
+        """.trimIndent()
+        val hit = KuwoSongSearcher(HttpClient(MockEngine { respond(body, HttpStatusCode.OK) }))
+            .parse(body).single()
+        assertEquals("MUSIC_228908", hit.rawFields["MUSICRID"])
+        assertEquals("dc-9988", hit.rawFields["DC_TARGETID"])
+        assertEquals("晴天", hit.rawFields["SONGNAME"])
+    }
+
+    @Test
+    fun resolvePassesPlatformRawFieldsToScript() = runTest {
+        // 脚本回显 strMediaMid：只有搜索命中的原始字段被透传时才会得到真实值，
+        // 而不是被 songId 冒充（这正是"《晴天》解析到另一首歌"的根因）。
+        val echoScript = """
+            lx.on('request', function (payload) {
+              var mi = payload.info.musicInfo;
+              return Promise.resolve('https://cdn.example.com/' + mi.hash + '/' + mi.strMediaMid);
+            });
+            lx.send('inited', {sources:{kw:{type:'music',actions:['musicUrl'],qualitys:['128k']}}});
+        """.trimIndent()
+        val script = LxInstalledScript(
+            id = "echo", name = "Echo", version = "1.0.0", source = echoScript,
+            allowedHosts = listOf("cdn.example.com"), platforms = listOf("kw"),
+        )
+        val searcher = object : LxSongSearcher {
+            override val supportedPlatforms = setOf("kw")
+            override suspend fun search(keyword: String, platform: String, limit: Int) = listOf(
+                LxSongHit(
+                    platform = "kw", songId = "228908", title = "晴天", artist = "周杰伦", album = "叶惠美",
+                    rawFields = mapOf("hash" to "real-hash-x", "strMediaMid" to "real-media-y", "MUSICRID" to "MUSIC_228908"),
+                ),
+            )
+        }
+        val p = provider(scriptSource(script), searcher)
+        val track = p.search("晴天").tracks.single()
+        val payload = p.resolve(track, "highest")
+        assertNotNull(payload)
+        assertEquals(
+            "https://cdn.example.com/real-hash-x/real-media-y",
+            payload.url,
+            "脚本必须拿到原始字段，而不是被 songId 覆盖",
+        )
+    }
+
+    @Test
+    fun resolveFallsBackToSongIdWhenRawFieldsMissing() = runTest {
+        // 没有原始字段时仍回退到 songId，保持对旧适配器/手工构造 track 的兼容。
+        val p = provider(scriptSource(fixtureScript()), object : LxSongSearcher {
+            override val supportedPlatforms = setOf("kw")
+            override suspend fun search(keyword: String, platform: String, limit: Int) =
+                listOf(LxSongHit("kw", "228908", "晴天", "周杰伦", "叶惠美"))
+        })
+        val track = p.search("晴天").tracks.single()
+        val payload = p.resolve(track, "128k")
+        assertNotNull(payload)
+        assertEquals("https://cdn.example.com/kw/228908.128k.mp3", payload.url)
+    }
 }

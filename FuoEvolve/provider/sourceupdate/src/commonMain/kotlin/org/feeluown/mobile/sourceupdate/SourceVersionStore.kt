@@ -150,24 +150,38 @@ sealed interface InstallOutcome {
 
     data class AlreadyInstalled(val scriptId: String, val version: String) : InstallOutcome
 
-    /** 校验或静态扫描未通过：**没有写入任何文件**，旧版本保持可用。 */
+    /** 校验、审核门槛或静态扫描未通过：**没有写入任何文件**，旧版本保持可用。 */
     data class Rejected(val scriptId: String, val reason: String) : InstallOutcome
+
+    /**
+     * 冒烟测试未通过：staging 已清理，**active 指针与已装版本都未被改动**。
+     * 首次安装时 index 里没有这个 id；更新时旧版本依然是 active 且可直接回退。
+     */
+    data class SmokeTestFailed(val scriptId: String, val version: String, val reason: String) : InstallOutcome
 }
 
 /**
  * 安装事务。
  *
- * 顺序严格按设计文档 4.3：下载 → 校验 → 静态检查 → 落盘到 versions → 切 active 指针 →
- * 失败回滚。任何一步失败都不动 active 指针，因此"更新失败不破坏上一可用版本"是结构性保证，
- * 而不是靠调用方记得处理异常。
+ * 顺序严格按"先验证、后激活"：
+ * ```
+ * 审核门槛 → SHA-256 → 静态扫描(BLOCK+WARN) → 写 staging
+ *   → 独立实例冒烟 → 通过才 writeVersion + 切 active → 清理 staging
+ * ```
  *
- * 刻意不在事务里执行脚本：更新器不执行代码（[smokeTest] 由协调器注入并在单独步骤调用）。
+ * 关键不变量：**切 active 指针发生在冒烟通过之后**。因此"冒烟期间旧版本仍是 active"
+ * 和"更新失败不破坏上一可用版本"都是结构性保证，而不是靠调用方记得回滚。
+ *
+ * 所有安全门槛都放在事务内部，而不是依赖上层调用方记得过滤——[install] 是公共入口，
+ * 任何调用方（协调器、测试、将来的手动安装）都无法绕过。
  */
 class SourceInstallTransaction(
     private val store: SourceVersionStore,
     private val verifier: SourceArtifactVerifier = SourceArtifactVerifier(),
     private val maxScriptBytes: Int = SourceStaticPolicy.DEFAULT_MAX_SCRIPT_BYTES,
     private val now: () -> Long = { 0L },
+    /** 由宿主注入：在独立 QuickJS 实例里加载脚本并跑 initialize。返回 null 表示通过。 */
+    private val smokeTest: suspend (SourceCatalogEntry, String) -> String? = { _, _ -> null },
 ) {
 
     suspend fun install(
@@ -175,18 +189,24 @@ class SourceInstallTransaction(
         content: String,
         enable: Boolean = false,
     ): InstallOutcome {
+        // 门槛 1：审核结论。事务自身强制，调用方传进来一个未批准条目也必须被挡下。
+        val gateReason = reviewGateReason(entry)
+        if (gateReason != null) {
+            return InstallOutcome.Rejected(entry.id, "审核门禁未通过：$gateReason")
+        }
+
+        // 门槛 2：产物摘要。
         val bytes = content.encodeToByteArray()
         when (val verification = verifier.verify(entry, bytes)) {
             is ArtifactVerification.Rejected -> return InstallOutcome.Rejected(entry.id, verification.reason)
             is ArtifactVerification.Accepted -> Unit
         }
 
+        // 门槛 3：静态扫描。BLOCK 与 NEEDS_REVIEW(WARN) 都不允许自动安装。
         val scan = SourceStaticPolicy.scan(content, entry.allowedHosts, maxScriptBytes)
-        if (scan.blocked) {
-            return InstallOutcome.Rejected(
-                entry.id,
-                "静态扫描未通过：${scan.blockReasons().joinToString("; ")}",
-            )
+        if (scan.blocked || scan.verdict == StaticVerdict.NEEDS_REVIEW) {
+            val reasons = scan.findings.map { "${it.severity}/${it.ruleId}: ${it.message}" }
+            return InstallOutcome.Rejected(entry.id, "静态扫描未通过：${reasons.joinToString("; ")}")
         }
 
         val index = store.loadIndex()
@@ -198,7 +218,22 @@ class SourceInstallTransaction(
             return InstallOutcome.AlreadyInstalled(entry.id, entry.version)
         }
 
+        // 先落到 staging：冒烟用的是暂存内容，绝不读一个可能已被别的安装改动过的 active 文件。
         store.writeStaged(entry.id, entry.version, content)
+        val smokeFailure = try {
+            smokeTest(entry, content)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            store.deleteStaged(entry.id, entry.version)
+            throw e
+        } catch (e: Exception) {
+            "冒烟测试抛出异常：${e.message}"
+        }
+        if (smokeFailure != null) {
+            store.deleteStaged(entry.id, entry.version)
+            return InstallOutcome.SmokeTestFailed(entry.id, entry.version, smokeFailure)
+        }
+
+        // 冒烟通过后才落 versions 并切 active。此前 active 指针始终是旧版本（或不存在）。
         store.writeVersion(entry.id, entry.version, content)
         store.deleteStaged(entry.id, entry.version)
 
@@ -219,6 +254,22 @@ class SourceInstallTransaction(
         store.saveIndex(index.copy(sources = index.sources + (entry.id to updated)))
         pruneOldVersions(entry.id, updated)
         return InstallOutcome.Installed(entry.id, entry.version, previousVersion)
+    }
+
+    /**
+     * 事务级的审核门槛，与 [SourceCatalogParser.validate] 保持一致但独立实现：
+     * 目录解析是"入口校验"，这里是"写入前最后一道"，两者任一被绕过都不会导致未审脚本落盘。
+     */
+    private fun reviewGateReason(entry: SourceCatalogEntry): String? = when {
+        entry.review != SourceReviewStatus.APPROVED ->
+            "reviewStatus=${entry.reviewStatus} 不是 APPROVED"
+        entry.license.isBlank() || entry.license.equals("unknown", ignoreCase = true) ->
+            "未声明许可证（license=${entry.license}）"
+        entry.allowedHosts.isEmpty() ->
+            "未声明 allowedHosts，运行时网络会被全部拒绝"
+        !entry.autoInstall ->
+            "autoInstall=false，不允许自动安装"
+        else -> null
     }
 
     /** 新版本首次运行失败时切回上一版本。返回是否真的发生了回滚。 */

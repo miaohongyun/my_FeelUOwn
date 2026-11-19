@@ -1,11 +1,13 @@
 package org.feeluown.mobile.provider.lx
 
 import io.ktor.client.HttpClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import org.feeluown.mobile.sourceupdate.crypto.Sha256
 import org.feeluown.mobile.MusicTrack
 import org.feeluown.mobile.PlaybackPayload
 import org.feeluown.mobile.ProviderCapabilities
@@ -81,6 +83,20 @@ class LxScriptMusicProvider(
     private val mutex = Mutex()
     private val handles = mutableMapOf<String, Handle>()
 
+    /**
+     * 搜索命中 → 平台原始字段。identifier（`platform:songId`）本身只携带稳定主 ID，
+     * 各平台脚本读取的字段（酷我 MUSICRID、酷狗 hash、腾讯 strMediaMid）各不相同，
+     * 这里按 identifier 缓存原始字段，供 [musicInfoFor] 原样透传给脚本。
+     * 上限防止长期运行无限增长。
+     */
+    private val rawFields = mutableMapOf<String, Map<String, String>>()
+
+    private fun rememberRawFields(identifier: String, fields: Map<String, String>) {
+        if (fields.isEmpty()) return
+        if (rawFields.size >= MAX_RAW_FIELD_ENTRIES) rawFields.clear()
+        rawFields[identifier] = fields
+    }
+
     override suspend fun search(keyword: String): ProviderSearchResults {
         val query = keyword.trim()
         if (query.isEmpty()) return ProviderSearchResults()
@@ -93,9 +109,16 @@ class LxScriptMusicProvider(
             val handle = handleFor(script) ?: continue
             for (platform in script.grantedPlatforms(handle.meta)) {
                 if (platform !in searcher.supportedPlatforms) continue
-                val hits = runCatching { searcher.search(query, platform) }.getOrDefault(emptyList())
+                val hits = try {
+                    searcher.search(query, platform)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    emptyList()
+                }
                 for (hit in hits) {
                     val identifier = "$platform:${hit.songId}"
+                    rememberRawFields(identifier, hit.rawFields)
                     if (results.containsKey(identifier)) continue
                     results[identifier] = track(
                         identifier = identifier,
@@ -116,7 +139,7 @@ class LxScriptMusicProvider(
         val songId = identifier.substringAfter(':', "")
         if (platform.isEmpty() || songId.isEmpty()) return null
 
-        val musicInfo = musicInfoFor(platform, songId, track)
+        val musicInfo = musicInfoFor(platform, songId, track, rawFields[identifier].orEmpty())
         val scripts = enabledScripts()
         pruneHandles(scripts)
         for (script in scripts) {
@@ -125,9 +148,13 @@ class LxScriptMusicProvider(
             val declared = handle.meta.qualitiesOf(platform)
             if (declared.isEmpty()) continue
             for (quality in LxQuality.candidates(qualityPolicy, declared)) {
-                val url = runCatching {
+                val url = try {
                     handle.runtime.requestMusicUrl(platform, musicInfo, quality)
-                }.getOrNull() ?: continue
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                } ?: continue
                 markHealthy(script.id)
                 return PlaybackPayload(
                     url = url,
@@ -156,7 +183,13 @@ class LxScriptMusicProvider(
     }
 
     private suspend fun enabledScripts(): List<LxInstalledScript> =
-        runCatching { scriptSource.scripts() }.getOrDefault(emptyList())
+        try {
+            scriptSource.scripts()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emptyList()
+        }
 
     /**
      * 回收已经不该存在的脚本实例。
@@ -176,7 +209,14 @@ class LxScriptMusicProvider(
         }
     }
 
-    private fun cacheKeyOf(script: LxInstalledScript): String = "${script.version}:${script.source.length}"
+    /**
+     * 缓存身份 = id + version + 源码 SHA-256。
+     *
+     * 只用 `version:source.length` 会在"版本号没升、源码改了但长度相同"时命中旧 context，
+     * 用户看到的版本和实际执行的代码不一致。内容摘要必须参与身份判断。
+     */
+    private fun cacheKeyOf(script: LxInstalledScript): String =
+        "${script.id}:${script.version}:${Sha256.hex(script.source.encodeToByteArray())}"
 
     private suspend fun handleFor(script: LxInstalledScript): Handle? = mutex.withLock {
         val cacheKey = cacheKeyOf(script)
@@ -190,6 +230,9 @@ class LxScriptMusicProvider(
                 allowedHosts = script.allowedHosts.toSet(),
             )
             runtime.initialize()
+        } catch (e: CancellationException) {
+            runCatching { runtime.close() }
+            throw e
         } catch (e: Exception) {
             runCatching { runtime.close() }
             handles.remove(script.id)
@@ -225,15 +268,26 @@ class LxScriptMusicProvider(
      * 而协议只给了 `musicInfo` 一个笼统的约定。这里传入一个**超集**，脚本取自己需要的字段；
      * 这也是 LX 桌面端把平台搜索结果整包透传给脚本的做法。
      */
-    private fun musicInfoFor(platform: String, songId: String, track: MusicTrack): JsonObject = buildJsonObject {
-        put("songmid", songId)
-        put("songId", songId)
-        put("musicId", songId)
-        put("hash", songId)
-        put("strMediaMid", songId)
-        put("name", track.title)
-        put("singer", track.artists)
-        put("albumName", track.album)
+    private fun musicInfoFor(
+        platform: String,
+        songId: String,
+        track: MusicTrack,
+        raw: Map<String, String>,
+    ): JsonObject = buildJsonObject {
+        // 优先用搜索响应里的原始字段；没有时才回退到 songId。
+        // 过去把所有键都赋成 songId，会导致酷狗/腾讯脚本按 hash/strMediaMid 取到错误的值，
+        // 进而把《晴天》解析成另一首歌。raw 是搜索命中时记录的同一条记录，身份一致。
+        fun field(key: String): String = raw[key]?.takeIf { it.isNotBlank() } ?: songId
+        put("songmid", field("songmid").ifBlank { songId })
+        put("songId", field("songId"))
+        put("musicId", field("musicId"))
+        put("hash", field("hash"))
+        put("strMediaMid", field("strMediaMid"))
+        // 搜索返回的原始 ID 字段（酷我 MUSICRID、DC_TARGETID 等）原样透传。
+        raw.forEach { (key, value) -> if (key !in CORE_INFO_KEYS) put(key, value) }
+        put("name", raw["SONGNAME"]?.takeIf { it.isNotBlank() } ?: track.title)
+        put("singer", raw["ARTIST"]?.takeIf { it.isNotBlank() } ?: track.artists)
+        put("albumName", raw["ALBUM"]?.takeIf { it.isNotBlank() } ?: track.album)
         put("source", platform)
         track.durationMs?.let { put("interval", (it / 1000).toString()) }
     }
@@ -243,6 +297,13 @@ class LxScriptMusicProvider(
         const val NAME = "LX 脚本音源"
         const val TAG = "lxscript"
         private const val MAX_CONSECUTIVE_FAILURES = 3
+        private const val MAX_RAW_FIELD_ENTRIES = 500
+
+        /** 已经由显式字段承载的键，透传原始字段时跳过，避免重复 put。 */
+        private val CORE_INFO_KEYS = setOf(
+            "songmid", "songId", "musicId", "hash", "strMediaMid",
+            "name", "SONGNAME", "singer", "ARTIST", "albumName", "ALBUM", "source", "interval",
+        )
 
         val INFO = ProviderInfo(providerId = ID, providerName = NAME)
         val CAPABILITIES = ProviderCapabilities(providerId = ID, providerName = NAME)

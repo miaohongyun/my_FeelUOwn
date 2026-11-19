@@ -119,6 +119,48 @@ class SourceInstallTransactionTest {
         assertTrue(store.listVersions("fixture-source").isEmpty())
         assertFalse(store.loadIndex().sources.containsKey("fixture-source"))
     }
+
+    @Test
+    fun transactionRejectsUnapprovedOrHostlessEntries() = runTest {
+        val (store, _) = newStore()
+        val transaction = SourceInstallTransaction(store)
+        val content = SourceFixtures.SCRIPT
+
+        val unapproved = transaction.install(
+            entryFor(content, "1.0.0").copy(reviewStatus = "REVIEW_CANDIDATE"), content,
+        )
+        assertTrue(assertIs<InstallOutcome.Rejected>(unapproved).reason.contains("审核门禁"))
+
+        val noLicense = transaction.install(
+            entryFor(content, "1.0.0").copy(license = "unknown"), content,
+        )
+        assertTrue(assertIs<InstallOutcome.Rejected>(noLicense).reason.contains("审核门禁"))
+
+        val noHosts = transaction.install(
+            entryFor(content, "1.0.0").copy(allowedHosts = emptyList()), content,
+        )
+        assertTrue(assertIs<InstallOutcome.Rejected>(noHosts).reason.contains("审核门禁"))
+
+        val manual = transaction.install(
+            entryFor(content, "1.0.0").copy(autoInstall = false), content,
+        )
+        assertTrue(assertIs<InstallOutcome.Rejected>(manual).reason.contains("审核门禁"))
+
+        assertTrue(store.loadIndex().sources.isEmpty())
+        assertTrue(store.listVersions("fixture-source").isEmpty())
+    }
+
+    @Test
+    fun transactionRejectsWarnLevelStaticFindings() = runTest {
+        val (store, _) = newStore()
+        val transaction = SourceInstallTransaction(store)
+        // document.cookie 是 WARN 级；即便没有 BLOCK，也不允许自动安装
+        val content = "${SourceFixtures.SCRIPT}\nvar x = document.cookie;"
+        val outcome = transaction.install(entryFor(content, "1.0.0"), content)
+        val rejected = assertIs<InstallOutcome.Rejected>(outcome)
+        assertTrue(rejected.reason.contains("WARN"), rejected.reason)
+        assertTrue(store.loadIndex().sources.isEmpty())
+    }
 }
 
 class SourceUpdatePolicyTest {
@@ -209,7 +251,8 @@ class SourceUpdateCoordinatorTest {
     ): Triple<SourceUpdateCoordinator, SourceVersionStore, MapCatalogFetcher> {
         val fetcher = MapCatalogFetcher(bodies)
         val store = SourceVersionStore(files)
-        val transaction = SourceInstallTransaction(store, now = clock)
+        // 冒烟测试注入到事务内部：只有初始化通过才会切 active。
+        val transaction = SourceInstallTransaction(store, now = clock, smokeTest = smokeTest)
         val updater = SourceCatalogUpdater(
             fetcher = fetcher,
             mirrors = SourceMirrorPolicy(mirrors = emptyList()),
@@ -225,7 +268,6 @@ class SourceUpdateCoordinatorTest {
             policy = SourceUpdatePolicy(intervalHours = 24),
             clock = clock,
             appVersion = appVersion,
-            smokeTest = smokeTest,
         )
         return Triple(coordinator, store, fetcher)
     }
@@ -289,8 +331,37 @@ class SourceUpdateCoordinatorTest {
         val result = assertIs<UpdateReport.Installed>(report)
         assertTrue(result.scriptIds.isEmpty())
         assertTrue(result.errors.any { it.contains("冒烟测试") })
-        // 首次安装失败且无可回滚版本 → 不应留下 active 记录
+        // 冒烟失败 → 从未激活：首次安装不应留下 active 记录，也不应留下任何版本文件
         assertFalse(store.loadIndex().sources.containsKey("fixture-source"))
+        assertTrue(store.listVersions("fixture-source").isEmpty())
+    }
+
+    @Test
+    fun smokeTestFailureDuringUpgradeKeepsOldVersionActive() = runTest {
+        // 关键点：先在 v1 上正常安装，再让 v2 的冒烟失败。
+        // 断言整个失败过程中 active 始终是 v1，彻底堵住"先切 active 再冒烟"的窗口。
+        val files = InMemorySourceFileStore()
+        val store = SourceVersionStore(files)
+        var failSmoke = false
+        val transaction = SourceInstallTransaction(
+            store, now = { 1L },
+            smokeTest = { _, _ -> if (failSmoke) "v2 初始化失败" else null },
+        )
+        val v1 = SourceFixtures.SCRIPT
+        val v2 = "$v1\n// v2"
+        assertIs<InstallOutcome.Installed>(
+            transaction.install(entryFor(v1, "1.0.0"), v1, enable = true),
+        )
+        assertEquals("1.0.0", store.loadIndex().sources.getValue("fixture-source").activeVersion)
+
+        failSmoke = true
+        val outcome = transaction.install(entryFor(v2, "2.0.0"), v2)
+        assertIs<InstallOutcome.SmokeTestFailed>(outcome)
+        val after = store.loadIndex().sources.getValue("fixture-source")
+        assertEquals("1.0.0", after.activeVersion, "冒烟失败时 active 必须仍是旧版本")
+        assertEquals(v1, store.readActiveScript("fixture-source"))
+        assertEquals("1.0.0", after.previousVersion?.let { "1.0.0" } ?: after.activeVersion)
+        assertTrue(store.listVersions("fixture-source").none { it == "2.0.0" }, "失败版本不得落盘")
     }
 
     @Test

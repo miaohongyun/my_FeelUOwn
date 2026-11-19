@@ -184,6 +184,7 @@ class LxScriptRuntimeTest {
                   sources: { kw: { name: 'kw', type: 'music', actions: ['musicUrl'], qualitys: ['flac'] } }
                 })
                 """.trimIndent(),
+                allowedHosts = setOf("api.example.com"),
             )
             runtime.initialize()
 
@@ -334,6 +335,81 @@ class LxScriptRuntimeTest {
             runtime.initialize()
             val url = runtime.requestMusicUrl("kw", buildJsonObject { put("songmid", "1") }, "flac")
             assertEquals("https://cdn.example.com/5a6b/aGk=/hi", url)
+        } finally {
+            runtime.close()
+        }
+    }
+
+    @Test
+    fun `end to end search then lx request resolves matching song identity`() = runTest {
+        // 这个测试不再让脚本直接拼 URL：脚本真的调用 lx.request 打到"解析 API"，
+        // 从 JSON 响应里取播放地址；并用 MockEngine 记录请求里携带的 songmid。
+        // 目标：证明"搜索命中 → songmid → 解析请求 → 播放 URL"整条桥接链路身份一致。
+        val songmid = "228908"
+        val title = "晴天"
+        val artist = "周杰伦"
+
+        // 搜索端返回酷我真实结构的 JSON。
+        val searchBody = """
+            {"abslist":[
+              {"MUSICRID":"MUSIC_$songmid","SONGNAME":"$title","ARTIST":"$artist","ALBUM":"叶惠美","DURATION":"269"}
+            ]}
+        """.trimIndent()
+        val searcher = KuwoSongSearcher(
+            HttpClient(MockEngine { respond(searchBody, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }),
+        )
+        val hits = searcher.search(title, "kw")
+        assertEquals(1, hits.size)
+        assertEquals(songmid, hits[0].songId)
+        assertEquals(title, hits[0].rawFields["SONGNAME"])
+        assertEquals(artist, hits[0].rawFields["ARTIST"])
+
+        var resolvedSongId: String? = null
+        val apiClient = HttpClient(MockEngine { request ->
+            // 解析 API：读取脚本通过 lx.request 传来的 songmid，返回带播放地址与身份的 JSON。
+            resolvedSongId = request.url.parameters["songmid"]
+            assertEquals("api.example.com", request.url.host)
+            respond(
+                content = """{"code":200,"data":{"mid":"$resolvedSongId","url":"https://cdn.example.com/$resolvedSongId/flac.flac","name":"$title","singer":"$artist"}}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        })
+
+        val script = """
+            const { EVENT_NAMES, on, send } = globalThis.lx
+            on(EVENT_NAMES.request, function (payload) {
+              var songmid = payload.info.musicInfo.songmid
+              return new Promise(function (resolve, reject) {
+                lx.request('https://api.example.com/v1/url?songmid=' + songmid, { method: 'GET' }, function (err, resp) {
+                  if (err) return reject(new Error(err))
+                  var data = resp.body.data
+                  // 身份核验：解析响应里的 mid 必须和请求的一致，否则拒绝返回（防止错歌）
+                  if (data.mid !== songmid) return reject(new Error('identity mismatch'))
+                  resolve(data.url)
+                })
+              })
+            })
+            send(EVENT_NAMES.inited, {
+              sources: { kw: { name: 'kw', type: 'music', actions: ['musicUrl'], qualitys: ['flac'] } }
+            })
+        """.trimIndent()
+
+        val runtime = LxScriptRuntime(apiClient)
+        try {
+            runtime.load("realish.js", script, allowedHosts = setOf("api.example.com"))
+            runtime.initialize()
+            val musicInfo = buildJsonObject {
+                put("songmid", songmid)
+                put("name", title)
+                put("singer", artist)
+            }
+            val url = runtime.requestMusicUrl("kw", musicInfo, "flac")
+
+            // 全链路身份一致：搜索 ID == 解析请求 ID == URL 里的 ID == 脚本核验的 mid
+            assertEquals(songmid, resolvedSongId)
+            assertEquals("https://cdn.example.com/$songmid/flac.flac", url)
+            assertTrue(url.contains(songmid), "播放 URL 必须来自被点选的那首歌")
         } finally {
             runtime.close()
         }

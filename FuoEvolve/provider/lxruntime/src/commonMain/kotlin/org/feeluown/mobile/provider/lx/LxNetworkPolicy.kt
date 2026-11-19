@@ -9,14 +9,22 @@ package org.feeluown.mobile.provider.lx
  *
  * 允许明文 http：国内音乐接口大量仍是 http，且本 App 的 network_security_config 已允许
  * cleartext。真正的边界是"不能打内网"，而不是"必须 https"。
+ *
+ * 空白名单语义（安全边界，不可放宽）：**allowedHosts 为空 = 拒绝一切网络请求**。
+ * 原因：静态扫描只能发现源码里写死的字符串，脚本用字符串拼接/远端响应动态生成 URL 时，
+ * 静态提取不完整。若空名单放行，等于把 SSRF 防护退化成"挡住写死的内网 IP"。
+ * 目录解析器同时保证"可自动安装的脚本必须声明非空 allowedHosts"（两道防线）。
  */
 internal object LxNetworkPolicy {
 
     /**
-     * @param allowedHosts 目录为这个脚本声明的域名白名单。**非空时**只允许白名单内的主机；
-     *   为空表示"目录没声明"，此时只做 SSRF 与协议校验（宽松模式，仅用于本地调试脚本）。
+     * @param allowedHosts 目录为这个脚本声明的域名白名单。**必须非空**，且 host 必须命中其一。
+    *   空集合在正式运行时一律拒绝；仅返回错误文案，由调用方决定如何展示。
      */
     fun rejectionReason(rawUrl: String, allowedHosts: Set<String> = emptySet()): String? {
+        if (allowedHosts.isEmpty()) {
+            return "脚本未声明 allowedHosts，拒绝全部网络请求"
+        }
         val url = rawUrl.trim()
         val lower = url.lowercase()
         if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
@@ -27,22 +35,30 @@ internal object LxNetworkPolicy {
 
         if (host == "localhost" || host.endsWith(".localhost")) return "禁止访问 localhost"
         if (host.startsWith("[")) return "禁止访问 IPv6 字面量地址"
-        if (isPrivateIpv4(host)) return "禁止访问私网/回环地址"
-        if (allowedHosts.isNotEmpty() && !hostAllowed(host, allowedHosts)) {
+        // 非标准 IPv4 表示（0x7f000001 / 2130706433 / 127.1 / 0177.0.0.1 等）
+        // 必须先归一化再判私网，否则浏览器/内核会解析成回环地址而绕过这里的字符串比较。
+        val normalized = normalizeIpv4(host)
+        if (normalized != null && isUnsafeIpv4(normalized)) return "禁止访问私网/回环/保留地址"
+        if (!hostAllowed(host, normalized, allowedHosts)) {
             return "域名未在目录声明：$host"
         }
-
         return null
     }
 
-    private fun hostAllowed(host: String, allowedHosts: Set<String>): Boolean = allowedHosts.any { raw ->
-        val pattern = raw.trim().lowercase()
-        when {
-            pattern.isEmpty() -> false
-            pattern.startsWith("*.") -> host == pattern.removePrefix("*.") || host.endsWith(pattern.removePrefix("*"))
-            else -> host == pattern
+    private fun hostAllowed(host: String, normalizedIpv4: String?, allowedHosts: Set<String>): Boolean =
+        allowedHosts.any { raw ->
+            val pattern = raw.trim().lowercase()
+            when {
+                pattern.isEmpty() -> false
+                // 白名单里声明的是 IP 时，用归一化后的地址比较，避免 127.1 之类的变体绕过。
+                normalizedIpv4 != null && isIpLiteral(pattern) -> normalizeIpv4(pattern) == normalizedIpv4
+                pattern.startsWith("*.") -> {
+                    val suffix = pattern.removePrefix("*.")
+                    host == suffix || host.endsWith(".$suffix")
+                }
+                else -> host == pattern
+            }
         }
-    }
 
     private fun extractHost(url: String): String? {
         val afterScheme = url.substringAfter("://", "")
@@ -56,21 +72,91 @@ internal object LxNetworkPolicy {
         return hostPort.substringBefore(':')
     }
 
-    private fun isPrivateIpv4(host: String): Boolean {
+    /** 只有全部由数字、点、0x 组成的 host 才可能是 IP 字面量；域名一律返回 null。 */
+    private fun isIpLiteral(host: String): Boolean =
+        host.isNotBlank() && host.all { it.isDigit() || it == '.' || it == 'x' || it in 'a'..'f' }
+
+    /**
+     * 把常见 IPv4 写法归一成 `a.b.c.d`：
+     * - 点分十进制 `192.168.1.1`
+     * - 短形式 `127.1`（补 0 段）
+     * - 八进制 `0177.0.0.1`（0 前缀）
+     * - 十六进制 `0x7f000001` / `0x7f.0x0.0x0.0x1`
+     * - 纯整数 `2130706433`
+     * 无法解析（域名、非法值）返回 null。
+     */
+    private fun normalizeIpv4(host: String): String? {
+        val value = host.trim().lowercase()
+        if (!isIpLiteral(value)) return null
+
+        return try {
+            if (!value.contains('.')) {
+                val number = parseRadix(value) ?: return null
+                if (number < 0 || number > 0xffff_ffffL) return null
+                return longToIpv4(number)
+            }
+            val parts = value.split('.')
+            if (parts.size > 4 || parts.isEmpty()) return null
+            val numbers = parts.map { parseRadix(it) ?: return null }
+            if (numbers.any { it < 0 || it > 255 }) return null
+            // 短形式：最后一段承载剩余字节（127.1 -> 127.0.0.1）
+            val filled = when (numbers.size) {
+                4 -> numbers
+                3 -> listOf(numbers[0], numbers[1], numbers[2] shr 8, numbers[2] and 0xff)
+                2 -> listOf(numbers[0], numbers[1] shr 16, (numbers[1] shr 8) and 0xff, numbers[1] and 0xff)
+                1 -> longToIpv4(numbers[0]).split('.').map { it.toLong() }
+                else -> return null
+            }
+            if (filled.any { it < 0 || it > 255 }) return null
+            filled.joinToString(".") { it.toString() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseRadix(part: String): Long? = when {
+        part.isEmpty() -> null
+        part.startsWith("0x") -> part.removePrefix("0x").toLongOrNull(16)
+        part.length > 1 && part.startsWith('0') && part.all { it in '0'..'7' } ->
+            part.removePrefix("0").ifEmpty { "0" }.toLongOrNull(8)
+        part.all { it.isDigit() } -> part.toLongOrNull()
+        else -> null
+    }
+
+    private fun longToIpv4(value: Long): String = listOf(
+        (value shr 24) and 0xff,
+        (value shr 16) and 0xff,
+        (value shr 8) and 0xff,
+        value and 0xff,
+    ).joinToString(".")
+
+    /**
+     * 归一化后的 IPv4 是否属于不可访问地址段。
+     * 覆盖 RFC1918、回环、链路本地、CGNAT、运营商保留、组播、广播与元数据服务。
+     */
+    private fun isUnsafeIpv4(host: String): Boolean {
         val segments = host.split('.')
-        if (segments.size != 4) return false
-        val octets = IntArray(4)
+        if (segments.size != 4) return true
+        val o = IntArray(4)
         for (index in 0..3) {
-            octets[index] = segments[index].toIntOrNull() ?: return false
-            if (octets[index] !in 0..255) return false
+            o[index] = segments[index].toIntOrNull() ?: return true
+            if (o[index] !in 0..255) return true
         }
         return when {
-            octets[0] == 0 -> true
-            octets[0] == 10 -> true
-            octets[0] == 127 -> true
-            octets[0] == 169 && octets[1] == 254 -> true
-            octets[0] == 172 && octets[1] in 16..31 -> true
-            octets[0] == 192 && octets[1] == 168 -> true
+            o[0] == 0 -> true                                       // 0.0.0.0/8 "this network"
+            o[0] == 10 -> true                                      // RFC1918
+            o[0] == 127 -> true                                     // loopback
+            o[0] == 169 && o[1] == 254 -> true                      // link-local + 169.254.169.254 metadata
+            o[0] == 172 && o[1] in 16..31 -> true                   // RFC1918
+            o[0] == 192 && o[1] == 168 -> true                      // RFC1918
+            o[0] == 100 && o[1] in 64..127 -> true                  // CGNAT (RFC6598)
+            o[0] == 192 && o[1] == 0 && o[2] == 0 -> true          // IETF protocol assignments
+            o[0] == 192 && o[1] == 0 && o[2] == 2 -> true          // TEST-NET-1
+            o[0] == 198 && (o[1] == 18 || o[1] == 19) -> true      // benchmarking
+            o[0] == 198 && o[1] == 51 && o[2] == 100 -> true       // TEST-NET-2
+            o[0] == 203 && o[1] == 0 && o[2] == 113 -> true        // TEST-NET-3
+            o[0] in 224..239 -> true                               // multicast
+            o[0] in 240..255 -> true                               // reserved + broadcast
             else -> false
         }
     }

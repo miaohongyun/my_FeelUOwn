@@ -147,6 +147,14 @@ object SourceCatalogParser {
                     "条目 ${entry.id} 标记 autoInstall=true，但 reviewStatus=${entry.reviewStatus} 未通过审核",
                 )
             }
+            if (entry.autoInstall && entry.allowedHosts.isEmpty()) {
+                // 与运行时 LxNetworkPolicy 的"空名单拒绝一切网络"对齐：
+                // 允许一个没有网络权限的自动安装脚本，等于装上一个必然跑不起来的空壳。
+                return CatalogParseResult.Invalid(
+                    "条目 ${entry.id} 标记 autoInstall=true，但未声明 allowedHosts；" +
+                        "运行时会拒绝其全部网络请求，不允许进入目录",
+                )
+            }
             if (entry.autoEnable && !entry.autoInstall) {
                 return CatalogParseResult.Invalid("条目 ${entry.id} 标记 autoEnable=true 但没有 autoInstall")
             }
@@ -156,8 +164,8 @@ object SourceCatalogParser {
             if (entry.license.isBlank() || entry.license.equals("unknown", ignoreCase = true)) {
                 warnings += "条目 ${entry.id} 未声明许可证，只能进入隔离区"
             }
-            if (entry.allowedHosts.isEmpty()) {
-                warnings += "条目 ${entry.id} 未声明 allowedHosts，运行时所有网络请求都会被拒绝"
+            if (entry.allowedHosts.isEmpty() && !entry.autoInstall) {
+                warnings += "条目 ${entry.id} 未声明 allowedHosts，若将来自动安装，运行时所有网络请求都会被拒绝"
             }
         }
         return CatalogParseResult.Valid(catalog, warnings)

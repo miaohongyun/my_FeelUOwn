@@ -3,6 +3,7 @@ package org.feeluown.mobile.provider.jamendo
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -96,7 +97,13 @@ class JamendoApiClient(
      */
     private suspend fun fetch(url: String): String? = withContext(Dispatchers.Default) {
         withTimeoutOrNull(timeoutMillis) {
-            runCatching { client.get(url).bodyAsText() }.getOrNull()
+            try {
+                client.get(url).bodyAsText()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
         }
     }
 

@@ -13,6 +13,8 @@ package org.feeluown.mobile.provider.lx
  * - `__lxBufferFrom(text, format)` → ByteArray（QuickJS 侧即 Uint8Array）
  * - `__lxBufToString(bytes, format)` → String
  * - `__lxCryptoUnsupported(name)` → 明确告知该 crypto 原语尚未实现，而不是静默返回错值
+ * - `__lxDelay(ms)` → suspend，宿主侧可取消的计时器；JS 的 setTimeout 基于它实现，
+ *   runtime 关闭时所有 pending delay 一起取消，回调不会在 context 销毁后触发
  *
  * 兼容性说明：官方文档写 `lx.request(url, options, callback)` 的回调是 `(err, resp, body)`，
  * 而社区脚本绝大多数写成 `(err, resp) => resp.body`。这里同时满足：第三个参数传 body，
@@ -43,6 +45,34 @@ internal object LxBridge {
   var handlers = Object.create(null);
   var initedPayload = null;
   var updateAlert = null;
+
+  // 受控计时器：回调留在 JS 侧执行（仍在 QuickJS context 内），宿主只负责"延时到了"这一信号。
+  // clearTimeout 通过递增的 token 失效化，即便 delay 已到也不会再触发；
+  // runtime 关闭时宿主取消所有 delay 协程，回调同样不会执行。
+  var timers = Object.create(null);
+  var timerSeq = 0;
+  var MAX_TIMERS = 64;
+
+  globalThis.setTimeout = function (fn, delay) {
+    if (typeof fn !== 'function') return 0;
+    var ids = Object.keys(timers);
+    if (ids.length >= MAX_TIMERS) return 0;
+    var id = ++timerSeq;
+    var ms = Number(delay);
+    if (!isFinite(ms) || ms < 0) ms = 0;
+    if (ms > 2147483647) ms = 2147483647;
+    timers[id] = true;
+    __lxDelay(ms).then(function () {
+      if (!timers[id]) return;
+      delete timers[id];
+      try { fn(); } catch (e) { /* 脚本回调异常不影响宿主 */ }
+    }).catch(function () { /* runtime 关闭导致取消，忽略 */ });
+    return id;
+  };
+
+  globalThis.clearTimeout = function (id) {
+    if (id && timers[id]) delete timers[id];
+  };
 
   var EVENT_NAMES = {
     inited: 'inited',

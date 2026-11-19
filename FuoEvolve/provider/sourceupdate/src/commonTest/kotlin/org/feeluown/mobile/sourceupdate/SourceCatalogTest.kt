@@ -78,6 +78,21 @@ class SourceCatalogParserTest {
     }
 
     @Test
+    fun rejectsAutoInstallWithoutAllowedHosts() {
+        // 运行时 LxNetworkPolicy 对空白名单拒绝一切网络，因此这类脚本无法工作，
+        // 不允许它进入目录（两道防线必须同向）。
+        val raw = """
+            {"schemaVersion":1,"catalogVersion":1,"sources":[
+              {"id":"a","name":"A","version":"1","scriptUrl":"https://x.example.com/a.js",
+               "sha256":"${SourceFixtures.SCRIPT_SHA256}","reviewStatus":"APPROVED",
+               "license":"MIT","autoInstall":true,"allowedHosts":[]}
+            ]}
+        """.trimIndent()
+        val invalid = assertIs<CatalogParseResult.Invalid>(SourceCatalogParser.parse(raw))
+        assertTrue(invalid.reason.contains("allowedHosts"))
+    }
+
+    @Test
     fun rejectsUnknownReviewStatusByTreatingItAsCandidate() {
         val raw = """
             {"schemaVersion":1,"catalogVersion":1,"sources":[

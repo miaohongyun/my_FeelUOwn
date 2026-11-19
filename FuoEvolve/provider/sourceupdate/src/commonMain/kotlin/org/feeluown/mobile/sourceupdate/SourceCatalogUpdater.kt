@@ -9,6 +9,7 @@ import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** 网络失败分类：只用于诊断，不参与信任判断。 */
@@ -57,6 +58,8 @@ class KtorCatalogFetcher(
             return CatalogFetchResult(url, error = CatalogFetchError.TIMEOUT, detail = "连接超时: ${e.message}")
         } catch (e: SocketTimeoutException) {
             return CatalogFetchResult(url, error = CatalogFetchError.TIMEOUT, detail = "读取超时: ${e.message}")
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             return CatalogFetchResult(url, error = classify(e), detail = "网络失败: ${e.message}")
         }
@@ -81,8 +84,12 @@ class KtorCatalogFetcher(
             )
         }
 
-        val text = runCatching { response.bodyAsText() }.getOrElse {
-            return CatalogFetchResult(url, error = CatalogFetchError.OTHER, detail = "读取响应失败: ${it.message}")
+        val text = try {
+            response.bodyAsText()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return CatalogFetchResult(url, error = CatalogFetchError.OTHER, detail = "读取响应失败: ${e.message}")
         }
         if (text.encodeToByteArray().size > maxBytes) {
             return CatalogFetchResult(url, error = CatalogFetchError.TOO_LARGE, detail = "响应超过上限 $maxBytes")

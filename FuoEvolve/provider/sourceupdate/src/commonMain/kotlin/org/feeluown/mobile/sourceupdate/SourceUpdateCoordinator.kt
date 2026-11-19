@@ -21,8 +21,8 @@ sealed interface UpdateReport {
  * 自动更新编排。
  *
  * 职责边界：
- * - 只安装 [SourceCatalogEntry.autoInstall] 且 reviewStatus 已批准的条目；
- * - 每个脚本装完立刻跑冒烟测试，失败就回滚到上一版本；
+ * - 只下载目录里标记为自动安装的条目，交给 [SourceInstallTransaction] 做全部审核；
+ * - 冒烟测试与"先验证后激活"由事务内部完成，协调器不再碰 active 指针；
  * - 任何网络/校验失败都只影响"这一次更新"，不清空已安装脚本，不改动 active 指针。
  */
 class SourceUpdateCoordinator(
@@ -34,7 +34,6 @@ class SourceUpdateCoordinator(
     private val policy: SourceUpdatePolicy,
     private val clock: () -> Long,
     private val appVersion: String = "0.0.0",
-    private val smokeTest: suspend (SourceCatalogEntry, String) -> String? = { _, _ -> null },
 ) {
 
     suspend fun checkForUpdates(force: Boolean = false): UpdateReport {
@@ -97,18 +96,9 @@ class SourceUpdateCoordinator(
                     when (val outcome = transaction.install(entry, body, enable = entry.autoEnable)) {
                         is InstallOutcome.Rejected -> errors += "${entry.id}: ${outcome.reason}"
                         is InstallOutcome.AlreadyInstalled -> Unit
-                        is InstallOutcome.Installed -> {
-                            val failure = smokeTest(entry, body)
-                            if (failure != null) {
-                                // 首次安装就冒烟失败时没有上一版本可回滚，直接移除，
-                                // 避免把一个跑不起来的脚本留在 active 指针上。
-                                val rolledBack = transaction.rollback(entry.id, "冒烟测试失败：$failure")
-                                if (!rolledBack) transaction.remove(entry.id)
-                                errors += "${entry.id}: 冒烟测试失败，已回滚（$failure）"
-                            } else {
-                                installed += entry.id
-                            }
-                        }
+                        is InstallOutcome.SmokeTestFailed ->
+                            errors += "${entry.id}: 冒烟测试失败，未激活（${outcome.reason}）"
+                        is InstallOutcome.Installed -> installed += entry.id
                     }
                 }
 

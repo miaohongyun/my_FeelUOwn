@@ -59,7 +59,15 @@ class SourceCatalogRuntime(
         signatureVerifier = SourceUpdateDefaults.signatureVerifier(),
         clock = clock,
     )
-    private val transaction = SourceInstallTransaction(store, now = clock)
+    /**
+     * 冒烟测试下沉到事务内部：只有初始化通过，新版本才会被写成 active。
+     * [smokeTest] 在独立 QuickJS 实例里加载脚本，不触碰正在被 Provider 使用的实例。
+     */
+    private val transaction = SourceInstallTransaction(
+        store,
+        now = clock,
+        smokeTest = { entry, content -> smokeTest(entry, content) },
+    )
 
     /** 供 [org.feeluown.mobile.provider.lx.LxScriptMusicProvider] 读取的脚本集合。 */
     val scripts: LxInstalledScriptSource = StoreLxInstalledScriptSource(store, quarantine)
@@ -85,7 +93,6 @@ class SourceCatalogRuntime(
             policy = SourceUpdatePolicy(config.intervalHours),
             clock = clock,
             appVersion = catalogAppVersion,
-            smokeTest = { entry, content -> smokeTest(entry, content) },
         )
         return runCatching { coordinator.checkForUpdates(force) }
             .getOrElse { error -> UpdateReport.Failed(error.message ?: "更新失败") }

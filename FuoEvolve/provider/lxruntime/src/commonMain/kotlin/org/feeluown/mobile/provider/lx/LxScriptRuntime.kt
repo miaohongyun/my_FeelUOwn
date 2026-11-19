@@ -12,7 +12,12 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
@@ -54,7 +59,18 @@ class LxScriptRuntime(
     private var scriptName: String = ""
     private var loaded = false
 
-    /** 目录为该脚本声明的域名白名单；为空表示未声明（只做 SSRF 校验）。 */
+    /**
+     * 计时器专用 scope：脚本 setTimeout 产生的所有 delay 协程都挂在它上面。
+     * close() 时整体取消，保证"脚本关闭后回调不再执行"且不会泄漏协程。
+     * 每次 load() 重建，避免 cancel 后的 scope 被复用。
+     */
+    private var timerScope = newTimerScope()
+
+    private fun newTimerScope() = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, _ -> Unit },
+    )
+
+    /** 目录为该脚本声明的域名白名单；空集合时 [LxNetworkPolicy] 会拒绝一切网络请求。 */
     private var allowedHosts: Set<String> = emptySet()
 
     val isLoaded: Boolean get() = loaded
@@ -70,6 +86,7 @@ class LxScriptRuntime(
             "脚本体积超过 ${LxProtocol.MAX_SCRIPT_BYTES} 字节上限"
         }
         close()
+        timerScope = newTimerScope()
 
         scriptName = name
         this.allowedHosts = allowedHosts
@@ -190,6 +207,8 @@ class LxScriptRuntime(
     }
 
     override fun close() {
+        // 先取消所有 setTimeout 协程：它们的回调引用 JS context，必须在 context 销毁前停止。
+        timerScope.cancel()
         val instance = quickJs ?: return
         quickJs = null
         loaded = false
@@ -273,6 +292,16 @@ class LxScriptRuntime(
             throw LxScriptException(
                 "lx.utils.crypto.$name 尚未在 FuoEvolve 中实现；该脚本依赖此原语，无法安全解析",
             )
+        }
+        // setTimeout 的延时原语。延时协程挂在 timerScope 上，close() 时整体取消：
+        // 回调（JS 侧）不会被通知，自然不会在 context 销毁后执行。
+        instance.asyncFunction<Any?>("__lxDelay") { args ->
+            val millis = (args.firstOrNull()?.toString()?.toLongOrNull() ?: 0L)
+                .coerceIn(0L, MAX_TIMER_DELAY_MS)
+            withContext(timerScope.coroutineContext) {
+                delay(millis)
+            }
+            null
         }
     }
 
@@ -444,6 +473,8 @@ class LxScriptRuntime(
         const val DEFAULT_REQUEST_TIMEOUT_MS = 10_000L
         const val MAX_REQUEST_TIMEOUT_MS = 30_000L
         const val MAX_RESPONSE_CHARS = 512 * 1024
+        /** 单次 setTimeout 延时上限（毫秒），防止脚本设置一个永不结束的超长计时器。 */
+        const val MAX_TIMER_DELAY_MS = 2_147_483_647L
         /** 给 QuickJS 自身的中断留一点余量，避免和协程超时互相抢跑。 */
         const val SUPPORT_MARGIN_MS = 500L
 

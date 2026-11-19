@@ -348,10 +348,10 @@ App 内嵌 JS 引擎执行 LX Music 自定义音源脚本**技术可行，已在
 | 测试 | 覆盖 |
 | --- | --- |
 | `ShaTest` / `CryptoTest` | SHA-256/512 标准向量；Ed25519 RFC 8032 TEST 1/2/3 + 200 字节多分块 + 篡改 |
-| `SourceCatalogTest`（63 项，双端） | 解析、静态扫描、产物哈希、签名、安装事务、回滚、退避、镜像熔断、协调器全链路 |
+| `SourceCatalogTest` / `SourceUpdateTest`（双端） | 解析、静态扫描、产物哈希、签名、安装事务、先冒烟后激活、回滚、退避、镜像熔断、协调器全链路 |
 | `PublishedCatalogTest` | 仓库内真实目录 ↔ 内置公钥一致；`autoInstall` 为空 |
 | `ResolverCatalogTest` | 解析器目录协议：kind/scheme/超时/重复 id/自托管告警 + 健康熔断 |
-| `LxScriptProviderTest`（11 项，双端） | 搜索委托、档位透传、FLAC 拒绝降级、目录批准平台裁剪、停用即失效、版本升级重载 |
+| `LxScriptProviderTest` / `LxTimerTest` / `LxNetworkPolicyTest`（双端） | 搜索委托、档位透传、FLAC 拒绝降级、目录裁剪、停用即失效、版本升级重载、原始字段透传、端到端身份核验、受控计时器、出站白名单边界 |
 | `StoreLxInstalledScriptSourceTest` | index → 待执行脚本的过滤（启用 ∩ 批准 ∩ 非隔离 ∩ 文件存在） |
 | `SourceUpdateSettingsTest` | 默认值、旧 JSON 解码、间隔夹取、空策略回落 |
 
@@ -361,3 +361,21 @@ App 内嵌 JS 引擎执行 LX Music 自定义音源脚本**技术可行，已在
 - 搜索能力来自内置酷我搜索接口：LX 协议本身没有搜索事件。
 - `crypto` 原语（md5/aes/rsa）未实现；依赖它们的脚本会明确失败。
 - 目录托管在 `miaohongyun/my_FeelUOwn` 的 GitHub Raw；国内可达性靠 `ghproxy.net` / `gh-proxy.com` 两个公共镜像兜底，正式发布前建议自建镜像并固定 commit。
+
+### 6.10 安全边界加固（代码审查后，2026-11-19）
+
+对 master 源码逐行审查后修复了七处真实缺陷。这些不是"测试没覆盖"，而是边界语义本身就错，逐条列出以便复核：
+
+| 缺陷 | 修复后行为 | 验证 |
+| --- | --- | --- |
+| 安装事务只看 `blocked`，WARN（`document.cookie`/`localStorage`/XHR）脚本仍可自动安装 | 事务内 BLOCK 与 NEEDS_REVIEW 一律拒绝；审核门槛（`APPROVED` + 许可证 + 非空 allowedHosts + autoInstall）下沉到事务自身，调用方绕不过 | `transactionRejectsWarnLevelStaticFindings` / `transactionRejectsUnapprovedOrHostlessEntries` |
+| 新版本先切 active 再冒烟，冒烟期间 Provider 可能已加载坏版本 | 改为"先验证后激活"：写 staging → 独立实例冒烟 → 通过后才 writeVersion + 切 active；失败返回 `SmokeTestFailed`，active 从头到尾没动过 | `smokeTestFailureDuringUpgradeKeepsOldVersionActive` |
+| 空 `allowedHosts` 在运行时放行全部网络，与目录提示"会被全部拒绝"正好相反 | 空名单直接拒绝一切请求；目录解析器同时拒绝 `autoInstall && allowedHosts=[]`（两道防线同向） | `LxNetworkPolicyTest`（8 项）/ `rejectsAutoInstallWithoutAllowedHosts` |
+| 非标准 IPv4（`0x7f000001` / `2130706433` / `127.1` / `0177.0.0.1`）绕过字符串私网判断 | 出站前先归一化 IPv4 再判段，补 CGNAT/组播/保留段/元数据地址 | `rejectsNonStandardIpv4NotationsOfLoopback` |
+| `runCatching` / `catch (Exception)` 吞掉 `CancellationException`，用户取消被当普通错误 | LX Provider、酷我搜索、目录拉取、Jamendo 客户端、事务冒烟统一 `catch (CancellationException) { throw }` | 各模块单测双端全绿 |
+| 脚本缓存键只有 `version:source.length`，同长度改码不失效 | 改为 `id:version:SHA256(source)`；复用 `provider:sourceupdate` 的纯 Kotlin SHA-256 | `LxScriptProviderTest` |
+| 搜索结果把 songId 赋给 `songmid`/`hash`/`strMediaMid` 所有键 → 《晴天》可能解析成别的歌 | `LxSongHit` 增加 `rawFields` 保留平台原始字段，按 identifier 缓存后原样透传给脚本；缺失时才回退 songId | `resolvePassesPlatformRawFieldsToScript` / `endToEndSearchThenLxRequestResolvesMatchingSongIdentity` |
+
+另外补齐了官方要求的 `setTimeout`/`clearTimeout`：计时回调留在 QuickJS context 内执行，宿主的延时协程挂在专用 scope 上，`close()` 时整体取消（关闭后回调不再执行、不泄漏协程）。测试覆盖正常触发/延迟/清除/并发/关闭失效/重载重置（`LxTimerTest` 5 项）。
+
+> **仍未证明的部分**：以上测试用的是符合官方协议结构的脚本 + MockEngine 真实响应结构，不是真实社区脚本（例如 LX 的酷狗/QQ 混淆脚本）跑真实网络。要验证真实脚本兼容性，需要把 1~2 个在用的 `.js` 文件接入做专项审查——这类脚本可能依赖尚未实现的 `crypto` 原语，属于"明确失败"而非"静默出错"。`DNS 解析结果检查`（防 DNS rebinding）跨端无法在 commonMain 用纯 Kotlin 实现，当前靠"域名白名单 + 逐跳重定向校验"约束，真机阶段需确认平台网络栈不会把白名单域名解析到内网。

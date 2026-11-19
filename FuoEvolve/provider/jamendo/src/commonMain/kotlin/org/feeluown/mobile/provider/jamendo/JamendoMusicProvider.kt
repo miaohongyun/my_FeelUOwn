@@ -1,6 +1,7 @@
 package org.feeluown.mobile.provider.jamendo
 
 import io.ktor.client.HttpClient
+import kotlinx.coroutines.CancellationException
 import org.feeluown.mobile.MusicTrack
 import org.feeluown.mobile.PlaybackPayload
 import org.feeluown.mobile.ProviderCapabilities
@@ -43,7 +44,13 @@ class JamendoMusicProvider(
     private val api = JamendoApiClient(httpClient, clientIdProvider)
 
     override suspend fun search(keyword: String): ProviderSearchResults {
-        val result = runCatching { api.search(keyword) }.getOrNull() ?: return ProviderSearchResults()
+        val result = try {
+            api.search(keyword)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return ProviderSearchResults()
+        }
         return ProviderSearchResults(tracks = result.tracks.map { it.toMusicTrack() })
     }
 
@@ -51,7 +58,13 @@ class JamendoMusicProvider(
         val identifier = (track.providerId ?: track.id).removePrefix("$ID:")
         if (identifier.isBlank()) return null
         // 重新取一次地址：搜索时拿到的 audio URL 可能已过期。
-        val fresh = runCatching { api.trackById(identifier) }.getOrNull() ?: return null
+        val fresh = try {
+            api.trackById(identifier)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return null
+        } ?: return null
         if (fresh.audioUrl.isBlank()) return null
         return PlaybackPayload(
             url = fresh.audioUrl,
