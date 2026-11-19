@@ -79,8 +79,41 @@ class JamendoApiClientTest {
     @Test
     fun returnsEmptyWithoutClientId() = runTest {
         val api = JamendoApiClient(client = clientThatMustNotBeCalled(), clientIdProvider = { null })
-        assertTrue(api.search("anything").tracks.isEmpty())
+        val result = api.search("anything")
+        assertTrue(result.tracks.isEmpty())
+        assertEquals(JamendoFailureKind.MissingClientId, result.failureKind,
+            "无 client_id 应给出明确失败原因，供 UI 提示去设置页配置")
         assertNull(api.trackById("1859761"))
+    }
+
+    @Test
+    fun reportsNetworkAndHttpFailuresSeparatelyFromEmptyResult() = runTest {
+        // HTTP 500 → Upstream，不是"正常空结果"。
+        val httpError = HttpClient(MockEngine {
+            respond("""{"error":"boom"}""", HttpStatusCode.InternalServerError,
+                headersOf(HttpHeaders.ContentType, "application/json"))
+        })
+        val upstream = JamendoApiClient(client = httpError, clientIdProvider = { "test-client" })
+        val upstreamResult = upstream.search("x")
+        assertTrue(upstreamResult.tracks.isEmpty())
+        assertEquals(JamendoFailureKind.Upstream, upstreamResult.failureKind,
+            "HTTP 错误必须报告 Upstream，不能被当成空搜索结果")
+
+        // 网络抛异常 → Network（MockEngine 抛 RuntimeException，被 fetch 的 catch(Exception) 捕获）。
+        val netError = HttpClient(MockEngine { throw RuntimeException("network down") })
+        val network = JamendoApiClient(client = netError, clientIdProvider = { "test-client" })
+        val networkResult = network.search("x")
+        assertTrue(networkResult.tracks.isEmpty())
+        assertEquals(JamendoFailureKind.Network, networkResult.failureKind,
+            "网络异常必须报告 Network")
+
+        // 正常成功但无匹配 → None（不是失败）。
+        val empty = JamendoApiClient(
+            client = clientReturning("""{"headers":{"results_count":0},"results":[]}"""),
+            clientIdProvider = { "test-client" },
+        )
+        assertEquals(JamendoFailureKind.None, empty.search("nomatch").failureKind,
+            "正常空结果不应报告失败")
     }
 
     @Test
@@ -114,6 +147,41 @@ class JamendoApiClientTest {
         val payload = provider.resolve(track, "highest")
         assertEquals(JamendoMusicProvider.QUALITY_LABEL, payload?.audioQuality)
         assertTrue(payload?.url?.startsWith("https://prod-1.storage.jamendo.com/") == true)
+    }
+
+    @Test
+    fun providerSurfacesFailureForUiMessage() = runTest {
+        // 无 client_id → Provider 返回 ContentUnavailable failure，UI 提示去设置页配置。
+        val noCreds = JamendoMusicProvider(
+            providerCredentials = org.feeluown.mobile.provider.core.InMemoryProviderCredentialStore(),
+            clientIdProvider = { null },
+            httpClient = clientThatMustNotBeCalled(),
+        )
+        val noCredsResult = noCreds.search("x")
+        assertTrue(noCredsResult.tracks.isEmpty())
+        assertEquals(org.feeluown.mobile.ProviderFailureKind.ContentUnavailable,
+            noCredsResult.failure?.kind, "无凭据应映射为 ContentUnavailable")
+        assertEquals(JamendoMusicProvider.ID, noCredsResult.failure?.providerId)
+
+        // HTTP 500 → UpstreamContractChanged，UI 提示接口响应异常。
+        val httpError = JamendoMusicProvider(
+            providerCredentials = org.feeluown.mobile.provider.core.InMemoryProviderCredentialStore(),
+            clientIdProvider = { "test-client" },
+            httpClient = HttpClient(MockEngine {
+                respond("""{"error":"boom"}""", HttpStatusCode.InternalServerError,
+                    headersOf(HttpHeaders.ContentType, "application/json"))
+            }),
+        )
+        assertEquals(org.feeluown.mobile.ProviderFailureKind.UpstreamContractChanged,
+            httpError.search("x").failure?.kind)
+
+        // 正常成功 → 无 failure。
+        val healthy = JamendoMusicProvider(
+            providerCredentials = org.feeluown.mobile.provider.core.InMemoryProviderCredentialStore(),
+            clientIdProvider = { "test-client" },
+            httpClient = clientReturning(FIXTURE),
+        )
+        assertEquals(null, healthy.search("sunrise").failure, "正常结果不应带 failure")
     }
 
     @Test

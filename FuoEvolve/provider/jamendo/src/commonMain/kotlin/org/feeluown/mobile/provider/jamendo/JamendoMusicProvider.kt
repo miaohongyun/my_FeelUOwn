@@ -4,6 +4,8 @@ import io.ktor.client.HttpClient
 import kotlinx.coroutines.CancellationException
 import org.feeluown.mobile.MusicTrack
 import org.feeluown.mobile.PlaybackPayload
+import org.feeluown.mobile.ProviderFailure
+import org.feeluown.mobile.ProviderFailureKind
 import org.feeluown.mobile.ProviderCapabilities
 import org.feeluown.mobile.ProviderInfo
 import org.feeluown.mobile.ProviderSearchResults
@@ -49,9 +51,38 @@ class JamendoMusicProvider(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            return ProviderSearchResults()
+            return ProviderSearchResults(
+                failure = ProviderFailure(
+                    kind = ProviderFailureKind.Unknown,
+                    providerId = ID,
+                    technicalMessage = e.message,
+                ),
+            )
         }
-        return ProviderSearchResults(tracks = result.tracks.map { it.toMusicTrack() })
+        // 真实失败（无 client_id / 网络 / HTTP）映射到通用 failure，让 UI 给出明确提示；
+        // 正常空结果（failureKind=None）保持空列表且无 failure，不污染统一搜索。
+        val failure = result.failureKind.toProviderFailure()
+        return ProviderSearchResults(
+            tracks = result.tracks.map { it.toMusicTrack() },
+            failure = failure,
+        )
+    }
+
+    private fun JamendoFailureKind.toProviderFailure(): ProviderFailure? = when (this) {
+        JamendoFailureKind.None -> null
+        JamendoFailureKind.MissingClientId -> ProviderFailure(
+            kind = ProviderFailureKind.ContentUnavailable,
+            providerId = ID,
+            technicalMessage = "Jamendo client_id 未配置，请在设置中填写",
+        )
+        JamendoFailureKind.Network -> ProviderFailure(
+            kind = ProviderFailureKind.Network,
+            providerId = ID,
+        )
+        JamendoFailureKind.Upstream -> ProviderFailure(
+            kind = ProviderFailureKind.UpstreamContractChanged,
+            providerId = ID,
+        )
     }
 
     override suspend fun resolve(track: MusicTrack, qualityPolicy: String): PlaybackPayload? {
@@ -119,5 +150,8 @@ class JamendoProviderFactory(
         JamendoMusicProvider(
             providerCredentials = dependencies.credentials,
             clientIdProvider = clientIdProvider,
+            // 复用应用统一网络层的底层 client：代理/超时/测试注入都经由 ProviderHttpClient，
+            // 不再各自 createSharedProviderHttpClient() 绕过配置。
+            httpClient = dependencies.http.client,
         )
 }

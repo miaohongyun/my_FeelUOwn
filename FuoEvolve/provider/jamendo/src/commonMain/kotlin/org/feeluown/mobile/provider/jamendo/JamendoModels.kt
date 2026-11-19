@@ -57,7 +57,25 @@ data class JamendoTrack(
         }
 }
 
+/**
+ * 搜索结果与失败原因分离：
+ * - `tracks` 为空且 `failureKind` 为 null —— 正常空结果（关键词无匹配），不提示错误；
+ * - `failureKind` 非 null —— 真实的失败（无 client_id / 网络 / HTTP），UI 应给出明确提示。
+ */
 data class JamendoSearchResult(
     val tracks: List<JamendoTrack>,
     val totalCount: Int,
+    val failureKind: JamendoFailureKind = JamendoFailureKind.None,
 )
+
+/** Jamendo 请求结果状态。定义在曲库模块内，由 Provider 映射到通用 ProviderFailureKind。 */
+enum class JamendoFailureKind {
+    /** 正常完成（可能为空结果）。 */
+    None,
+    /** 未配置 client_id（用户清空了设置）。 */
+    MissingClientId,
+    /** 网络错误或超时。 */
+    Network,
+    /** 上游返回 HTTP 错误或响应格式异常。 */
+    Upstream,
+}

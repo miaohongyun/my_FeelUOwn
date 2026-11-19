@@ -28,6 +28,53 @@ fun sourceLabel(track: MusicTrack, downloadState: DownloadState?): String {
     ).joinToString(" · ")
 }
 
+/**
+ * 从 Provider 写入的 providerTags 中解析出的开放曲库许可证信息。
+ *
+ * 只有 Jamendo 这类 CC 曲库会写入这些 tag；商业来源没有 cc: 标签，解析结果为 null，
+ * UI 因此不会误标。字段全部来自 [MusicTrack.providerTags]，不再硬编码曲库类型判断。
+ */
+data class TrackLicenseInfo(
+    /** CC 许可证代码，如 BY-NC-ND。 */
+    val code: String,
+    /** 可读的适用条件说明（含 BY/NC/ND/SA 逐项限制）。 */
+    val summary: String,
+    /** 原始许可条款链接（creativecommons.org/...），供用户核对。 */
+    val licenseUrl: String,
+) {
+    /** 列表 chip 上的紧凑标签，如 "CC BY-NC-ND"。 */
+    val shortLabel: String get() = "CC $code"
+}
+
+/**
+ * 纯解析：从 [tags] 中提取 CC 许可证信息。
+ *
+ * JamendoMusicProvider.toMusicTrack 写入的 tag 格式：
+ * - `cc:BY-NC-ND` —— 许可证代码
+ * - `license-url:http://creativecommons.org/...` —— 原始链接
+ * - `BY-NC-ND：须署名(BY)、...` —— 可读条件摘要（以 code 开头）
+ *
+ * 没有任何 `cc:` 标签时返回 null（商业来源/普通曲目），保证不误标、不把它们说成开放资源。
+ */
+fun licenseInfoFromTags(tags: List<String>): TrackLicenseInfo? {
+    val code = tags.firstNotNullOfOrNull { tag ->
+        tag.takeIf { it.startsWith("cc:", ignoreCase = true) }
+            ?.removePrefix("cc:")
+            ?.removePrefix("CC:")
+            ?.takeIf { it.isNotBlank() }
+    } ?: return null
+    val licenseUrl = tags.firstNotNullOfOrNull { tag ->
+        tag.takeIf { it.startsWith("license-url:", ignoreCase = true) }
+            ?.removePrefix("license-url:")
+            ?.takeIf { it.isNotBlank() }
+    }.orEmpty()
+    // 摘要 tag 以 code 开头（如 "BY-NC-ND：..."）；找不到时至少回退到 code，绝不空着。
+    val summary = tags.firstOrNull { tag ->
+        tag.startsWith(code, ignoreCase = true) && !tag.startsWith("cc:", ignoreCase = true)
+    } ?: code
+    return TrackLicenseInfo(code = code, summary = summary, licenseUrl = licenseUrl)
+}
+
 fun replacementSourceLabel(track: MusicTrack): String {
     val source = track.replacementProviderName?.takeIf { it.isNotBlank() }
         ?: track.providerName?.takeIf { it.isNotBlank() }

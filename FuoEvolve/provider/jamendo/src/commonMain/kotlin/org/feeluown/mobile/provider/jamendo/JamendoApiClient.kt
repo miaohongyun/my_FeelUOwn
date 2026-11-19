@@ -33,7 +33,10 @@ class JamendoApiClient(
     suspend fun search(keyword: String, limit: Int = 20): JamendoSearchResult {
         val query = keyword.trim()
         val clientId = clientIdProvider()?.trim()
-        if (query.isEmpty() || clientId.isNullOrEmpty()) return JamendoSearchResult(emptyList(), 0)
+        if (query.isEmpty()) return JamendoSearchResult(emptyList(), 0)
+        if (clientId.isNullOrEmpty()) {
+            return JamendoSearchResult(emptyList(), 0, JamendoFailureKind.MissingClientId)
+        }
 
         val url = buildString {
             append(baseUrl).append("/tracks/")
@@ -42,8 +45,14 @@ class JamendoApiClient(
             append("&search=").append(encode(query))
             append("&audioformat=mp32&include=musicinfo&imagesize=400")
         }
-        val body = fetch(url) ?: return JamendoSearchResult(emptyList(), 0)
-        return parseSearch(body)
+        return when (val response = fetch(url)) {
+            is FetchResult.Failure -> JamendoSearchResult(
+                emptyList(), 0,
+                if (response.kind == JamendoFailureKind.Network) JamendoFailureKind.Network
+                else JamendoFailureKind.Upstream,
+            )
+            is FetchResult.Success -> parseSearch(response.body)
+        }
     }
 
     /** 重新取一次播放地址：Jamendo 的 `audio` 带时效，不能长期缓存。 */
@@ -56,8 +65,18 @@ class JamendoApiClient(
             append("&format=json&id=").append(encode(trackId))
             append("&audioformat=mp32")
         }
-        val body = fetch(url) ?: return null
-        return parseTracks(body).firstOrNull()
+        // 地址重取失败与"该曲目已下架"都退化成 null，由 Provider 的 resolve 统一提示，
+        // 不在这里区分——避免接口签名复杂化，且播放失败提示对用户已足够明确。
+        return when (val response = fetch(url)) {
+            is FetchResult.Success -> parseTracks(response.body).firstOrNull()
+            is FetchResult.Failure -> null
+        }
+    }
+
+    /** 内部获取结果：区分正常响应、网络失败、HTTP 错误，供 search 填充 failure。 */
+    private sealed interface FetchResult {
+        data class Success(val body: String) : FetchResult
+        data class Failure(val kind: JamendoFailureKind) : FetchResult
     }
 
     fun parseSearch(rawText: String): JamendoSearchResult {
@@ -96,16 +115,24 @@ class JamendoApiClient(
      * 直接在调用方协程里 `withTimeoutOrNull` 会被虚拟时间调度器（例如 runTest）立刻触发，
      * 造成"请求还没发出去就超时"的假象——这个坑在 lxruntime 上踩过一次。
      */
-    private suspend fun fetch(url: String): String? = withContext(Dispatchers.Default) {
-        withTimeoutOrNull(timeoutMillis) {
+    private suspend fun fetch(url: String): FetchResult = withContext(Dispatchers.Default) {
+        val result = withTimeoutOrNull(timeoutMillis) {
             try {
-                client.get(url).bodyAsText()
+                val response = client.get(url)
+                // Ktor 默认不因 4xx/5xx 抛异常，必须显式检查；否则错误页会被当成搜索结果解析成空。
+                if (response.status.value !in 200..299) {
+                    FetchResult.Failure(JamendoFailureKind.Upstream)
+                } else {
+                    FetchResult.Success(response.bodyAsText())
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                null
+                FetchResult.Failure(JamendoFailureKind.Network)
             }
         }
+        // withTimeoutOrNull 超时返回 null —— 这是真实的网络失败，不能当成空结果。
+        result ?: FetchResult.Failure(JamendoFailureKind.Network)
     }
 
     private fun JsonObject.text(key: String): String =

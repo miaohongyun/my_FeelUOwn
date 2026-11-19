@@ -422,8 +422,10 @@ private fun RuntimePlayerInfoTags(track: MusicTrack?) {
     val replacement = LocalReplacementActionPort.current
     var replacementInfoTrack by remember(track?.id) { mutableStateOf<MusicTrack?>(null) }
     var showAudioFormatInfo by remember(track?.id) { mutableStateOf(false) }
+    var showLicenseInfo by remember(track?.id) { mutableStateOf(false) }
     val canShowAudioInfo = presentation.audioFormatInfo?.hasDisplayableValue() == true ||
         presentation.audioDecoderInfo != null
+    val licenseInfo = remember(track?.id) { track?.let { licenseInfoFromTags(it.providerTags) } }
 
     Row(
         modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -440,6 +442,10 @@ private fun RuntimePlayerInfoTags(track: MusicTrack?) {
                 )
             } else {
                 InfoTag(sourceLabel(track, null))
+            }
+            // 开放曲库 CC 许可标签：点击看逐项条件 + 原始链接。商业来源无 cc: tag，不显示。
+            if (licenseInfo != null) {
+                InfoTag(text = licenseInfo.shortLabel, onClick = { showLicenseInfo = true })
             }
         }
         presentation.audioQuality?.takeIf { it.isNotBlank() }?.let {
@@ -475,6 +481,9 @@ private fun RuntimePlayerInfoTags(track: MusicTrack?) {
             decoderInfo = presentation.audioDecoderInfo,
             onDismiss = { showAudioFormatInfo = false },
         )
+    }
+    if (showLicenseInfo && licenseInfo != null) {
+        TrackLicenseDialog(license = licenseInfo, onDismiss = { showLicenseInfo = false })
     }
 }
 

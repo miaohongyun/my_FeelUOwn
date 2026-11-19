@@ -1,5 +1,6 @@
 package org.feeluown.mobile
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -320,6 +321,8 @@ fun ProviderTrackDetailRoute(track: MusicTrack) {
     LaunchedEffect(track.id) { owner.activate(track) }
     val displayTrack = state.track ?: track
     val sharePayload = displayTrack.toSharePayload()
+    var showLicenseInfo by remember(displayTrack.id) { mutableStateOf(false) }
+    val licenseInfo = remember(displayTrack.id) { licenseInfoFromTags(displayTrack.providerTags) }
 
     Scaffold(
         topBar = {
@@ -392,6 +395,28 @@ fun ProviderTrackDetailRoute(track: MusicTrack) {
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
+                    // 开放曲库 CC 许可：详情页展示条件摘要与原始链接，搜索列表不展示以保持简洁。
+                    if (licenseInfo != null) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showLicenseInfo = true }
+                                .padding(vertical = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                text = "开放曲库授权 · ${licenseInfo.shortLabel}（点击查看条件）",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                text = licenseInfo.summary,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        HorizontalDivider()
+                    }
                     if (state.similarTracks.isNotEmpty()) {
                         Text("相似歌曲", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         state.similarTracks.take(6).forEachIndexed { index, related ->
@@ -412,6 +437,9 @@ fun ProviderTrackDetailRoute(track: MusicTrack) {
                 }
             },
         )
+        if (showLicenseInfo && licenseInfo != null) {
+            TrackLicenseDialog(license = licenseInfo, onDismiss = { showLicenseInfo = false })
+        }
     }
 }
 

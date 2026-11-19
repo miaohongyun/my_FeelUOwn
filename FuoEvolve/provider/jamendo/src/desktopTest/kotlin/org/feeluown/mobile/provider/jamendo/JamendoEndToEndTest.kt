@@ -57,7 +57,9 @@ class JamendoEndToEndTest {
         val ct = conn.contentType.orEmpty()
         val range = conn.getHeaderField("Content-Range").orEmpty()
         val bytes = conn.inputStream.use { stream ->
-            if (rangeBytes != null) stream.readNBytes(rangeBytes) else stream.readBytes()
+            // 多读 1 字节：readNBytes(N) 无法发现服务端返回超过 N 字节的正文；
+            // 请求 0-(N-1) 却读到 N+1 字节即说明响应超长，交给调用方断言判失败。
+            if (rangeBytes != null) stream.readNBytes(rangeBytes + 1) else stream.readBytes()
         }
         conn.disconnect()
         return HttpResult(code, ct, range, bytes)
@@ -119,23 +121,28 @@ class JamendoEndToEndTest {
         val headerInfo = "${audioResp.contentType} | ${audioResp.contentRange}"
         val ctOk = audioResp.contentType.startsWith("audio/", ignoreCase = true) ||
             audioResp.contentType.equals("application/octet-stream", ignoreCase = true)
-        val id3 = audioBytes.size >= 3 && audioBytes[0].toInt() == 0x49 &&
-            audioBytes[1].toInt() == 0x44 && audioBytes[2].toInt() == 0x33
-        val frameSync = audioBytes.size >= 2 &&
-            (audioBytes[0].toInt() and 0xff) == 0xff && (audioBytes[1].toInt() and 0xe0) == 0xe0
-        val hex = audioBytes.take(8).joinToString("") { b -> "%02x".format(b) }
-        println("[REAL] Jamendo REAL_AUDIO_RESPONSE: HTTP $audioCode $headerInfo hex=$hex id3=$id3 frameSync=$frameSync")
+        // 魔数只看前 16 字节（http() 多读了 1 字节用于识别超长响应）。
+        val probe = audioBytes.copyOfRange(0, minOf(audioBytes.size, 16))
+        val id3 = probe.size >= 3 && probe[0].toInt() == 0x49 &&
+            probe[1].toInt() == 0x44 && probe[2].toInt() == 0x33
+        val frameSync = probe.size >= 2 &&
+            (probe[0].toInt() and 0xff) == 0xff && (probe[1].toInt() and 0xe0) == 0xe0
+        val hex = probe.take(8).joinToString("") { b -> "%02x".format(b) }
+        println("[REAL] Jamendo REAL_AUDIO_RESPONSE: HTTP $audioCode $headerInfo hex=$hex bytesRead=${audioBytes.size} id3=$id3 frameSync=$frameSync")
 
         // 严格 1：必须是 206 Partial Content，不能是服务端忽略 Range 后的 200 整段响应。
         assertEquals(206, audioCode, "Range 请求必须返回 HTTP 206（200 表示服务端忽略了 Range）")
-        // 严格 2：Content-Range 必须是 bytes 0-15/<total>，起点 0、结束 15 与请求一致。
+        // 严格 2：Content-Range 必须是 bytes 0-15/<total>，起点 0、结束 15 与请求一致，
+        //         且 total > 15（total 与区间矛盾则不接受）。
         val crMatch = Regex("""bytes\s+(\d+)-(\d+)/(\d+)""", RegexOption.IGNORE_CASE)
             .find(audioResp.contentRange)
         assertTrue(crMatch != null, "必须返回 Content-Range: $headerInfo")
         assertEquals("0", crMatch!!.groupValues[1], "Content-Range 起点必须为 0: $headerInfo")
         assertEquals("15", crMatch.groupValues[2], "Content-Range 结束必须与请求 0-15 一致: $headerInfo")
-        // 严格 3：实际取得的字节数等于请求的 16B（不是更少，也不是整段响应）。
-        assertEquals(16, audioBytes.size, "实际取得字节数应为 16（请求 0-15）")
+        val total = crMatch.groupValues[3].toLongOrNull()
+        assertTrue(total != null && total > 15, "Content-Range total 必须 > 区间终点 15: $headerInfo")
+        // 严格 3：读了 17 字节仍恰好得到 16B——排除短响应，也排除忽略 Range 的超长整段响应。
+        assertEquals(16, audioBytes.size, "读取 17B 时应恰好得到 16B（请求 0-15；17B 表示响应超长）")
         assertTrue(ctOk, "音频 Content-Type 应为 audio/* 或 octet-stream: $headerInfo")
         assertTrue(id3 || frameSync, "音频字节应为 ID3/MP3 容器魔数（排除 HTML 错误页）")
 

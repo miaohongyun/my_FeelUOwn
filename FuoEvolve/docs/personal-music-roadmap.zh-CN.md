@@ -826,6 +826,9 @@ autoInstall=false/无 APPROVED。
 - 收紧为三重严格条件：`HTTP 206` + `Content-Range: bytes 0-(N-1)/total`（起点/结束与请求区间一致）
   + 实际字节数恰好 == N；三者与 audio/* + 容器魔数同时满足才算 REAL_AUDIO_RESPONSE。
 - 验证测试断言消息同步为"206+Content-Range(0-15)+audio/*+容器魔数+16B"，与 Jamendo 端到端口径统一。
+- 追加审查修正：`readNBytes(N)` 最多读 N 字节、无法发现服务端返回超长正文，改为读 `N+1` 且断言
+  恰好得到 N 字节（多出的 1 字节用于识别超长响应，魔数判定只看前 N 字节）；Content-Range 解析
+  total 并要求 `total > end`，避免接受"区间与总长矛盾"的响应。通用验证与 Jamendo 端到端两处同步。
 
 **P2 审核等级唯一来源（RealInterfaceVerificationTest）**：
 - 10.8 的阶梯测试虽读了 candidates.json，却又在测试侧硬编码了一份 10 级 `expected` 列表比对，
@@ -844,3 +847,44 @@ autoInstall=false/无 APPROVED。
 
 **验证与合规**：desktopTest 全绿；音频仍只 Range 取 16B 未下载完整音乐；source-catalog.json
 仍为空数组、21 候选无 APPROVED/autoInstall=false。本轮不推送。
+
+### 10.10 Jamendo 开放曲库产品化：接入实际使用流程（2026-11-19）
+
+用户决策：client_id 保留内置写死；CC 许可证只在"曲目详情/正在播放"页展示，搜索列表保持简洁。
+基于架构梳理（Provider 已注册、搜索/解析/播放链路已通），本轮只补缺口，不重写 Provider：
+
+**① 许可证 UI 展示（详情/播放页）**：
+- `PlayerFormatting.kt` 新增纯函数 `licenseInfoFromTags(providerTags)` → `TrackLicenseInfo`
+  （code/summary/url/shortLabel），只在有 `cc:` 标签时返回非 null，商业来源不误标。
+- `PlayerDialogs.kt` 新增 `TrackLicenseDialog`：明确"CC 授权开放曲库、非商业原曲"，逐项列
+  BY/NC/ND/SA 条件 + 原始许可链接，不去重、不笼统。
+- 正在播放页 `RuntimeFullPlayer` 的 info tag 区加可点击 "CC BY-NC-ND" chip → 弹窗；
+  曲目详情 `ProviderTrackDetailRoute` content 顶部加许可条件行 → 同一弹窗。搜索列表 TrackRow 未改。
+
+**② 异常处理（失败可感知，不再静默空结果）**：
+- `JamendoSearchResult` 新增 `failureKind`（None/MissingClientId/Network/Upstream）。
+- `JamendoApiClient.fetch` 改为返回 `FetchResult.Success/Failure`：**显式检查 HTTP 状态码**
+  （Ktor 默认不因 4xx/5xx 抛异常，错误页否则被解析成空）、超时与网络异常归 Network。
+- Provider 层映射到通用 `ProviderFailure`：无 client_id→ContentUnavailable、Network→Network、
+  HTTP→UpstreamContractChanged；正常空结果仍是 failure=null，不污染统一搜索。
+- 复用既有链路 `ProviderSearchResults.failure → errorMessage → 搜索 UI message`，无需改 UI 层。
+
+**③ 接线缺陷修复（本轮最有价值发现，由链路测试暴露）**：
+- `JamendoProviderFactory.create` 原忽略 `dependencies.http`，各自 `createSharedProviderHttpClient()`，
+  绕过统一网络层（代理/缓存/测试注入全失效）。链路测试首跑 0 结果即暴露此问题。
+- 修复：`ProviderHttpClient` 新增只读 `client` 访问器；Factory 改为传入 `dependencies.http.client`。
+  其他 Provider 本就走 dependencies.http，无需改动。
+
+**④ 平台兼容性核查（只读）**：Jamendo 为 https MP3；Android（ExoPlayer DefaultHttpDataSource，
+cleartext 放行）、iOS（AVPlayer，NSAllowsArbitraryLoads=true）、Desktop（libmpv 直接加载 URL）
+均可消费，无需改播放器。
+
+**⑤ 测试（明确区分 Mock 与真实网络）**：
+- `TrackLicensePresentationTest`（4）、`JamendoApiClientTest` 新增（无凭据/HTTP500/网络/正常空）
+  、`JamendoSearchToPlaybackFlowTest`（2，**Mock 验证**：统一搜索→CC 标签随 track 传递→
+  resolveTrack 路由回 Jamendo→拿到播放 URL；真实网络由 opt-in 端到端测试负责，不互相冒充）。
+- 回归：provider runtime/jamendo/lxruntime、feature playback/search desktopTest 全绿；
+  shared desktopTest 350 项 0 失败；三端编译见交付记录。
+
+**合规**：client_id 仍内置（用户决策保留）；未新增 LX 音源、未下载完整商业音乐；
+真实现播放验证仍 opt-in，Mock 链路测试不冒充真实播放。

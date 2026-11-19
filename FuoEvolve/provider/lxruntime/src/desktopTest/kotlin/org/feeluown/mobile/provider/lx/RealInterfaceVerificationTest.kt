@@ -86,11 +86,13 @@ class RealInterfaceVerificationTest {
      * 修正审查指出的三点：
      * - 不再用 `len > 0`（HTML 错误页也可能有正长度），也不只做 HEAD（HEAD 不证明 GET 拿得到音频字节）；
      * - 必须是 **HTTP 206**，不能是服务端忽略 Range 后返回的 200 整段（那条路拿不到"Range 证据"）；
-     * - 必须返回 **Content-Range: bytes 0-(N-1)/total**，起点/结束与请求区间一致，且实际字节数 == N。
+     * - 必须返回 **Content-Range: bytes 0-(N-1)/total**，起点/结束与请求区间一致、total > end，
+     *   且实际字节数 == N；
+     * - 读取 N+1 字节以识别超长响应（readNBytes(N) 无法发现服务端返回超过 N 字节正文）。
      *
-     * 达到 REAL_AUDIO_RESPONSE 的充分条件：HTTP 206 + Content-Range 覆盖请求的 0-(N-1) +
-     * Content-Type 以 audio/ 开头或 application/octet-stream + 响应字节以 ID3/MP3 帧同步开头
-     * + 实际读取字节数等于 N（既不是更短，也不是整段）。
+     * 达到 REAL_AUDIO_RESPONSE 的充分条件：HTTP 206 + Content-Range 覆盖请求的 0-(N-1) 且
+     * total > end + Content-Type 以 audio/ 开头或 application/octet-stream + 响应字节以 ID3/MP3
+     * 帧同步开头 + 读了 N+1 仍恰好得到 N 字节（既不是更短，也不是忽略 Range 的整段）。
      */
     private fun realAudioRange(url: String, probeBytes: Int = 16): Step {
         return try {
@@ -103,29 +105,39 @@ class RealInterfaceVerificationTest {
             val code = conn.responseCode
             val ct = conn.contentType.orEmpty()
             val range = conn.getHeaderField("Content-Range").orEmpty()
-            val bytes = conn.inputStream.use { it.readNBytes(probeBytes) }
+            // 多读 1 字节：readNBytes(N) 只保证"最多 N"，无法发现服务端返回超长正文的情况。
+            // 请求 0-(N-1) 时若实际读到 N+1 字节，说明响应体比请求区间更长，bytesOk 会判失败。
+            val bytes = conn.inputStream.use { it.readNBytes(probeBytes + 1) }
             conn.disconnect()
+            // 魔数判定只看前 probeBytes 字节，避免多读的第 N+1 字节干扰。
+            val probe = bytes.copyOfRange(0, minOf(bytes.size, probeBytes))
             val ctAudio = ct.startsWith("audio/", ignoreCase = true) ||
                 ct.equals("application/octet-stream", ignoreCase = true)
-            val mp3Magic = bytes.size >= 3 && bytes[0].toInt() == 0x49 && bytes[1].toInt() == 0x44 && bytes[2].toInt() == 0x33
-            val mp3Frame = bytes.size >= 2 &&
-                (bytes[0].toInt() and 0xff) == 0xff && (bytes[1].toInt() and 0xe0) == 0xe0
+            val mp3Magic = probe.size >= 3 && probe[0].toInt() == 0x49 && probe[1].toInt() == 0x44 && probe[2].toInt() == 0x33
+            val mp3Frame = probe.size >= 2 &&
+                (probe[0].toInt() and 0xff) == 0xff && (probe[1].toInt() and 0xe0) == 0xe0
             val audioBytes = mp3Magic || mp3Frame
             // 严格 1：必须是 206 Partial Content，200 表示服务端忽略了 Range。
             val isPartial = code == 206
-            // 严格 2：Content-Range 起点 0、结束 probeBytes-1、带 /total，与请求区间一致。
+            // 严格 2：Content-Range 起点 0、结束 probeBytes-1、带 /total，与请求区间一致，
+            //         且 total > end（否则 total 与实际区间矛盾，比如 bytes 0-15/10）。
             val cr = Regex("""bytes\s+(\d+)-(\d+)/(\d+)""", RegexOption.IGNORE_CASE).find(range)
-            val rangeOk = cr != null && cr.groupValues[1] == "0" &&
-                cr.groupValues[2] == (probeBytes - 1).toString()
-            // 严格 3：实际字节数恰好等于请求长度（非更短、非整段）。
+            val startOk = cr != null && cr.groupValues[1] == "0"
+            val endOk = cr != null && cr.groupValues[2] == (probeBytes - 1).toString()
+            val total = cr?.groupValues?.get(3)?.toLongOrNull()
+            val totalOk = total != null && total > (probeBytes - 1)
+            val rangeOk = startOk && endOk && totalOk
+            // 严格 3：实际字节数恰好等于请求长度——读了 N+1 仍只有 N 字节，
+            //         既排除了短响应，也排除了忽略 Range 的超长整段响应。
             val bytesOk = bytes.size == probeBytes
             val ok = isPartial && rangeOk && bytesOk && ctAudio && audioBytes
-            val hex = bytes.take(8).joinToString("") { b -> "%02x".format(b) }
+            val hex = probe.take(8).joinToString("") { b -> "%02x".format(b) }
             Step(
                 "REAL_AUDIO_RESPONSE",
                 ok,
                 "HTTP $code ct=$ct range=$range bytes=${bytes.size} hex=$hex" +
-                    " partial=$isPartial rangeOk=$rangeOk bytesOk=$bytesOk" +
+                    " partial=$isPartial start=$startOk end=$endOk total=$total totalOk=$totalOk" +
+                    " rangeOk=$rangeOk bytesOk=$bytesOk" +
                     " id3=$mp3Magic frameSync=$mp3Frame（Range ${probeBytes}B，未下载完整音频）",
             )
         } catch (e: Exception) {
@@ -174,7 +186,7 @@ class RealInterfaceVerificationTest {
         val step = realAudioRange(audioUrl)
         println("[REAL] 音频 Range: ${step.level} ok=${step.ok} ${step.detail}")
         assertTrue(step.ok,
-            "opt-in 真实音频必须有 206+Content-Range(0-15)+audio/*+容器魔数+16B 证据: ${step.detail}")
+            "opt-in 真实音频必须有 206+Content-Range(0-15,total>15)+audio/*+容器魔数+恰好16B(读17判超长) 证据: ${step.detail}")
     }
 
     /**

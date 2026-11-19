@@ -86,6 +86,47 @@ fun InfoTag(text: String, onClick: (() -> Unit)? = null) {
     FuoMetadataChip(label = text, onClick = onClick)
 }
 
+/**
+ * 开放曲库（CC）许可证说明弹窗。
+ *
+ * 只展示真实存在的许可证信息：逐项条件摘要 + 原始许可条款链接，明确告知这是 CC 授权曲目、
+ * 并非商业曲库原曲，且 ND/NC 等限制仍然适用。不提供"打开链接"动作以外的任何引导，
+ * 由用户自行到 creativecommons.org 核对条款。
+ */
+@Composable
+fun TrackLicenseDialog(
+    license: TrackLicenseInfo,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("开放曲库授权 · ${license.code}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "该曲目来自 CC 授权开放曲库，不是商业曲库原曲。以下条件仍然适用：",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    text = license.summary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                if (license.licenseUrl.isNotBlank()) {
+                    Text(
+                        text = "原始许可条款：${license.licenseUrl}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("知道了") }
+        },
+    )
+}
+
 @Composable
 fun ReplacementInfoDialog(
     track: MusicTrack,

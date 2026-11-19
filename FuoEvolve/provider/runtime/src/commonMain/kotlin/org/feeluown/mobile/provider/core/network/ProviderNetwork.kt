@@ -258,6 +258,15 @@ class ProviderHttpClient(
         cachePolicy = cachePolicy,
     )
 
+    /**
+     * 底层 Ktor 客户端（只读）。
+     *
+     * 供需要自定义请求细节的 Provider（如 Jamendo 需在 URL 上拼装 query 并处理 Range/HTTP 状态）
+     * 复用统一网络层配置，避免各自 `createSharedProviderHttpClient()` 绕过代理/测试注入。
+     * 调用方应只用它发请求，不要 close（生命周期仍由本类持有）。
+     */
+    val client: HttpClient get() = httpClient
+
     suspend fun invalidateCache(prefix: String) {
         cache.invalidate(prefix)
         persistentCache?.invalidate(prefix)
