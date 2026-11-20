@@ -2,9 +2,20 @@ package org.feeluown.mobile.provider.musicfree
 
 import com.dokar.quickjs.QuickJs
 import com.dokar.quickjs.QuickJsException
+import com.dokar.quickjs.binding.asyncFunction
 import com.dokar.quickjs.binding.function
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -45,8 +56,23 @@ class MusicFreeSandboxSession(
     private var modulesByName: Map<String, String> = emptyMap()
     private val requireBindingName = "__mfRequire_${providerId.replace(Regex("[^A-Za-z0-9_]"), "_")}_${hashCode().toString(16)}"
     private val REQUIRE_BINDING get() = requireBindingName
+    private val delayBindingName = "__mfDelay_${providerId.replace(Regex("[^A-Za-z0-9_]"), "_")}_${hashCode().toString(16)}"
+    private val cancelTimerBindingName = "__mfCancelTimer_${providerId.replace(Regex("[^A-Za-z0-9_]"), "_")}_${hashCode().toString(16)}"
     private var closed = false
     private var initialized = false
+
+    // 阶段 I3：受控 timer。回调留在 JS 侧执行，宿主只提供"延时到了"信号。
+    // 复用 LxScriptRuntime 已验证模式：mutex 保护表 + SupervisorJob scope + close 时 cancel+join。
+    private val timerScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, _ -> Unit },
+    )
+    private val timerSignals = mutableMapOf<Long, CompletableDeferred<Unit>>()
+    private val timerMutex = Mutex()
+    private val timerJobs = mutableSetOf<Job>()
+    private val maxTimers = 64
+
+    /** 当前活跃 timer 数（测试据此证明 close 后清理干净）。 */
+    suspend fun activeTimerCount(): Int = timerMutex.withLock { timerSignals.size }
 
     /** 各平台实际能强制的限制，执行结果里回报，供 UI/报告诚实展示。 */
     val capabilities: EngineCapabilities = runCatching {
@@ -75,7 +101,9 @@ class MusicFreeSandboxSession(
                 if (initialized || closed) return@withLock
                 registerBindings()
                 quickJs.evaluate<Any?>(
-                    SHIM.replace("__MF_NATIVE_REQUIRE__", REQUIRE_BINDING),
+                    SHIM.replace("__MF_NATIVE_REQUIRE__", REQUIRE_BINDING)
+                        .replace("__MF_DELAY__", delayBindingName)
+                        .replace("__MF_CANCEL_TIMER__", cancelTimerBindingName),
                     "mf_sandbox_shim.js",
                 )
                 // 预载期把 require 临时换成"返回空对象"的桩：模块 A 求 exports 时若调用
@@ -154,6 +182,45 @@ class MusicFreeSandboxSession(
             val text = args.firstOrNull()?.toString().orEmpty()
             text.encodeToByteArray().fold(5381) { acc, b -> (acc * 31 + b.toInt()) and 0x7fffffff }.toString(16)
         }
+        // 阶段 I3：延时信号。回调在 JS 侧执行，宿主只负责"到点了"。关闭/超限时取消。
+        quickJs.asyncFunction<Any?>(delayBindingName) { args ->
+            val id = (args.getOrNull(0)?.toString() ?: "0").toLongOrNull() ?: 0L
+            val waitMs = (args.getOrNull(1)?.toString() ?: "0").toLongOrNull() ?: 0L
+            val signal = CompletableDeferred<Unit>()
+            val registered = timerMutex.withLock {
+                if (closed || timerSignals.size >= maxTimers || timerSignals.containsKey(id)) false
+                else {
+                    timerSignals[id] = signal
+                    val job = timerScope.async {
+                        delay(waitMs.coerceAtLeast(0))
+                        signal.complete(Unit)
+                        timerMutex.withLock {
+                            if (timerSignals[id] === signal) timerSignals.remove(id)
+                            val j = currentCoroutineContext()[Job]
+                            if (j != null) timerJobs.remove(j)
+                        }
+                    }
+                    timerJobs += job
+                    true
+                }
+            }
+            if (registered) {
+                try {
+                    signal.await()
+                    "fired"
+                } catch (_: CancellationException) {
+                    "cancelled"
+                }
+            } else {
+                "rejected"
+            }
+        }
+        quickJs.asyncFunction<String>(cancelTimerBindingName) { args ->
+            val id = (args.firstOrNull()?.toString() ?: "0").toLongOrNull() ?: 0L
+            val signal = timerMutex.withLock { timerSignals.remove(id) }
+            signal?.cancel()
+            if (signal != null) "cancelled" else "none"
+        }
     }
 
     /**
@@ -194,18 +261,67 @@ class MusicFreeSandboxSession(
         }
     }
 
+    /**
+     * 阶段 I3：执行含顶层 await 的异步脚本（timer/Promise 驱动）。
+     * quickjs-kt 1.0.15 的 async binding 只在 evaluate 期间被 pump，且 asModule 模式不回传
+     * 求值结果——因此用 ESM 顶层 await 保持求值活跃，把结果写回 globalThis 再用普通
+     * evaluate 读回（与 LxScriptRuntime 的 DISPATCH_MODULE_TEMPLATE 同一模式）。
+     * [body] 是一个 async IIFE 的函数体，其返回值被写入 globalThis.__mfAwaitResult。
+     */
+    suspend fun executeAwait(body: String): ExecResult {
+        if (closed) return ExecResult.Failed("会话已关闭", FailureLevel.REJECTED)
+        initialize()
+        return withContext(Dispatchers.Default) {
+            lifecycleMutex.withLock {
+                if (closed) return@withLock ExecResult.Failed("会话已关闭", FailureLevel.REJECTED)
+                try {
+                    quickJs.evaluate<Any?>(
+                        "globalThis.__mfAwaitResult = await (async function(){ $body })(); true;",
+                        "mf_async_${providerId}.mjs", asModule = true,
+                    )
+                    val value = quickJs.evaluate<String>(
+                        "typeof globalThis.__mfAwaitResult === 'string' ? globalThis.__mfAwaitResult : JSON.stringify(globalThis.__mfAwaitResult)",
+                        "mf_async_read_${providerId}.js",
+                    )
+                    ExecResult.Ok(value, capabilities)
+                } catch (e: CancellationException) {
+                    ExecResult.Failed("执行被取消", FailureLevel.CANCELLED)
+                } catch (e: StdCancellation) {
+                    ExecResult.Failed("执行被取消", FailureLevel.CANCELLED)
+                } catch (e: QuickJsException) {
+                    val msg = e.message.orEmpty()
+                    if (msg.contains("interrupt", true) || msg.contains("timeout", true)) {
+                        ExecResult.Failed("求值超时被中断：$msg", FailureLevel.TIMEOUT)
+                    } else {
+                        ExecResult.Failed("脚本执行错误：$msg", FailureLevel.ERROR)
+                    }
+                } catch (e: Exception) {
+                    ExecResult.Failed("脚本执行异常：${e.message}", FailureLevel.ERROR)
+                }
+            }
+        }
+    }
+
     /** 供宿主在超时场景下主动中断 native 求值。 */
     fun interrupt() {
         runCatching { quickJs.interruptEvaluation() }
     }
 
-    /** 释放 native Context 与本会话模块缓存；幂等。 */
+    /** 释放 native Context、模块缓存与全部 timer；幂等。 */
     suspend fun close() {
         lifecycleMutex.withLock {
             if (closed) return@withLock
             closed = true
             moduleCache = emptyMap()
             modulesByName = emptyMap()
+            // I3：先取消所有延时信号与 timer scope，并 join 等待宿主 Job 真正退出，再销毁 Context。
+            val jobs = timerMutex.withLock {
+                timerSignals.values.forEach { runCatching { it.cancel() } }
+                timerSignals.clear()
+                timerJobs.toList()
+            }
+            timerScope.cancel()
+            jobs.joinAll()
             runCatching { quickJs.close() }
         }
     }
@@ -268,6 +384,47 @@ class MusicFreeSandboxSession(
                 globalThis.__mfRequireCache[key] = obj;
                 return obj;
             };
+            // 阶段 I3：受控 timer。宿主只提供延时信号，回调在 JS context 内执行。
+            // clearTimeout/clearInterval 用 token 失效化，即便延时已到也不再触发。
+            var __mfTimers = Object.create(null);
+            var __mfTimerSeq = 0;
+            var __MF_MAX_TIMERS = 64;
+            globalThis.setTimeout = function(fn, delay){
+                if (typeof fn !== 'function') return 0;
+                if (Object.keys(__mfTimers).length >= __MF_MAX_TIMERS) return 0;
+                var id = ++__mfTimerSeq;
+                var ms = Number(delay); if (!isFinite(ms) || ms < 0) ms = 0;
+                if (ms > 2147483647) ms = 2147483647;
+                __mfTimers[id] = { interval: false };
+                __MF_DELAY__(id, ms).then(function(){
+                    var t = __mfTimers[id];
+                    if (!t) return;
+                    try { fn(); } catch(e) {}
+                    if (!t.interval) delete __mfTimers[id];
+                }).catch(function(){});
+                return id;
+            };
+            globalThis.clearTimeout = function(id){
+                if (id && __mfTimers[id]) { delete __mfTimers[id]; __MF_CANCEL_TIMER__(id); }
+            };
+            globalThis.setInterval = function(fn, delay){
+                if (typeof fn !== 'function') return 0;
+                if (Object.keys(__mfTimers).length >= __MF_MAX_TIMERS) return 0;
+                var id = ++__mfTimerSeq;
+                var ms = Number(delay); if (!isFinite(ms) || ms < 0) ms = 0;
+                __mfTimers[id] = { interval: true };
+                function tick(){
+                    __MF_DELAY__(id, ms).then(function(){
+                        var t = __mfTimers[id];
+                        if (!t || !t.interval) return;
+                        try { fn(); } catch(e) {}
+                        tick();
+                    }).catch(function(){});
+                }
+                tick();
+                return id;
+            };
+            globalThis.clearInterval = function(id){ globalThis.clearTimeout(id); };
             true;
         """.trimIndent()
     }
