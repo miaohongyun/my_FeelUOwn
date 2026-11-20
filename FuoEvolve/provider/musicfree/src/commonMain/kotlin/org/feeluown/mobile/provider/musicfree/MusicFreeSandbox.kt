@@ -68,8 +68,15 @@ object MusicFreeSandbox {
         private val modules = linkedMapOf<String, RegisteredModule>()
 
         fun register(module: RegisteredModule) {
-            require(module.name.isNotBlank() && !module.name.contains("/")) { "非法模块名" }
+            // 阶段 I1：允许受控相对模块名（如 'lib/helper'），但仍拒绝路径穿越/绝对路径/反斜杠。
+            require(isSafeModuleName(module.name)) { "非法模块名" }
             modules[module.name] = module
+        }
+
+        /** 安全的模块名：允许多段相对路径，禁止 '..'、绝对路径与反斜杠；段名仅字母数字下划线连字符。 */
+        fun isSafeModuleName(name: String): Boolean {
+            if (name.isBlank() || name.startsWith("/") || name.contains("\\") || name.contains("..")) return false
+            return name.split("/").all { it.isNotBlank() && it.all { c -> c.isLetterOrDigit() || c == '_' || c == '-' } }
         }
 
         fun lookup(name: String): RegisteredModule? = modules[name]
@@ -82,9 +89,7 @@ object MusicFreeSandbox {
     /** 拒绝原因：require 不在 allowlist / 内容超限 / 非法命名。 */
     fun requireRejection(name: String, limits: Limits): String? {
         if (name.isBlank()) return "require 模块名为空"
-        if (name.contains("..") || name.startsWith("/") || name.contains("\\")) {
-            return "require 禁止路径穿越：$name"
-        }
+        if (!ModuleRegistry.isSafeModuleName(name)) return "require 禁止非法路径穿越：$name"
         val m = ModuleRegistry.lookup(name) ?: return "require 模块未登记在 allowlist：$name（fail-closed）"
         if (m.source.encodeToByteArray().size > limits.maxModuleBytes) return "模块 $name 超过大小上限"
         return null

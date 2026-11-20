@@ -74,23 +74,43 @@ class MusicFreeSandboxSession(
             lifecycleMutex.withLock {
                 if (initialized || closed) return@withLock
                 registerBindings()
-                quickJs.evaluate<Any?>(SHIM.replace("__mfRequire", REQUIRE_BINDING), "mf_sandbox_shim.js")
-                // 预载所有已审计模块到本 session 私有缓存；导出值只在各自 context 内求出。
-                // 先构建局部 map，全部完成后一次性发布不可变快照，binding 只读快照。
+                quickJs.evaluate<Any?>(
+                    SHIM.replace("__MF_NATIVE_REQUIRE__", REQUIRE_BINDING),
+                    "mf_sandbox_shim.js",
+                )
+                // 预载期把 require 临时换成"返回空对象"的桩：模块 A 求 exports 时若调用
+                // require(B)，此时 modulesByName 尚未发布，真实 binding 会误报"未预载"。
+                // 代价：模块间 require 依赖在预载期拿到 {}，属当前已知限制（见能力矩阵）。
+                quickJs.evaluate<Any?>(
+                    "globalThis.__mfRealRequire = globalThis.require; " +
+                        "globalThis.require = function(){ return {}; };",
+                    "mf_preload_stub.js",
+                )
+                // 阶段 I1 根因修复：H1 用 evaluate<String>(..., asModule = true) 读取模块
+                // exports，但 quickjs-kt 1.0.15 的 asModule 求值不回传结果（与 LxScriptRuntime
+                // 的 asModule 模板同样处理），导致 modulesByName 值全为 null，JS require 必然
+                // 报"未预载"。改为非 asModule 的 IIFE：每个模块拥有独立 module/exports 对象，
+                // 结果写回 globalThis 后再以普通 evaluate 读取。
                 val cache = LinkedHashMap<String, String>()
                 val byName = LinkedHashMap<String, String>()
                 MusicFreeSandbox.ModuleRegistry.all().forEach { module ->
                     if (module.source.encodeToByteArray().size > limits.maxModuleBytes) return@forEach
-                    val modName = "mfmod_${module.sha256}"
-                    quickJs.addModule(modName, module.source)
-                    val exportsJson = quickJs.evaluate<String>(
-                        "JSON.stringify(__mfCollect(module.exports))",
-                        "mfmod_read_${module.sha256}",
-                        asModule = true,
+                    quickJs.evaluate<Any?>(
+                        "globalThis.__mfModOut = (function(){ " +
+                            "var module = { exports: {} }; var exports = module.exports; " +
+                            module.source + "\n; " +
+                            "return JSON.stringify(globalThis.__mfCollect(module.exports)); })();",
+                        "mfmod_${module.sha256}",
                     )
+                    val exportsJson = quickJs.evaluate<String>("globalThis.__mfModOut || '{}'")
                     cache[module.sha256] = exportsJson
                     byName[module.name] = exportsJson
                 }
+                // 恢复真实 require 并清空预载期可能写入的伪缓存。
+                quickJs.evaluate<Any?>(
+                    "globalThis.require = globalThis.__mfRealRequire; globalThis.__mfRequireCache = {};",
+                    "mf_preload_restore.js",
+                )
                 moduleCache = cache
                 modulesByName = byName
                 initialized = true
@@ -201,9 +221,17 @@ class MusicFreeSandboxSession(
             globalThis.__mfExports = {};
             globalThis.module = { exports: __mfExports };
             globalThis.exports = __mfExports;
+            globalThis.__mfRequireCache = {};
             globalThis.require = function(name) {
-                var json = __mfRequire(String(name));
-                try { return JSON.parse(json); } catch (e) { return {}; }
+                var key = String(name);
+                if (Object.prototype.hasOwnProperty.call(globalThis.__mfRequireCache, key)) {
+                    return globalThis.__mfRequireCache[key];
+                }
+                var json = __MF_NATIVE_REQUIRE__(key);
+                var obj;
+                try { obj = JSON.parse(json); } catch (e) { obj = {}; }
+                globalThis.__mfRequireCache[key] = obj;
+                return obj;
             };
             true;
         """.trimIndent()
