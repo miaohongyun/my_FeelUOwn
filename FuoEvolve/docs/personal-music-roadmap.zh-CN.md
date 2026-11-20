@@ -1189,3 +1189,15 @@ Ciallo~（fd16333b…，guoyue2010 **Apache-2.0**，searchMusic 走 api.s0o1.com
 **适配层（新模块 :provider:musicfree，不改 LX 核心）**：MusicFreeProtocol（数据形状映射+fail-closed+强制HTTPS）/MusicFreePluginRegistry（12 插件真实 SHA/版本/GPL/能力/域名/证据台账）/MusicFreePluginPolicy（复用 CandidateNetworkPolicy：SHA 绑定+域名+SSRF，自托管/动态 deny-all）/MusicFreeAdapter（纯函数映射+能力/授权/URL 门禁，Mapped/Denied+等级诚实）。不执行 CommonJS、不发网络、不下音频、不写凭据、不注册为 Provider、无安装按钮。等级标注 `DECLARED+MAPPED`/`REAL_URL_RESOLVE 候选`，不冒充真实搜索/播放。
 
 **边界**：CommonJS/Node 模块隔离执行环境未实现；自托管/动态端点受控授权流程未实现；未做真实网络调用、无状态升级为 REAL_*_PASSED；DNS rebinding 风险不变。测试 PhaseG2AdapterTest 10 项；回归 sourceupdate157/lxruntime101/musicfree10 全绿；iOS Sim/Metadata/Android 编译通过。详见 `docs/community-source-audit.zh-CN.md` §14。
+
+
+## §20 阶段 G3：MusicFree 合规来源真实端到端验证（2026-11-20）
+
+基线 `5022842`（G2），分支 `work/android-community-discovery`，未碰 master。真实网络（OAuth 公开 key audiomack-js，非凭据/非绕过）+ Range 0-0 只读 1 字节，未下音频/未播放。
+
+**真实搜索（非Mock）**：晴天=200 results5(id=10921920/晴天/周杰伦/叶惠美)、周杰伦=200 results5、weeknd=200 results5、歌手+歌名=200 results5、不存在/特殊字符/空关键词=200 results0(符合预期)。`REAL_SEARCH_PASSED(n=8)`。
+**URL解析+身份匹配**：music/play/10921920=200→signedUrl(https)，搜索首条id=解析id→MATCH；无效id未探测(NOT_PROBED如实标注)。`REAL_URL_RESOLVE_PASSED(n=1)`。
+**音频响应+域名拒绝**：signedUrl(music.audiomack.com)=206 audio/mp4 Content-Range bytes 0-0/4364494 仅读1字节；**但解析域名≠候选授权api.audiomack.com → DOMAIN_NOT_AUTHORIZED，候选策略拒绝播放URL，不放宽白名单**——与gdstudio同类,证明"能解析≠能播放"。
+**播放/门禁**：REAL_PLAYBACK=NOT_RUN(需用户明确操作,206不冒充播放);真实搜索通过数=1<2,调度门禁未开,无默认/备用建议;无自动安装。
+
+**G总结**: G0 LX无search / G1 无合规LX search候选 / G2 MusicFree有合规来源+受控适配层 / G3 Audiomack真实搜索解析音频通过但播放域名未授权、播放NOT_RUN。合规音源"真正可用"仍差受控播放域名授权+CommonJS隔离执行环境,未解决前不设默认/不冒充播放。新增 MusicFreeG3Verification.kt + PhaseG3VerificationTest(6项);回归 sourceupdate157/lxruntime101/musicfree16 全绿;iOS Sim/Metadata/Android编译通过。详见 audit §15。

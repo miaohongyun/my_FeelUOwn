@@ -549,3 +549,74 @@ FuoEvolve 的 QuickJS Runtime 无法直接加载，必须走适配层。
   URL 私网/明文/未授权域名/userinfo 拒绝、search/mediaSource/lyric 映射、能力门禁、解析失败不伪造。
 - 回归：sourceupdate 157 / lxruntime 101 / musicfree 10，全绿 0 失败 0 跳过。
 - 编译：musicfree 的 iOS Simulator / commonMain Metadata / Android 全部通过（含 `--rerun-tasks`）。
+
+
+---
+
+## 15. 阶段 G3：MusicFree 合规来源真实端到端验证（2026-11-20）
+
+> 基线：`5022842`（阶段 G2）　分支：`work/android-community-discovery`　未碰 master。
+> 性质：**真实网络验证**（OAuth 1.0 公开 consumer key `audiomack-js`，脚本内公开写死，非用户凭据/非会员绕过），
+> 与 MockEngine 严格分栏。只读公开端点 + 严格超时 + Range 0-0 仅读 1 字节响应头。
+> 未下载商业音频正文、未提供 Cookie/Token、未做会员/访问控制绕过、**未真实播放**。
+> 成功与失败请求、错误码、域名拒绝原因全部列出——不只挑成功报告。
+
+### 15.1 真实搜索验证（Audiomack，HTTP 请求，非 Mock）
+
+| 关键词 | HTTP | 结果数 | 首条 / 说明 |
+| --- | --- | --- | --- |
+| 晴天 | 200 | 5 | id=10921920 / 晴天 / 周杰伦 / 叶惠美 |
+| 周杰伦 | 200 | 5 | 珊瑚海 / 周杰伦 |
+| weeknd（英文） | 200 | 5 | 平台支持英文 |
+| 周杰伦 晴天（歌手+歌名） | 200 | 5 | — |
+| nonexistent_xyz_9981（不存在） | 200 | 0 | 空结果符合预期，不伪造为失败 |
+| `<>?%`（特殊字符） | 200 | 0 | 未报错 |
+| 20×`a`（长关键词） | 200 | 2 | — |
+| 空关键词 | 200 | 0 | 符合预期 |
+
+**结论**：`REAL_SEARCH_PASSED`（n=8），脚本声明 search 且实测可用。一次/单日样本，不宣称长期稳定。
+
+### 15.2 URL 解析与身份匹配
+
+| 项 | 结果 |
+| --- | --- |
+| `music/play/10921920` | HTTP 200 → `{signedUrl, playUuid}`；signedUrl scheme=https |
+| 身份匹配 | 搜索"晴天"首条 id=10921920 == 解析用 id → **MATCH**（无错歌） |
+| 无效 id 用例 | 本轮**未发请求**（NOT_PROBED），如实标注样本不足，不伪造失败数据 |
+| 等级 | `REAL_URL_RESOLVE_PASSED`（n=1，身份匹配 MATCH） |
+
+### 15.3 音频响应与关键域名拒绝（诚实核心）
+
+| 端点 | HTTP | 结果 |
+| --- | --- | --- |
+| `music.audiomack.com`（signedUrl） | **206** | `audio/mp4` / `Content-Range: bytes 0-0/4364494`；仅读 1 字节响应头，未存音频 |
+| 候选授权校验 | **拒绝** | 解析域名 `music.audiomack.com` ≠ 候选授权 `api.audiomack.com` → `DOMAIN_NOT_AUTHORIZED`，候选级网络策略会拒绝该播放 URL |
+
+**这是本阶段最重要的诚实发现**：搜索、解析、身份匹配、音频响应全部真通过，
+**但播放地址域名不在候选授权白名单内**——与阶段 F 的 gdstudio（解析到 `m701.music.126.net`）同类问题。
+按红线**不为它放宽白名单**，因此播放链路仍不可用。这证明"能解析"与"能播放"是两件事。
+
+### 15.4 真实播放与门禁
+
+- `REAL_PLAYBACK = NOT_RUN`（错误码 `REQUIRES_USER_ACTION`）：HTTP 206 + audio/mp4 不等于真实播放；
+  播放验证需在用户本人有权内容上明确操作，本阶段未执行。
+- **调度门禁未开**：只有 1 个候选真实搜索通过（<2），不产生默认/备用音源建议，不启动自动主备。
+- 状态纪律：未把任何候选升级为 `REAL_PLAYBACK_PASSED`；发布仍需人工审核 + 受控目录签名，无自动安装。
+
+### 15.5 台账代码化与测试
+
+- 新增 `MusicFreeG3Verification.kt`：逐请求台账（成功/失败/NOT_RUN、HTTP、错误码、域名拒绝原因），
+  `summary()` 分栏输出 REAL_SEARCH / REAL_URL_RESOLVE / AUDIO_RESPONSE / NOT_RUN，附样本量与域名风险说明。
+- 新增 `PhaseG3VerificationTest`（6 项）：空/失败样本如实记录、身份匹配、域名拒绝不放宽、播放 NOT_RUN、
+  门禁关闭、台账 SHA 与登记表一致。
+- 回归：sourceupdate 157 / lxruntime 101 / musicfree 16（+6）全绿；musicfree iOS Sim/Metadata/Android 编译通过。
+
+### 15.6 阶段 G 总体结论
+
+- **G0**：LX 协议无 search（协议/调用链缺口，不在桥）。
+- **G1**：无真正实现 LX search 的合规候选。
+- **G2**：MusicFree 生态有值得接入的来源（原生 search、无会员绕过），建成受控适配层（不放宽 SSRF）。
+- **G3**：Audiomack 真实搜索/解析/身份匹配/音频响应通过，但解析域名不在授权白名单 → 播放链路不可用；播放 NOT_RUN；门禁未开。
+
+**核心答案**：合规音源"真正可用"仍差最后一环——**受控的播放域名授权**（解析域名与静态授权域名不一致），
+以及 CommonJS 隔离执行环境。两者未解决前，不设默认/备用音源、不自动安装、不冒充真实播放。
