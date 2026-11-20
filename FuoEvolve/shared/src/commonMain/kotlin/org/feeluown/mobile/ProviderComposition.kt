@@ -7,6 +7,7 @@ import org.feeluown.mobile.provider.core.ProviderCredentialStore
 import org.feeluown.mobile.provider.core.ProviderRuntimeDependencies
 import org.feeluown.mobile.provider.core.network.ProviderHttpClient
 import org.feeluown.mobile.provider.jamendo.JamendoProviderFactory
+import org.feeluown.mobile.provider.musicfree.AudiomackProviderFactory
 import org.feeluown.mobile.provider.lx.EmptyLxInstalledScriptSource
 import org.feeluown.mobile.provider.lx.LxInstalledScriptSource
 import org.feeluown.mobile.provider.lx.LxScriptProviderFactory
@@ -40,6 +41,9 @@ internal object ProviderComposition {
         BilibiliProviderFactory,
         YtMusicProviderFactory,
         ModeBProviderFactory,
+        // J2 单一试点：Audiomack 社区来源。故意置于末尾且不在 DEFAULT_ENABLED_PROVIDER_IDS，
+        // 不抢占既有来源优先级、不默认启用；用户显式开启后才进入搜索。
+        AudiomackProviderFactory,
     )
 
     fun providerInfos(dynamic: DynamicProviderDependencies = DynamicProviderDependencies()): List<ProviderInfo> =

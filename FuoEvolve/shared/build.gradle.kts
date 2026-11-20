@@ -57,6 +57,8 @@ kotlin {
             api(project(":provider:lxruntime"))
             api(project(":provider:sourceupdate"))
             implementation(project(":provider:jamendo"))
+            // 阶段 J2：Audiomack 社区来源（单一试点）。默认不启用，需在设置中显式开启。
+            implementation(project(":provider:musicfree"))
             api(project(":persistence:settings"))
             api(project(":feature:recognition"))
             api(project(":feature:search"))
