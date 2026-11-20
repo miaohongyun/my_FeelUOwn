@@ -1,5 +1,6 @@
 package org.feeluown.mobile
 
+import org.feeluown.mobile.feature.community.CommunityDiscoveryController
 import org.feeluown.mobile.playback.api.PlaybackSession
 
 /** App-shell composition wiring. This graph owns no business state or lifecycle policy. */
@@ -24,6 +25,9 @@ interface AppUiGraph {
     val castController: CastControllerPort get() = NoOpCastControllerPort
     /** The platform container, not an individual screen, owns the long-lived migration runner. */
     val playlistMigration: PlaylistMigrationFeatureController?
+        get() = null
+    /** Community source discovery / review center (阶段 D). Null on platforms that do not wire it. */
+    val communityDiscovery: CommunityDiscoveryController?
         get() = null
 }
 
@@ -66,6 +70,7 @@ fun createAppUiGraph(
     downloadQuality: DownloadQualitySelectionPort = NoOpDownloadQualitySelectionPort,
     castController: CastControllerPort = NoOpCastControllerPort,
     playlistMigrationFeatureController: PlaylistMigrationFeatureController? = null,
+    communityDiscoveryController: CommunityDiscoveryController? = null,
 ): AppUiGraph = EagerAppUiGraph(
     playbackSession = playbackSession,
     playback = createPlaybackUiGraph(
@@ -111,6 +116,7 @@ fun createAppUiGraph(
     downloadQuality = downloadQuality,
     castController = castController,
     playlistMigration = playlistMigrationFeatureController,
+    communityDiscovery = communityDiscoveryController,
 )
 
 /**
@@ -135,6 +141,7 @@ internal fun createLazyAppUiGraph(
     downloadQuality: () -> DownloadQualitySelectionPort = { NoOpDownloadQualitySelectionPort },
     castController: () -> CastControllerPort = { NoOpCastControllerPort },
     playlistMigration: () -> PlaylistMigrationFeatureController? = { null },
+    communityDiscovery: () -> CommunityDiscoveryController? = { null },
 ): AppUiGraph = LazyAppUiGraph(
     playbackSession = playbackSession,
     playback = playback,
@@ -153,6 +160,7 @@ internal fun createLazyAppUiGraph(
     downloadQuality = downloadQuality,
     castController = castController,
     playlistMigration = playlistMigration,
+    communityDiscovery = communityDiscovery,
 )
 
 private data class EagerAppUiGraph(
@@ -173,6 +181,7 @@ private data class EagerAppUiGraph(
     override val downloadQuality: DownloadQualitySelectionPort,
     override val castController: CastControllerPort,
     override val playlistMigration: PlaylistMigrationFeatureController?,
+    override val communityDiscovery: CommunityDiscoveryController?,
 ) : AppUiGraph
 
 private class LazyAppUiGraph(
@@ -193,6 +202,7 @@ private class LazyAppUiGraph(
     downloadQuality: () -> DownloadQualitySelectionPort,
     castController: () -> CastControllerPort,
     playlistMigration: () -> PlaylistMigrationFeatureController?,
+    communityDiscovery: () -> CommunityDiscoveryController?,
 ) : AppUiGraph {
     override val playbackSession: PlaybackSession by lazy(playbackSession)
     override val playback: PlaybackUiGraph by lazy(playback)
@@ -211,4 +221,5 @@ private class LazyAppUiGraph(
     override val downloadQuality: DownloadQualitySelectionPort by lazy(downloadQuality)
     override val castController: CastControllerPort by lazy(castController)
     override val playlistMigration: PlaylistMigrationFeatureController? by lazy(playlistMigration)
+    override val communityDiscovery: CommunityDiscoveryController? by lazy(communityDiscovery)
 }

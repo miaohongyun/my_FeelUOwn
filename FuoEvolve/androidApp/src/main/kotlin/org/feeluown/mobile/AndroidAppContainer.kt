@@ -22,6 +22,8 @@ import org.feeluown.mobile.persistence.listening.AndroidListeningHistoryDriverFa
 import org.feeluown.mobile.persistence.listening.SqlDelightListeningHistoryStore
 import org.feeluown.mobile.playback.api.PlaybackSession
 import org.feeluown.mobile.playback.api.PlaybackSessionStatus
+import org.feeluown.mobile.feature.community.CommunityDiscoveryFactory
+import org.feeluown.mobile.feature.community.RealCommunityDiscoveryController
 import org.feeluown.mobile.source.SourceCatalogRuntime
 import org.feeluown.mobile.source.SourceUpdateHost
 
@@ -65,6 +67,14 @@ internal class AndroidAppContainer(
             runtime = sourceCatalogRuntime,
             settings = settingsRepository,
             providerRegistry = providerGraph.registry,
+        )
+    }
+
+    /** 社区音源发现与审核中心（阶段 D）：与受控目录 sourceUpdateHost 严格分开。 */
+    val communityDiscoveryController: RealCommunityDiscoveryController by lazy {
+        RealCommunityDiscoveryController(
+            repository = CommunityDiscoveryFactory.createRepository(),
+            scope = appScope,
         )
     }
 
@@ -494,6 +504,7 @@ internal class AndroidAppContainer(
             recognitionAppPort = recognitionAppPort,
             castController = castController,
             playlistMigrationFeatureController = playlistMigrationFeatureController,
+            communityDiscoveryController = communityDiscoveryController,
         )
     }
 

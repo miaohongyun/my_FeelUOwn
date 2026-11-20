@@ -22,6 +22,8 @@ class FuoEvolveApplication : Application() {
         // 受控音源目录：staging/active/backup 版本仓库落在 filesDir，卸载才清空。
         installSourceStorageDirectory(java.io.File(filesDir, "source_catalog"))
         AndroidSourceUpdateWorker.enqueue(this)
+        // 社区音源发现：每日后台发现候选（只登记、不安装、不批准）。
+        AndroidCommunityDiscoveryWorker.enqueue(this)
         installPlaylistMigrationBackgroundScheduler { request ->
             AndroidPlaylistMigrationWorker.enqueue(applicationContext, request)
         }
@@ -46,6 +48,9 @@ class FuoEvolveApplication : Application() {
 
     internal val sourceUpdateHost: SourceUpdateHost
         get() = container().sourceUpdateHost
+
+    internal val communityDiscoveryController: org.feeluown.mobile.feature.community.RealCommunityDiscoveryController
+        get() = container().communityDiscoveryController
 
     internal val appUiGraph: AppUiGraph
         get() = container().appUiGraph

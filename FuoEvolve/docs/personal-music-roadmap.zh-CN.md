@@ -997,3 +997,50 @@ cleartext 放行）、iOS（AVPlayer，NSAllowsArbitraryLoads=true）、Desktop�
 Fish/Flower 离线解混淆；非常刀/玉宁熙域名逆向与授权确认；真机搜索/播放/下载验收；
 断点续传/离线播放/跨源匹配；发现框架的产品化接入（启动调度/UI/审核记录回流）。
 全部门禁与验签保持原样，未关闭、未降配、未改公钥。
+
+## §13 阶段 D：Android 社区音源发现与审核中心（work/android-community-discovery）
+
+**目标边界**：把已完成的 CommunityCatalogDiscovery 框架接入 Android App，实现"发现 → 隔离 →
+审查"，并做非常刀/玉宁熙的 LX 架构兼容性验证。**不是**商业音源正式上线；不批准、不安装、
+不扩白名单、不真实下载商业音质。
+
+**D1 数据流（file:line，均已核实）**：
+- 候选存储 `<filesDir>/source_catalog/community/candidates.json`：注入 `FuoEvolveApplication.kt:23`
+  `installSourceStorageDirectory(File(filesDir,"source_catalog"))` + `SourceFileStorePlatform.android.kt:15-19`；
+  与受控 `sources/index.json` 同根不同子树。
+- 后台调度模板 `AndroidSourceUpdateWorker.kt:24-54`（24h + NetworkType.CONNECTED + KEEP）；
+  Application enqueue `:24`；启动补查 `AndroidAppContainer.kt:46-49`。
+- 导航：自研 `AppRoute`（`AppState.kt:20-45`）+ `AppNavigator`（`:57-80`）；NavHost 分支
+  `AppNavHost.kt:211`；返回 `AppBackCoordinator.kt:109-114`；shell route `AppShellComposition.kt:88-97`。
+- 设置页：内部 `FeatureSettingsRoute`，"音源与账号"分类渲染 `SettingsFeatureScreen.kt:532`。
+- LX 加载/初始化/解析 `LxScriptRuntime.kt:127/166/214`；SSRF `LxNetworkPolicy.kt:29+`（空名单拒绝一切）。
+
+**D2～D4 实现**：
+- `provider/sourceupdate/CommunityDiscoveryRepository.kt`（commonMain）：发现刷新包装、人工审核
+  （隔离/拒绝/重新审核，写 rejectReason）、隔离区下载（SHA256 核验，不符整条拒绝）、
+  删除候选只删 `community/quarantine/` 前缀不碰正式目录；**任何路径禁止写 APPROVED**（check 断言）。
+- `shared/feature/community/`：`CommunityDiscoveryController`（StateFlow UI 状态）、`Factory`
+  （硬编码 shellsec 主地址+镜像、followRedirects=false、非信任根）、`Screen`（候选列表+详情弹窗+
+  人工动作）、`Entry`（CompositionLocal 入口）。
+- 接线：`AppUiGraph` 加可选 `communityDiscovery`（默认 null，不破坏其它平台）；`AppRoute.CommunitySources`；
+  NavHost/backCoordinator/shell 各加分支；设置页 Sources 分类加"社区音源发现与审核"入口；
+  AndroidAppContainer 注入真实 Repository+Controller；`AndroidCommunityDiscoveryWorker`（24h 后台发现）。
+- **UI 展示红线**：`CommunityDiscoveryPresentation.reviewLabel` 把 DISCOVERED 显示为"已发现（待审核）"，
+  CLEAN 显示"静态扫描通过"，验证等级非 REAL 一律追加"（非真实音频验证）"，绝不显示成已批准。
+
+**D5 架构验证（CommunitySourceArchitectureTest，desktop+androidHost 双份；MockEngine 零真实网络）**：
+| 脚本 | SHA256 | QuickJS 加载/初始化 | 声明平台 | SSRF/隔离 |
+|---|---|---|---|---|
+| 非常刀 v5 | `49486ca…64284d` | 通过（SIMULATED_INIT） | wy/tx/kw/kg/mg | 12 域名需显式白名单，裸 IP 不自动放行 |
+| 玉宁熙 v1.2.5 | `5dd4752…d275f79` | 通过（SIMULATED_INIT） | tx/wy/kw/kg/mg | 域名静态不可见，空名单 fail-closed 拒绝全部请求 |
+| 长青 | 原文与审查记录一致 | **未加载** | — | 保持 BLOCK(SVIP) 隔离 |
+| Fish/Flower | — | **未加载** | — | 保持 QUARANTINE_OBFUSCATED 隔离 |
+
+**验证等级诚实声明**：D5 只达到 `LX_RUNTIME_LOAD` / `SIMULATED_INIT`，**不是** REAL_*；未真实网络、
+未解析真实播放地址、未下载任何音频、未验证音质。非常刀 flac24bit/master/hires 映射与玉宁熙 hires/atmos
+仅为接口声明，不代表真实可用或"无损母带"。请求频率（玉宁熙 2s/4 次）本轮未压测（无真实请求）。
+
+**新增缺口/未做**：隔离区"受控下载器"（把脚本正文从可信 URL 下载到隔离区）尚未接入 UI——
+`scanScript` API 已就绪但页面无下载入口，网络下载由后续任务按受控通道补齐；真机 Android 页面/Runtime
+加载需设备；人工审核记录持久化在候选 store（rejectReason），未做独立审计日志。
+不改 master、正式目录、公钥、验签；未自动批准/安装、未扩白名单、未绕付费、未把模拟写成真实。

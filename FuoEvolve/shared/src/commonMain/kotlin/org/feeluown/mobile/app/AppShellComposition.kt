@@ -90,6 +90,7 @@ internal fun AppRoute.showsMiniPlayer(
     AppRoute.Settings,
     AppRoute.DebugLogs,
     AppRoute.DownloadManager,
+    AppRoute.CommunitySources,
     AppRoute.Feature,
     AppRoute.Playlist,
     AppRoute.Track,

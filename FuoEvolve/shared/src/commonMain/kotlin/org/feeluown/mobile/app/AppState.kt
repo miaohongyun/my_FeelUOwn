@@ -42,6 +42,7 @@ sealed interface AppRoute : NavKey {
     @Serializable data object Settings : AppRoute
     @Serializable data object DebugLogs : AppRoute
     @Serializable data object DownloadManager : AppRoute
+    @Serializable data object CommunitySources : AppRoute
 }
 
 private fun AppRoute.routeKind(): AppRoute = when (this) {
@@ -188,6 +189,10 @@ class FuoAppViewModel private constructor(
 
     fun openHome() {
         navigator.navigate(AppRoute.Home)
+    }
+
+    fun openCommunitySources() {
+        navigator.navigate(AppRoute.CommunitySources)
     }
 
     fun openRecognition() {

@@ -112,6 +112,7 @@ fun createAppBackCoordinator(
                 }
                 AppRoute.DebugLogs -> navigator.pop(AppRoute.DebugLogs)
                 AppRoute.DownloadManager -> navigator.pop(AppRoute.DownloadManager)
+                AppRoute.CommunitySources -> navigator.pop(AppRoute.CommunitySources)
                 AppRoute.LocalPlaylist -> {
                     localPlaylistFeatureController.close()
                     true

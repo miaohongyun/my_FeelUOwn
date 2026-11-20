@@ -168,6 +168,10 @@ internal fun AppNavHost(
                         CompositionLocalProvider(
                             LocalAppLayoutInfo provides paneLayoutInfo,
                             LocalAppIsAdaptiveDetailPane provides isAdaptiveDetailPane,
+                            org.feeluown.mobile.feature.community.LocalCommunitySourcesEntry provides
+                                (if (uiGraph.communityDiscovery != null) {
+                                    { appViewModel.openCommunitySources() }
+                                } else null),
                         ) {
                             when (route) {
                                 AppRoute.Home -> HomeScreen(
@@ -228,6 +232,12 @@ internal fun AppNavHost(
                                     uiGraph.playback.downloads,
                                     onBack = { appViewModel.onBack() },
                                 )
+                                AppRoute.CommunitySources -> uiGraph.communityDiscovery?.let { controller ->
+                                    org.feeluown.mobile.feature.community.CommunityDiscoveryScreen(
+                                        controller = controller,
+                                        onBack = { appViewModel.onBack() },
+                                    )
+                                }
                                 is AppRoute.FeatureDetail -> ProviderFeatureParityDetailRoute(route.feature.toProviderFeature())
                                 is AppRoute.PlaylistDetail -> ProviderPlaylistDetailRoute(
                                     playlist = route.playlist.toProviderPlaylist(),

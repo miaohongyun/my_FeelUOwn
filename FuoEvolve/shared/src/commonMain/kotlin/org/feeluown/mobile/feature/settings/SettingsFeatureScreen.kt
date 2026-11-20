@@ -529,12 +529,23 @@ private fun SettingsCategoryDetail(
             }
         }
         when (category) {
-            FeatureSettingsCategory.Sources -> ProviderCatalogSettingsExpressive(
-                state = catalog,
-                controller = providerCatalog,
-                onOpenProvider = onOpenProvider,
-                onOpenCredentialBackup = onOpenCredentialBackup,
-            )
+            FeatureSettingsCategory.Sources -> {
+                val openCommunity = org.feeluown.mobile.feature.community.LocalCommunitySourcesEntry.current
+                if (openCommunity != null) {
+                    ListItem(
+                        headlineContent = { Text("社区音源发现与审核") },
+                        supportingContent = { Text("查看社区候选、风险与审查结果（不会自动安装）") },
+                        modifier = Modifier.clickable(onClick = openCommunity),
+                    )
+                    HorizontalDivider()
+                }
+                ProviderCatalogSettingsExpressive(
+                    state = catalog,
+                    controller = providerCatalog,
+                    onOpenProvider = onOpenProvider,
+                    onOpenCredentialBackup = onOpenCredentialBackup,
+                )
+            }
             FeatureSettingsCategory.Playback -> PlaybackFeatureSettings(
                 state = settings,
                 catalog = catalog,
