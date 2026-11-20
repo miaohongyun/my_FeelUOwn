@@ -1,5 +1,6 @@
 package org.feeluown.mobile.provider.musicfree
 
+import io.ktor.http.Url
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -8,6 +9,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import org.feeluown.mobile.provider.core.network.currentTimeMillis
 import org.feeluown.mobile.provider.lx.CandidateNetworkPolicy
 import org.feeluown.mobile.provider.musicfree.mfJson
 import org.feeluown.mobile.provider.musicfree.ProviderNetworkGateway.GatewayResult
@@ -47,6 +49,18 @@ object MusicFreePluginCompatVerification {
         val resourceReleased: Boolean,
     )
 
+    /** J2：单次 Gateway 调用的审计快照（不含任何凭据头）。 */
+    data class GatewayCallAudit(
+        val host: String,
+        val method: String,
+        val port: Int,
+        val decision: String,      // ALLOW / DENIED / FAILED
+        val httpStatus: Int?,      // 仅 Ok 时非空
+        val responseBytes: Int,
+        val durationMs: Long,
+        val failureReason: String? = null,
+    )
+
     /** 响应序列化 Json：不对 JS 侧 data 做任何隐式改写。 */
     private val responseJson = Json { encodeDefaults = true; ignoreUnknownKeys = true }
 
@@ -66,15 +80,25 @@ object MusicFreePluginCompatVerification {
         permission: ProviderNetworkPermission,
         scriptBytes: ByteArray,
         calls: MutableList<Request> = mutableListOf(),
+        auditSink: ((GatewayCallAudit) -> Unit)? = null,
     ): suspend (url: String, paramsJson: String, headersJson: String) -> String {
         val expectedSha = shaOfScriptBytes(scriptBytes)
         return { url, paramsJson, headersJson ->
+            val started = currentTimeMillis()
             val finalUrl = appendQuery(url, encodeQuery(paramsJson))
             val headers = decodeStringMap(headersJson)
+            val parsed = runCatching { Url(finalUrl) }.getOrNull()
+            val host = parsed?.host ?: "unknown"
+            val port = parsed?.port?.takeIf { it > 0 } ?: 443
             val result = gateway.get(permission, Request(finalUrl, "GET", headers), expectedSha)
+            val duration = currentTimeMillis() - started
             when (result) {
                 is GatewayResult.Ok -> {
                     calls += Request(finalUrl, "GET", headers)
+                    auditSink?.invoke(
+                        GatewayCallAudit(host, "GET", port, "ALLOW", result.response.statusCode,
+                            result.response.body.encodeToByteArray().size, duration),
+                    )
                     val body = buildJsonObject {
                         put("status", result.response.statusCode)
                         put("data", result.response.body)
@@ -85,9 +109,13 @@ object MusicFreePluginCompatVerification {
                 }
                 is GatewayResult.Denied -> {
                     calls += Request(finalUrl, "GET", headers) // 记录尝试（Gateway 未触达 executor）
+                    auditSink?.invoke(GatewayCallAudit(host, "GET", port, "DENIED", null, 0, duration, result.reason))
                     throw IllegalStateException("网络被 Gateway 拒绝：${result.reason}")
                 }
-                is GatewayResult.Failed -> throw IllegalStateException("网络失败：${result.reason}")
+                is GatewayResult.Failed -> {
+                    auditSink?.invoke(GatewayCallAudit(host, "GET", port, "FAILED", null, 0, duration, result.reason))
+                    throw IllegalStateException("网络失败：${result.reason}")
+                }
             }
         }
     }
