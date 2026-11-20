@@ -1297,3 +1297,17 @@ J2.3：shared 依赖 musicfree、ProviderComposition 末尾注册 AudiomackProvi
 J2.4 验证：STATIC_REVIEW/COMMONJS_REQUIRE_PASSED/REAL_SEARCH/REAL_RESULT_MAPPING PASS；REAL_SEARCH_UI NOT_RUN(无运行 UI 环境)。真实请求经本机 7897 代理(与 G3 一致)：晴天 HTTP200 39412B→20 条首条 mf-audiomack:10921920/晴天/周杰伦/叶惠美；周杰伦 200→20 条；不存在关键词 200→0 条。诚实边界：不能推断中国大陆直连可用(直连超时)；URL/音频/播放/身份 NOT_RUN，播放域名 DENIED 不放宽。
 回归：musicfree desktop/androidHost 各 144 项 0 失败、shared 388 项 0 失败、iOS 编译+测试源码编译 --rerun-tasks 通过、iosSimulatorArm64Test NOT_RUN。不推送。详见 audit §26。
 
+## §32 阶段 J2.5：搜索 UI 闭环与中国大陆网络可用性验收（2026-11-20）
+
+基线 HEAD=e68681a(J2.4)，J2 三提交 5c1c67c→beef223→e68681a 父子链核对，工作区干净，远端 work=f7fa3d3(未含 J2)、master=fc05530 未动。不改历史/不放宽 Gateway/不加域名/不接第二来源/不碰播放/不推送。
+
+**中国大陆网络实测（本阶段最重要）**：本环境仅内网 Windows（DNS 192.168.6.1，非家庭宽带/移动网，不推断）。分层证据——本地 DNS 把 api.audiomack.com 解析到假 IP 174.36.228.136(IBM 段)，DoH 真实 A=52.85.151.119/56/87/71(AWS CloudFront)；假 IP TCP 12s 超时 connect=0；强制真实 IP TCP 可连但 TLS 握手被 reset(schannel failed to receive handshake, curl 35，典型 SNI 阻断)；三关键词直连全部 000/0B。代理则晴天 200/39412B/20 条(10921920/晴天/周杰伦)、周杰伦 200/20 条、nonexistent 200/20 条(模糊匹配)，零结果词 200/97B/0 条。根因=DNS 污染+SNI 阻断，非客户端 bug、非服务端限制。代理成功不推断直连成功，严格分开报告。家庭宽带/移动网/Android 真机/Desktop 真机 App 均 NOT_RUN。
+
+UI 闭环：REAL_SEARCH_UI **NOT_RUN**(无 adb 真机/GUI 自动化/Xcode，不以静态审查冒充 UI 证据)。静态核查证明既有链路具备来源 chip 选择、标题/歌手/专辑/封面/来源展示、三态区分(零结果/失败/部分不可用)、searchGeneration latest-wins 旧请求丢弃、取消与 dispose 释放、原始 id 保留；J2 未改 UI 抽象。
+
+启用策略：显式启用即出现在搜索 chip、关闭后按 enabledProviderIds 过滤不再发请求、supervisorScope 保证单源不可用不影响其他源、不改默认优先级(注册测试断言)。维持非默认试点，不因演示放行。
+
+回归：musicfree desktop/androidHost 各 144 项 0 失败、shared 388 项 0 失败、feature/search desktopTest 通过、iOS 主代码/测试源码/shared 编译 --rerun-tasks BUILD SUCCESSFUL(118 任务)、iosSimulatorArm64Test 与 Android 真机 NOT_RUN。
+
+**结论：不建议 Audiomack 进入默认音源候选**——直连不可用(DNS 污染+SNI 阻断)仅代理可达、播放域名 music.audiomack.com 仍 DENIED、播放/音频/身份未验证，与"家人打开就能用"终点相悖。遗留风险：家庭/移动/真机网络未实测、SNI 阻断客户端无法规避也不应放宽 Gateway、代理单次样本不承诺长期稳定、iOS 模拟器测试未执行。详见 audit §27。
+

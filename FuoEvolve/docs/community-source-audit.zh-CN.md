@@ -1230,3 +1230,121 @@ musicfree desktopTest **144 项 0 失败**、testAndroidHostTest **144 项 0 失
 
 提交拆分：J2.1/J2.2（Provider 核心）、J2.3（应用接入）、J2.4（真实验证与文档）；不推送，等待单独确认。
 
+## §27 阶段 J2.5：搜索 UI 闭环与中国大陆网络可用性验收（2026-11-20）
+
+基线：HEAD=`e68681a`(J2.4)、父=`beef223`、祖父=`5c1c67c`、曾祖=`f7fa3d3`(J1.1)，完整 SHA 分别
+`e68681ac67cba6887d24983e1f6841a6515114a0` / `beef223f469954773d2868f55927bf28f9bd07da` /
+`5c1c67c918cebeae9637a6d6914ac4f6cc247a3c` / `f7fa3d35ad4eb096812256f77b2c4832f74c098b`，父子链逐项核对 ✓。
+执行前工作区干净；远端 work 分支=`f7fa3d3`（**本地 J2 三提交未推**）、master=`fc05530` 未动。脚本台账 SHA
+`1b1f49fc…cf01d5`/15789B 三处（embedded/registry/文档）一致，`initialize()` 运行时现场校验（J2 真实搜索已通过即证字节自洽）。
+本阶段不改历史、不放宽 Gateway、不加域名、不接第二来源、不碰播放、不推送。
+
+### 27.1 J2.5.2 中国大陆网络可用性（本阶段最重要决策依据）
+
+**测试环境如实声明**：Windows 桌面（executor=Ktor OkHttp，与 App 桌面端共用网络底座）；本机 DNS 服务器
+`192.168.6.1`（`opnsense.dev.yuntaiyi.com`，**内网网关**）。**该网络无法确认为"中国大陆家庭宽带"或"移动网络"**——
+不做推断。中国大陆家庭宽带/移动网络/Android 真机网络/Desktop 真机 App：均 NOT_RUN（本环境仅此一台内网 Windows，
+无家庭宽带/移动网/真机）。以下"直连"=强制 `--noproxy '*'` 从本机内网出口直连，不借用 7897。
+
+分层诊断（真实 OAuth1 签名、真实端点 `https://api.audiomack.com/v1/search`、公开 consumer key `audiomack-js`，非用户凭据）：
+
+| 层 | 直连结果 | 证据 |
+| --- | --- | --- |
+| DNS | **污染**：本地解析 `api.audiomack.com`→`174.36.228.136`（IBM/SoftLayer 段）；`nslookup` 另见 `2a03:2880:…`（Facebook 段 IPv6）。经代理 DoH 查真实 A=`52.85.151.119/56/87/71`（AWS CloudFront 段）。两者不一致。 | 本地 0.016s 返回假 IP；DoH Status=0 |
+| TCP（假 IP） | **不通**：connect=0、12s `TimeoutError:timed out`，连接从未建立 | socket.connect 12.011s 超时 |
+| TCP（真实 IP，仅诊断） | **可连**：`52.85.151.119` connect=2.23s、`52.85.151.56` connect=0.23s | curl `--resolve` 强制真实 IP |
+| TLS（真实 IP，仅诊断） | **被阻断**：`schannel: failed to receive handshake, SSL/TLS connection failed` + `Connection was reset`（curl 35），握手阶段连接被重置——典型 SNI 阻断 | curl -v 原始错误 |
+| HTTP（直连） | 三关键词均 `http_code=000 / 0B / connect=0 / tls=0 / 12s 超时` | curl `-w` 分层计时 |
+| HTTP（经 7897 代理） | 全部 HTTP 200 真实响应（见下） | 与 G3/J2 取证方式一致 |
+
+**根因判定**：不是客户端 bug、不是服务端限制、不是 TLS 版本问题。是**目标网络对该域名的 DNS 污染 + TLS/SNI 层阻断**（用真实 CloudFront IP 可建 TCP 但握手被 reset）。
+按任务书分类：DNS=污染、TLS=握手被 reset、连接=假 IP 超时、服务端=不可判定（请求未真正到达服务端）。
+**经代理成功不得推断直连成功**——本阶段严格分开报告。
+
+真实搜索请求审计（代理，OAuth1 签名，每次现场 nonce/timestamp）：
+
+| 关键词 | 模式 | HTTP | 字节 | 结果数 | 首条身份 |
+| --- | --- | --- | --- | --- | --- |
+| 晴天 | 直连 | 000 | 0 | — | TCP 超时，无请求到达 |
+| 晴天 | 代理 | 200 | 39412 | 20 | id=10921920 / 晴天 / 周杰伦 |
+| 周杰伦 | 直连 | 000 | 0 | — | TCP 超时 |
+| 周杰伦 | 代理 | 200 | 42723 | 20 | id=19092327 / 青花瓷 / 周杰伦 |
+| nonexistent | 直连 | 000 | 0 | — | TCP 超时 |
+| nonexistent | 代理 | 200 | 40179 | 20 | 标题含 "nonexistent" 字样的模糊匹配（Audiomack 语义，非 bug） |
+| nonexistent_xyz_9981_real_j2 | 代理 | 200 | 97 | **0** | 真实零结果 ZERO_RESULTS，failure 为空 |
+| zzzzqqq9999nomatch_audiomack_j25 | 代理 | 200 | 97 | **0** | 真实零结果，可复现 |
+
+> 说明：任务书关键词 `nonexistent` 在 Audiomack 上会模糊命中 20 条（标题含该词），J2 的"0 条"用的是更长的
+> `nonexistent_xyz_9981_real_j2`。本阶段两者都实测，真实零结果用后者确认，不与模糊匹配混淆。
+
+**结论**：目标网络环境下 Audiomack **直连完全不可用**（DNS 污染 + SNI 阻断），仅代理可达。不具备进入默认音源候选的条件。
+
+### 27.2 J2.5.1 搜索 UI 闭环（REAL_SEARCH_UI = NOT_RUN）
+
+**本环境无 adb 真机（`adb devices` 空）、无 GUI 自动化、无 Xcode**，无法在真实 Android 或可运行桌面 App 上完成
+"打开→搜索页→输入→选 Audiomack→真实搜索→页面展示"的实际交互，也不产出截图/录屏。按任务书"截图不能代替网络证据、
+网络证据也不能代替 UI 证据"——**不用静态审查冒充 UI 证据，REAL_SEARCH_UI 标记 NOT_RUN**。
+
+静态核查（证明 UI 链路已具备能力，非 UI 运行证据）：
+- 来源选择：现有搜索页 `SearchScreen.kt` 的 `SearchProviderChip` 遍历 `providers` 生成筛选 chip，
+  `SearchAction.ProviderChanged(id)` 切换；`providers` 来自已启用 Provider。`SearchProviderSelection.searchProviderIdsForFeature()`
+  按 `enabledProviderIds` 过滤——用户显式启用 Audiomack 后即出现在 chip、关闭后不再出现。
+- 结果展示：`TrackRow` 含标题/歌手/专辑/封面/来源（`providerTags` 含 audiomack）；`ProviderSearchTab` 分栏显示计数。
+- 状态三分：`SearchFeature.kt:394-402` —— `total==0 && providerError!=null`→错误文案；`total==0`→"没有搜索结果"；
+  有结果部分失败→"搜索到 N 项（部分音源不可用）"。加载 `isLoading`，失败经 `failureMessage()` 带来源标记。
+- latest-wins：`searchGeneration` 自增 + `searchJob?.cancel()` + `if (generation != searchGeneration) return`——
+  新搜索取消旧任务、旧结果不回传；`finally` 置 `isLoading=false`。
+- 资源释放：结果 ID 为 `mf-audiomack:<原始id>`、`originalId` 保留，点击不丢来源身份；`dispose()` 释放 Context/timer。
+- 上述机制均为 J2 之前的既有实现，J2/J2.5 未改动 feature/search 抽象与 UI。
+
+### 27.3 J2.5.3 Provider 启用策略
+
+- 用户显式启用后可搜索：`selectedProviders(providerId)` 用 `requireProvider` 直接取，Audiomack 注册在 `ProviderComposition` ✓
+- 关闭后不再发新请求：关闭即移出 `enabledProviderIds`，`searchProviderIdsForFeature()` 与 `selectedProviders(null)` 均按该集过滤 ✓
+- 已发请求取消语义：`AudiomackMusicProvider` 的 search 为挂起调用，随 `searchJob.cancel()` 传播 CancellationException；
+  session.dispose() 幂等 ✓（单测覆盖，真机 NOT_RUN）
+- 来源不可用不影响其他来源：`KotlinProviderRepository.searchAll` 用 `supervisorScope` + 逐 Provider `try/catch`→failure ✓
+- 不改默认优先级：`AudiomackProviderRegistrationTest` 断言不在 `DEFAULT_ENABLED_PROVIDER_IDS`/`DEFAULT_PROVIDER_ORDER_IDS` ✓
+- **结论**：即使全部通过，也不将 Audiomack 设为默认——直连不可用 + 播放域名 DENIED + 播放未验证，维持试点保护。
+
+### 27.4 回归与验证等级（分栏，禁止合并总数）
+
+| 等级 | 结论 |
+| --- | --- |
+| STATIC_REVIEW | PASS |
+| COMMONJS_REQUIRE_PASSED | PASS（I5 沿用） |
+| REAL_SEARCH（代理） | PASS |
+| REAL_RESULT_MAPPING（代理） | PASS |
+| REAL_SEARCH_UI | **NOT_RUN**（无真机/GUI/Xcode） |
+| 中国大陆直连可用性 | **FAIL（DNS 污染 + SNI 阻断）** |
+| 中国大陆家庭宽带/移动网/真机覆盖 | **NOT_RUN**（本环境仅内网 Windows） |
+| REAL_PLAYBACK / URL 解析 / 音频 / 身份核验 | NOT_RUN（本阶段不做，播放域名仍 DENIED） |
+
+回归（均 `--rerun-tasks` 强制重跑，JDK25）：
+- musicfree desktopTest **144 项 0 失败**、testAndroidHostTest **144 项 0 失败**
+- shared desktopTest **388 项 0 失败**（既有 Provider 与默认搜索无退化）
+- feature/search desktopTest：随 `:feature:search:desktopTest` 执行通过
+- iOS 主代码/测试源码/shared 交叉编译：`compileKotlinIosSimulatorArm64`+`compileTestKotlinIosSimulatorArm64`+
+  `compileKotlinIosSimulatorArm64`(shared) 以 `--rerun-tasks` **BUILD SUCCESSFUL**（118 任务）；`iosSimulatorArm64Test` **NOT_RUN**（Windows 无 Xcode）
+- Android 真机实际运行：**NOT_RUN**（`adb devices` 无设备）
+
+分类统计（不合并为总通过数；以 desktopTest 单端为例，各测试类用例数来自 XML）：
+- Mock/单元测试 131：G2 适配 10 / G3 6 / H1 10 / H2 9 / H3 5 / H4 7 / I0 13 / I1 9 / I2 10 / I3 8 / I4 9 / I5 5 /
+  J0 14 / J1.1 11 / J2 失败分类 5（受控 executor，Mock 语义）/ J2 Provider 单测 5
+- 真实网络测试 13：J1 真实网络底座 5 + J2 真实搜索 3（上述单端 8 项，双端叠加 16）；
+  另本阶段手工分层实测 6 组关键词×直连/代理 + 2 组零结果（不接入测试框架、仅证据采集）
+- 集成测试：shared desktopTest 388 项（既有 Provider/默认搜索无退化，含 ProviderComposition 注册与默认集断言）
+- 真实 UI 测试：0（NOT_RUN）
+
+### 27.5 结论与遗留风险
+
+**是否建议 Audiomack 进入默认音源候选：否。** 证据：目标网络 DNS 污染 + TLS/SNI 阻断导致直连完全不可用，
+仅代理可达；播放域名 `music.audiomack.com` 仍 DENIED、播放/音频/身份未验证。与"家人打开 App 就能用"的终点相悖。
+维持用户显式开启的试点，不默认启用。
+
+遗留风险：① 大陆家庭宽带/移动网/Android 真机网络未实测（NOT_RUN，不推断）；② TLS/SNI 阻断为网络层事实，
+客户端无法规避，也不应为此放宽 Gateway；③ 代理可达≠长期稳定，单次样本不承诺持续可用；④ iOS 模拟器测试未执行；
+⑤ 即使未来直连可用，仍需播放稳定性证据才可议默认。
+
+提交：J2.5 单独提交（验证与报告），不改写 J2 历史、不推送，等待确认。
+
