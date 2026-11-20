@@ -1224,3 +1224,8 @@ H0 审计结论（详见 `docs/community-source-audit.zh-CN.md` §16，全部带
 ## §23 阶段 H2：ProviderNetworkGateway 宿主网络代理（2026-11-20）
 
 基线 `1e729bb`（H1），未碰 master、未推送。新增 ProviderNetworkGateway.kt：唯一网络出口，权限绑定 ProviderID/版本/SHA/精确域名/HTTPS端口/体积/超时/重定向/凭据，复用 CandidateNetworkPolicy.rejectionReason；默认拒绝通配符/明文/裸IP/私网/metadata/userinfo/凭据头/超限响应，被拒零网络；SHA变更失效；取消传播；DNS rebinding 如实保留未解决。PhaseH2GatewayTest 9项全绿；musicfree35；三端编译通过。详见 audit §18。
+
+
+## §24 阶段 H3：Audiomack 播放域名审查（2026-11-20）
+
+基线 `6714475`（H2），未碰 master、未推送。取证：G3实测 signedUrl=music.audiomack.com(206 audio/mp4)/API host=api.audiomack.com(200)；DNS两域名均落Meta/Facebook IP段(2a03:2880::/32等)但主机名不同；服务条款禁止修改服务/非搜索抓取/分发未授权副本，API文档未授权匿名签名URL供第三方App消费；**本轮本地代理失效无法新增每跳重定向/URL有效期取证，如实记未复核**。决策：playbackHostDecision=DENIED(music.audiomack.com)，mayAllowPlaybackHost恒false，网关层拒绝该域名；不放宽白名单。后续需官方书面授权+代理恢复复核重定向/有效期+地区确认+人工审核精确域名+SHA绑定。PhaseH3DomainAuditTest 5项；musicfree40全绿；三端编译通过。详见 audit §19。

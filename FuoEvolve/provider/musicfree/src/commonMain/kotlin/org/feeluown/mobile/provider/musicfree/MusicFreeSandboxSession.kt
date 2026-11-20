@@ -102,8 +102,7 @@ class MusicFreeSandboxSession(
     fun cachedModules(): Set<String> = moduleCache.keys.toSet()
 
     /** 读某模块在本 session 内的导出 JSON（测试隔离用）。 */
-    fun moduleExports(sha256: String): String? =
-        moduleCache[sha256] ?: moduleCache.entries.firstOrNull { it.key.toString() == sha256 }?.value
+    fun moduleExports(sha256: String): String? = moduleCache[sha256]
 
     private fun registerBindings() {
         // require 唯一同步入口：allowlist 校验 + 本 session 私有缓存读取，无文件/进程/远程加载。
@@ -111,9 +110,8 @@ class MusicFreeSandboxSession(
             val nameText = args.firstOrNull()?.toString().orEmpty()
             MusicFreeSandbox.requireRejection(nameText, limits)?.let { throw IllegalStateException(it) }
             // 只读本 session 预载时发布的不可变快照，不读全局 registry（跨线程安全）。
-            // 以 toString() 文本匹配：quickjs-kt 1.0.15 的 JS→Kotlin 字符串实参在部分平台是包装类型，
-            // equals/hashCode 与纯 Kotlin String 不一致，直接当 Map key 会查找失败（H1 报告如实记录）。
-            modulesByName.entries.firstOrNull { it.key.toString() == nameText }?.value
+            // 注：JS→Kotlin 字符串实参统一经 toString() 归一（H1 报告如实记录封送差异）。
+            modulesByName[nameText]
                 ?: throw IllegalStateException("模块 $nameText 未在本 Provider 沙箱预载")
         }
         // 纯计算宿主能力：确定性哈希占位（真实 MD5 由脚本侧纯 JS 实现，不经宿主指纹）。

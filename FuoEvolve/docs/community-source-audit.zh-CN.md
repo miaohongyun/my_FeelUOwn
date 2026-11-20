@@ -775,3 +775,42 @@ DNS rebinding 与库 timer 限制全程如实声明。H0 到此为止，未做�
 ### 18.4 回归
 
 musicfree 35（26+9）全绿 0 失败；iOS Simulator / commonMain Metadata / Android 编译通过（`--rerun-tasks`）。
+
+
+---
+
+## 19. 阶段 H3：Audiomack 播放域名审查（2026-11-20）
+
+> 基线：`6714475`（H2）　分支：`work/android-community-discovery`　未碰 master、未推送。
+
+### 19.1 取证（成功与受限如实）
+
+- **G3 已实测**：signedUrl host=`music.audiomack.com`（HTTPS），Range 0-0 → 206 `audio/mp4`，
+  Content-Range `bytes 0-0/4364494`；search/API host=`api.audiomack.com`（200）。
+- **DNS（本轮系统 resolver 实测）**：
+  - `api.audiomack.com` → `2a03:2880:f127:83:face:b00c:0:25de`, `98.159.108.71`
+  - `music.audiomack.com` → `2a03:2880:f10d:183:face:b00c:0:25de`, `108.160.170.43`
+  - 两者均落在 Meta/Facebook IP 段（`2a03:2880::/32` / `98.159.108.*` / `108.160.170.*`），
+    但**主机名不同**；不能据同段 IP 推断播放域名获得同等授权。
+- **服务条款（audiomack.com/about/terms-of-service 原文）**：禁止"Alter or modify any part of the Services"、
+  禁止"Use any spider, readers, site search application, or other device to retrieve or index any portion of the Service
+  … with the exception of major public search engines"、禁止"Distribute an illegal or unauthorized copy of another
+  person's trademarked or copyrighted work"；Audiomack 可随时变更/暂停服务而不事先通知。
+- **API 文档**（audiomack.com/data-api/docs）描述的是登录态数据 API，未见对"匿名签名 URL 供第三方 App 流媒体消费"的明确授权。
+- **限制**：本轮本地 HTTPS 代理进程失效（仅 FIN_WAIT_2/CLOSE_WAIT，无 LISTENING），
+  无法新增每跳重定向、URL Expires/X-Amz-Expires 签名参数、请求头要求的实时取证——**如实记为未复核**，不伪造。
+
+### 19.2 决策：保持拒绝（不放行）
+
+`MusicFreePlaybackDomainAudit.kt` 记录 `playbackHostDecision = DENIED(hostname=music.audiomack.com)`，
+理由：①解析域名≠静态授权域名且为响应体动态端点；②服务条款禁止修改服务/非搜索抓取/分发未授权副本，
+第三方客户端用签名 URL 播放未被明确授权；③API 文档未授权匿名签名 URL 消费；④本轮重定向/有效期未复核；
+⑤目标地区可访问性与使用方式未确认；⑥同 IP 段不同主机名不能推断授权；⑦DNS rebinding 未解决。
+`mayAllowPlaybackHost()` 对 Audiomack 播放域名恒 false；`playbackUrlRejectionReason()` 网关层拒绝该域名。
+后续要求：官方书面授权/明确 API 条款 + 代理恢复后复核重定向与有效期 + 地区/下载vs流媒体确认 + 人工审核精确域名（非通配符）+ SHA 绑定。
+
+### 19.3 测试与回归
+
+`PhaseH3DomainAuditTest`（5 项）：解析域名≠授权域名、决策 DENIED 含条款/DNS 理由、播放域名不放行、
+播放 URL 默认拒绝不放宽白名单、DNS 证据记录 Meta IP 段。musicfree 40（35+5）全绿；
+iOS Simulator / Metadata / Android 编译通过（`--rerun-tasks`）。
