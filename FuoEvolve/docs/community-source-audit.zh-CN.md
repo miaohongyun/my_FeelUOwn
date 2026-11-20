@@ -1164,3 +1164,69 @@ desktopTest **131 项 0 失败**（J0 115 + J1 5 + J1.1 11）、testAndroidHostT
 
 结论：J1 引入的"异常吞成 EOF"缺陷已修复，异常分类与串行并发语义明确且有真实触发的测试证据，生命周期契约已明确。未做插件接入、未放宽策略、未改域名授权、未推送。DNS rebinding 与 iOS 运行测试限制不变。
 
+
+
+---
+
+## §26 阶段 J2：单一音源（Audiomack）真实搜索接入（2026-11-20）
+
+基线：本地与远端 work 分支均 `f7fa3d3`(J1.1)、master=`fc05530`，工作区干净、远端无新提交；只改工作分支、不 reset/覆盖/改写、不推送。
+
+### 26.1 执行前条件核查（第三节逐项）
+
+- J1.1 HEAD=`f7fa3d3`、父=`1631567`、工作区干净、远端一致 ✓
+- Gateway/Ktor Adapter/Executor 接口齐全；`dependencies.http.client`（ProviderHttpClient.client）可构造 executor，**不自建客户端** ✓
+- QuickJS/CommonJS/沙箱入口：I5 已证 audiomack.js 真实初始化 + require ✓
+- 脚本：Gitee maotoumao/MusicFreePlugins v0.1 dist/audiomack/index.js，SHA `1b1f49fc…cf01d5`、15789B、GPL-3.0、静态 CLEAN ✓
+- G3 证据：api.audiomack.com 真实搜索 n=8 全 200，"晴天"=10921920/周杰伦/叶惠美 ✓
+- 搜索域名权限：`MusicFreePluginPolicy.forPlugin(record, sha)` 生成 allowedHosts={api.audiomack.com}、HTTPS/443、SHA 绑定的 CandidateNetworkPolicy ✓
+- 播放域名：`music.audiomack.com` H3 DENIED——**J2 只做搜索，未触碰、未加入白名单** ✓
+- 插件正文域名扫描（J2 要求先扫描再建权限）：https://api.audiomack.com（search 用）、https://audiomack.com（topLists HTML，非 search）、https://gitee.com（注释）。J2 search 只用 api.audiomack.com，权限未扩大。
+- feature/search 经 ProviderSearchRepository 抽象调度，新增 Provider 不需改 UI ✓
+
+### 26.2 J2.1 Provider 实例与生命周期
+
+新增 `AudiomackProvider.kt`（`AudiomackMusicProvider : BaseKotlinProvider` + `AudiomackProviderFactory`）：
+- 身份/版本/SHA 与 [AudiomackEmbeddedScript]（逐字节嵌入、round-trip SHA 精确等于审查值）绑定；运行时现场算 SHA，不符即拒绝，不静默替换版本。
+- 每实例独立 `MusicFreeSandboxSession`（独立 QuickJS Context）；复用 I1 CommonJS 缓存与 NodeCompatShims（axios 注入、cheerio/crypto-js/dayjs 子集）。
+- executor 复用 `dependencies.http.client`（只构造一次 config client），不每次搜索新建；`dispose()` 释放 Context/timer，不 close 共享 client（避免重复关闭，符合 J1.1 生命周期契约）。
+- 依赖 SearchFeature 既有 `searchGeneration` + `searchJob.cancel()` latest-wins 机制：新关键词取消旧搜索，旧结果不回传 UI。
+
+### 26.3 J2.2 真实搜索调用链与模型映射
+
+正式链路：SearchFeature → ProviderSearchRepository → KotlinProviderRepository → AudiomackMusicProvider.search() → 沙箱 executeAwait 执行真实 audiomack.js `search(q,1,'music')` → js axios.get → gatewayBridge → ProviderNetworkGateway.get（SHA/域名/方法/凭据/重定向/限额全校验）→ Ktor OkHttp → api.audiomack.com/v1/search → parseMusicFreeSearch → MusicTrack → ProviderSearchResults。
+
+- 统一 id = `trackKey("mf-audiomack", 原始id)` = `mf-audiomack:<id>`；`originalId/title/artists/album/source/providerName` 保留插件原值，不拼接伪造。
+- providerTags 含 `mf-audiomack`/`musicfree`/`audiomack`，结果标明来源。
+- 失败分类：HTTP_4XX / HTTP_5XX / PERMISSION_DENIED / NETWORK / TIMEOUT / CANCELLED / SCRIPT_REJECTED / SCRIPT_ERROR / PARSE_ERROR / SESSION_UNAVAILABLE / EXCEPTION，映射 ProviderFailureKind；真实零结果（HTTP 200 + data 空）failure 为空，与请求失败明确区分。
+- gatewayBridge 新增可选 auditSink（J2）：记录 host/method/port/decision/httpStatus/responseBytes/durationMs，不含任何凭据头。
+
+### 26.4 J2.3 搜索 UI 与接入
+
+shared/build.gradle.kts 增 `implementation(project(":provider:musicfree"))`；ProviderComposition.staticFactories 末尾注册 `AudiomackProviderFactory`（不抢占既有优先级）。**故意不加入** DEFAULT_ENABLED_PROVIDER_IDS / DEFAULT_PROVIDER_ORDER_IDS：J2 是单一试点、未做长期稳定性/地域可用性验证，用户需在设置中显式开启。feature/search 抽象与 UI 未改动（既有加载/零结果/失败/取消/旧请求丢弃机制已覆盖）。
+
+### 26.5 J2.4 真实验证等级（分栏，禁止合并）
+
+| 等级 | 结论 | 证据 |
+| --- | --- | --- |
+| STATIC_REVIEW | PASS | 脚本 SHA 精确、源码红线扫描零命中、search 只用 api.audiomack.com |
+| LX_RUNTIME_LOAD | 不适用 | 本来源为 MusicFree 非 LX，快速加载不属其链路 |
+| COMMONJS_REQUIRE_PASSED | PASS | I5 已证 + J2 沙箱真实初始化执行 |
+| REAL_SEARCH | PASS | 双端真实执行插件 search，经 Gateway 到 api.audiomack.com，HTTP 200 |
+| REAL_RESULT_MAPPING | PASS | 真实结果映射 MusicTrack，原始 id 保留 |
+| REAL_SEARCH_UI | NOT_RUN（无运行 UI 测试环境） | Provider 已接入组合、UI 抽象无需改；Windows 无模拟器，未做端到端 UI 自动化 |
+
+真实请求记录（desktop 与 androidHost 各一致，经本机 7897 代理，与 G3 取证方式相同）：
+- 关键词"晴天"：api.audiomack.com / GET / 443 / HTTP 200 / 39412B → 20 条；首条 `id=mf-audiomack:10921920 originalId=10921920 title=晴天 artist=周杰伦 album=叶惠美 cover=https://i.audiomack.com/...`（与 G3 台账一致）
+- 关键词"周杰伦"：HTTP 200 → 20 条
+- 关键词"nonexistent_xyz_9981_real_j2"：HTTP 200 → 0 条，ZERO_RESULTS、failure 为空
+- 失败分类（受控 executor 分栏）：403→HTTP_4XX、503→HTTP_5XX、executor 异常→NETWORK/SCRIPT_ERROR，均带可诊断 failure；dispose 后 search→SESSION_UNAVAILABLE
+
+诚实边界：真实搜索经 7897 代理完成；**不能推断中国大陆家庭直连可用**（直连探测超时）。URL 解析/音频/播放/身份核验 NOT_RUN，播放域名 music.audiomack.com 仍 DENIED，未放宽。
+
+### 26.6 回归与提交
+
+musicfree desktopTest **144 项 0 失败**、testAndroidHostTest **144 项 0 失败**（131 + J2 单测 5 + 真实 3 + 失败分类 5）；shared desktopTest **388 项 0 失败**（既有 Provider 与默认搜索无退化）；iOS 主代码 + 测试源码 + shared 编译 `--rerun-tasks` 通过，`iosSimulatorArm64Test` NOT_RUN（无 Xcode）。
+
+提交拆分：J2.1/J2.2（Provider 核心）、J2.3（应用接入）、J2.4（真实验证与文档）；不推送，等待单独确认。
+

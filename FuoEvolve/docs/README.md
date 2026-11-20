@@ -62,6 +62,7 @@
 | [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 阶段 J0 Gateway 网络出口整改（§23）：重定向/流式限额/axios 编码/SHA 绑定/DNS 审查 |
 | [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 阶段 J1（收窄）Gateway 共用网络底座真实验证（§24）：真实 Ktor OkHttp 对照实验 + cancel 缺口修复 |
 | [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 阶段 J1.1 BodyStream 异常语义与生命周期修复（§25）：异常不再吞成 EOF + 串行契约 + 生命周期 |
+| [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 阶段 J2 单一音源 Audiomack 真实搜索接入（§26）：正式 Provider/真实搜索/模型映射/验证等级 |
 
 ## 阅读顺序建议
 

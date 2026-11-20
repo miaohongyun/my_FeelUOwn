@@ -1287,3 +1287,13 @@ J0 的 14 项 Gateway 测试全是假执行器，asProviderNetworkExecutor()（K
 测试 PhaseJ11BodyStreamSemanticsTest 11 项（真实触发 IOException/Cancellation/Timeout，非字符串检查）；desktopTest 131 项、testAndroidHostTest 131 项 0 失败；iOS 编译+测试源码编译 --rerun-tasks 通过、iosSimulatorArm64Test NOT_RUN(无 Xcode)。
 结论：异常吞 EOF 缺陷已修复、语义明确、生命周期契约清楚；未接插件/未放宽策略/未推送。详见 audit §25。
 
+
+
+## §31 阶段 J2：单一音源 Audiomack 真实搜索接入（2026-11-20）
+
+基线本地=远端 work=f7fa3d3(J1.1)、master=fc05530，工作区干净；执行前逐项核查通过（详见 audit §26.1），播放域名 music.audiomack.com 仍 DENIED 未触碰。
+J2.1/J2.2：新增 AudiomackMusicProvider+Factory，嵌入逐字节脚本(SHA 1b1f49fc… 精确)、独立 QuickJS Context、复用 CommonJS 子集；executor 复用 dependencies.http.client 不自建；dispose 释放 Context/timer 不 close 共享 client。search 走真实插件 search→Gateway(Ktor OkHttp)→api.audiomack.com→parseMusicFreeSearch→MusicTrack，原始 id 保留(originalId)、来源标注；失败分类 HTTP_4XX/5XX/PERMISSION_DENIED/NETWORK/TIMEOUT/CANCELLED/SCRIPT_*/PARSE_ERROR/SESSION_UNAVAILABLE 可诊断，真实零结果与失败区分。gatewayBridge 加 auditSink 记录 host/方法/端口/Gateway 决策/HTTP 状态/字节数/耗时(无凭据)。
+J2.3：shared 依赖 musicfree、ProviderComposition 末尾注册 AudiomackProviderFactory，**不加入默认启用集**(单一试点未验证长期稳定/地域可用)；feature/search 与 UI 未改(既有 generation latest-wins 覆盖)。
+J2.4 验证：STATIC_REVIEW/COMMONJS_REQUIRE_PASSED/REAL_SEARCH/REAL_RESULT_MAPPING PASS；REAL_SEARCH_UI NOT_RUN(无运行 UI 环境)。真实请求经本机 7897 代理(与 G3 一致)：晴天 HTTP200 39412B→20 条首条 mf-audiomack:10921920/晴天/周杰伦/叶惠美；周杰伦 200→20 条；不存在关键词 200→0 条。诚实边界：不能推断中国大陆直连可用(直连超时)；URL/音频/播放/身份 NOT_RUN，播放域名 DENIED 不放宽。
+回归：musicfree desktop/androidHost 各 144 项 0 失败、shared 388 项 0 失败、iOS 编译+测试源码编译 --rerun-tasks 通过、iosSimulatorArm64Test NOT_RUN。不推送。详见 audit §26。
+
