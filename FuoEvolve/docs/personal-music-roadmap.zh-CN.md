@@ -1176,3 +1176,16 @@ Ciallo~（fd16333b…，guoyue2010 **Apache-2.0**，searchMusic 走 api.s0o1.com
 **结论：没有"真正实现 LX search 的合规候选"。** 四道门槛全未过：①LX 协议无 search action、产品无调用链，实现也无处可用；②suyin/huanyin 无 LICENSE，仅 Ciallo 有 Apache-2.0；③依赖 oiapi.net/api.xcvts.cn/api.s0o1.com 第三方聚合 API 授权不明；④实证 Ciallo 脚本解析 `data.data.id`（对象）但真实 API 返回数组 → search 实返空（脚本 bug），suyin 靠 message 文本兜底脆弱。未升级任何候选为 REAL_SEARCH_PASSED/ELIGIBLE；未执行 QUARANTINE、未做真实 search、未放宽 SSRF、未接入。
 
 **对 G2/G3**：脚本 search 是新协议+新调用链+新结果模型工程（G2），不是换音源可解；当前架构下可用搜索仍走宿主 LxSongSearcher 注册表（kw+kg）。新增 license 字段与 PhaseG1 台账/隔离加载测试。不把 MusicFree 插件当 LX 音源、不设 gdstudio 默认、不放行 juhe 动态 URL、不启动自动主备。
+
+
+## §19 阶段 G2：MusicFree 合规来源发现与受控适配层（2026-11-20）
+
+基线 `408b75e`（G1），分支 `work/android-community-discovery`，未碰 master。用户条件指令："发现值得接入的来源再做 G2 适配器"。
+
+**发现结论：有值得接入的来源。** 官方 `maotoumao/MusicFreePlugins`（GPL-3.0、149 commits、维护至 2025-11）权威 plugins.json（sha256 a9b2d83b…）+ 12 插件正文真实下载计 SHA。MusicFree `plugin.d.ts` 原生定义 `search(query,page,type)->{isEnd,data[]}` 与 `getMediaSource`，正好补上 LX 协议缺失的 search——但属另一套协议（CommonJS + Node 模块），需适配层。12 插件静态审查零 VIP/会员绕过/混淆/eval/裸IP；唯一 cookie 命中是 bilibili 匿名 buvid3/buvid4 访客标识（非会员凭据，需人工复核）。官方 README 声明过滤 VIP/试听/付费。
+
+**两类来源**：①用户自建库 Navidrome/WebDAV（Subsonic/WebDAV，内容属用户本人，最合规；但端点用户配置常为私网/裸IP，不为它放宽 SSRF）②固定具名域名 Audiomack（api.audiomack.com，可生成候选级授权）③动态端点 YouTube（响应体决定 URL，fail-closed）。
+
+**适配层（新模块 :provider:musicfree，不改 LX 核心）**：MusicFreeProtocol（数据形状映射+fail-closed+强制HTTPS）/MusicFreePluginRegistry（12 插件真实 SHA/版本/GPL/能力/域名/证据台账）/MusicFreePluginPolicy（复用 CandidateNetworkPolicy：SHA 绑定+域名+SSRF，自托管/动态 deny-all）/MusicFreeAdapter（纯函数映射+能力/授权/URL 门禁，Mapped/Denied+等级诚实）。不执行 CommonJS、不发网络、不下音频、不写凭据、不注册为 Provider、无安装按钮。等级标注 `DECLARED+MAPPED`/`REAL_URL_RESOLVE 候选`，不冒充真实搜索/播放。
+
+**边界**：CommonJS/Node 模块隔离执行环境未实现；自托管/动态端点受控授权流程未实现；未做真实网络调用、无状态升级为 REAL_*_PASSED；DNS rebinding 风险不变。测试 PhaseG2AdapterTest 10 项；回归 sourceupdate157/lxruntime101/musicfree10 全绿；iOS Sim/Metadata/Android 编译通过。详见 `docs/community-source-audit.zh-CN.md` §14。

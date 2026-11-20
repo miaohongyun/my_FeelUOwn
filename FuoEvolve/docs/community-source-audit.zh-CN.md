@@ -474,3 +474,78 @@ suyin/huanyin/ciallo 只到 `LX_RUNTIME_LOAD_PASSED`（隔离加载级），feic
 - 新增测试：`PhaseG1SearchCandidateTest`（隔离加载 3 项，QUARANTINE 不执行）、`PhaseG1RegistryTest`（4 项台账不变量）；lxruntime 101 / sourceupdate 157 全绿，iOS Sim/Metadata/Android 编译通过。
 - `build/phase-g1-isolated-load.txt` 记录三候选 DECLARED/LOADED 实况。
 - 未改协议、未加产品 search API、未做真实 search 调用、未接任何脚本、未碰 master。
+
+
+---
+
+## 14. 阶段 G2：MusicFree 合规来源发现与受控适配层（2026-11-20）
+
+> 基线：`408b75e`（阶段 G1）　分支：`work/android-community-discovery`　未碰 master。
+> 用户条件指令："如果发现 MusicFree 生态中有值得接入的来源，再做 G2 适配器。"
+> 本节先给出**发现结论**，再给出据此实现的适配层；红线：不把 MusicFree 插件当 LX 音源、
+> 不改全局 SSRF、不放行动态端点、不自动批准/安装、不挂默认 provider。
+
+### 14.1 发现结论：有值得接入的来源，但要分清两类
+
+以官方 `maotoumao/MusicFreePlugins` 为准（GPL-3.0、149 commits、最近维护 2025-11-02），
+实际下载权威 `plugins.json`（1580B，sha256 `a9b2d83bba47adca…`）与全部 12 个插件正文并逐条计 SHA：
+Audiomack / 歌词网 / 歌词千寻 / Navidrome / suno / udio / 猫耳FM / 快手 / 音悦台 / YouTube / bilibili / WebDAV。
+
+**与 LX 的关键差异（G0 结论的正面回应）**：MusicFree 插件协议 `types/plugin.d.ts` **原生定义了 `search`**：
+- `search(query, page, type) -> { isEnd?, data: IMusicItem[] }`（type ∈ music/album/artist/sheet）
+- `getMediaSource(musicItem, quality) -> { url?, headers?, userAgent?, quality? }`
+- 另有 `getMusicInfo` / `getLyric` / `getAlbumInfo` / `getTopLists` 等。
+这正补上 LX 协议缺失的 search 能力——但它是**另一套协议**（CommonJS + axios/crypto-js/webdav/he/cheerio Node 模块），
+FuoEvolve 的 QuickJS Runtime 无法直接加载，必须走适配层。
+
+**静态审查结果（全部 12 插件）**：
+- **零** VIP / SVIP / 会员绕过 / 混淆 / `eval` / `new Function` / 裸 IP 初始化命中；
+- 唯一风险标记是 bilibili 的 9 处 cookie，但来源为 `api.bilibili.com/x/frontend/finger/spi`
+  公开接口发放的**匿名 `buvid3`/`buvid4` 访客标识**，非用户凭据、非会员 Cookie——仍列为需人工复核项，不自动接入；
+- 官方 README 明确"过滤掉所有 VIP、试听、付费歌曲"，`plugins.json` 已不含 QQ/网易等主流商业平台插件。
+
+**值得接入的两类来源**：
+1. **用户自建库插件（Navidrome / WebDAV，最合规）**：用 Subsonic / WebDAV 开放协议访问**用户本人服务器**上的音乐，
+   内容完全由用户拥有；搜索/URL 解析由插件原生实现。**但**：端点由用户 `userVariables.url` 配置，
+   常为私网/裸 IP，静态不可审——按红线不为它们放宽 SSRF，归入"需独立受控端点授权（本阶段未实现）"。
+2. **固定具名域名插件（Audiomack 等）**：源码有静态可审 HTTPS API 域名（api.audiomack.com），
+   可生成候选级网络权限（SHA 绑定 + 域名白名单），是**当前适配层能安全落地的对象**。
+3. **动态端点插件（YouTube）**：解析 URL 由上游响应体决定，不预先授权，同样 fail-closed。
+
+**结论**：MusicFree 生态里确实有值得接入的来源（原生 search + 来源/许可清晰 + 无会员绕过），
+尤其自建库类内容是用户有权访问的合规内容；但它们**不能通过放宽 SSRF 来接入**，
+必须靠独立适配层 + 候选级授权，且自托管/动态端点还需额外的受控端点授权流程。
+
+### 14.2 实现的受控适配层（新模块 `:provider:musicfree`）
+
+不修改 LX Runtime 核心协议（`LxProtocol`/`LxScriptRuntime`/`LxNetworkPolicy` 全部不动），新增独立模块：
+
+| 文件 | 职责 |
+| --- | --- |
+| `MusicFreeProtocol.kt` | 把 `plugin.d.ts` 的 search/mediaSource/lyric 数据形状映射成中性模型；解析失败 fail-closed，不伪造条目；mediaSource 强制 HTTPS |
+| `MusicFreePluginRegistry.kt` | 12 个官方插件的真实 SHA256/版本/GPL-3.0/能力/静态域名/风险证据台账；manifest SHA 常量 |
+| `MusicFreePluginPolicy.kt` | 复用阶段 F [CandidateNetworkPolicy]：SHA 绑定 + 具名域名 + SSRF；自托管/动态/无静态域名一律 deny-all，不放宽 |
+| `MusicFreeAdapter.kt` | 纯函数适配：search/mediaSource/lyric → 内部模型；每次都过能力门禁 + 授权门禁 + URL 策略；结果分 `Mapped`/`Denied` 并标注等级 |
+
+**关键设计**：
+- **不执行 CommonJS 插件代码、不发网络请求、不下载音频、不写凭据**——适配层只做"数据映射 + 门禁"；
+- **不注册为 Provider**：不挂 `ProviderComposition`、不进 `DEFAULT_ENABLED_PROVIDER_IDS`、无安装按钮；
+- 固定域名插件（Audiomack）生成 `CandidateNetworkPolicy(allowedHosts={api.audiomack.com}, SHA 绑定)`，
+  自托管（Navidrome）与动态端点（YouTube）生成 deny-all 决策并给出"不放宽 SSRF"的明确原因；
+- 播放 URL 必须再通过 `policy.rejectionReason(url)`，未授权域名/明文 HTTP/私网 IP/userinfo 全部拒绝；
+- 等级诚实：搜索映射标注 `DECLARED+MAPPED（未做真实搜索调用）`，URL 映射标注 `REAL_URL_RESOLVE 候选
+  （未验证音频响应/真实播放）`——**不冒充真实搜索/真实播放**。
+
+### 14.3 未解决项与边界（如实）
+
+- 常驻障碍：CommonJS + Node 模块依赖（axios/crypto-js/webdav/he/cheerio）需独立的隔离执行环境，本阶段未实现；
+- 自托管/动态端点的受控授权流程未实现，Navidrome/WebDAV 暂不能进入真实网络执行；
+- 未做任何真实搜索/URL/音频/播放调用，未升级任何状态为 `REAL_*_PASSED`；
+- DNS rebinding 遗留风险不变；manifest 与插件 SHA 为 2026-11-20 抓取快照，版本更新即需重新取证。
+
+### 14.4 测试与编译
+
+- 新增 `PhaseG2AdapterTest`（10 项）：台账完整性、SHA 变更失效、自托管/动态端点 deny-all、
+  URL 私网/明文/未授权域名/userinfo 拒绝、search/mediaSource/lyric 映射、能力门禁、解析失败不伪造。
+- 回归：sourceupdate 157 / lxruntime 101 / musicfree 10，全绿 0 失败 0 跳过。
+- 编译：musicfree 的 iOS Simulator / commonMain Metadata / Android 全部通过（含 `--rerun-tasks`）。
