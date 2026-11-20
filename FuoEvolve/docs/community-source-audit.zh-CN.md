@@ -696,3 +696,44 @@ QuickJS 生命周期：`load()` 每次新建 `RuntimeSession`(QuickJs.create + e
 但**不能直接当作 MusicFree 的安全执行环境**，三大缺口：①无 CommonJS require/模块隔离；②memory/stack 限制未启用；③无统一网络网关（当前 LX 自建 client）。
 H1/H2 要在**新模块内**补齐这三点（不污染 LX 核心协议），H3 单独审查播放域名，H4 播放闭环，
 DNS rebinding 与库 timer 限制全程如实声明。H0 到此为止，未做任何重构。
+
+
+---
+
+## 17. 阶段 H1：CommonJS 隔离执行环境（2026-11-20）
+
+> 基线：`f0ba4e3`（H0）　分支：`work/android-community-discovery`　未碰 master、未推送。
+
+### 17.1 实现（新代码，不改 LX 核心协议）
+
+在 `:provider:musicfree` 新增真实 QuickJS 沙箱（依赖 quickjs-kt 1.0.15，与 lxruntime 同版本/同 Android host-test 替换规则）：
+- `MusicFreeSandbox.kt`：资源 [Limits]（脚本512KiB/模块256KiB/模块数32/超时5s/内存8MiB）、[EngineCapabilities]（如实回报各平台能强制的限制）、[ModuleRegistry]（require allowlist + SHA 绑定）、`requireRejection`/`preflightRequires`。
+- `MusicFreeSandboxSession.kt`：每个 Provider 独占 `QuickJs.create(Dispatchers.Default)` native context；设置 `evaluationTimeoutMillis`（native 可中断死循环）与 `memoryLimit`；require 走宿主 binding，模块由宿主以 ESM `addModule` 预载到本 session 私有缓存（不读全局 registry，跨线程不可见）；宿主能力仅 md5 纯计算；`execute()` 预检→初始化→受控求值，失败分级 REJECTED/TIMEOUT/CANCELLED/ERROR；`close()` 幂等释放 native context 与缓存。
+
+### 17.2 逐条对应任务书与实测
+
+| 要求 | 实现/测试 | 状态 |
+| --- | --- | --- |
+| 独立实例/等效隔离 | 每 session 独立 QuickJs Context；`h1_moduleCacheIsolatedBetweenProviders`/`h1_concurrentSessionsIndependent` | ✅ |
+| require allowlist | ModuleRegistry 登记 + `requireRejection`/`preflightRequires`；`h1_maliciousRequireRejectedFailClosed`（fs/child_process/axios/路径穿越全拒） | ✅（JS↔Kotlin 字符串封送见 17.4） |
+| 禁文件/进程/远程加载 | shim 显式不提供 fetch/XHR/WebSocket/process/fs/eval 包装；宿主 binding 只 md5 | ✅ |
+| 模块缓存按 Provider 隔离 | session 私有不可变快照；跨 session 不共享 | ✅ |
+| 执行时间/内存/任务/响应限制 | evaluationTimeoutMillis 中断死循环、memoryLimit、脚本/模块字节上限、模块数上限；`h1_infiniteLoopTerminatedByNativeTimeout`（300ms 超时→TIMEOUT）、`h1_scriptTooLargeRejected` | ✅ 时间/大小；内存为 native Context 层，能力如实回报 |
+| 取消/超时/异常回收 | CancellationException 分级、interruptEvaluation、close 幂等；`h1_closeIsIdempotentAndRejectsFurtherExec` | ✅ |
+| 异常 Provider 不影响其他 | `h1_exceptionInOneProviderDoesNotAffectAnother` | ✅ |
+| 未审依赖不进环境 | 模块必须登记 SHA + note + auditedAt 才预载 | ✅ |
+
+### 17.3 测试与编译
+
+- `PhaseH1SandboxTest`（10 项）：allowlist fail-closed、预检、缓存隔离、死循环终止、正常执行+能力回报、超大脚本拒绝、异常隔离、close 幂等、require 门禁语义、并发 session 独立。
+- 回归 musicfree 26（原16+10）全绿 0 失败；iOS Simulator / commonMain Metadata / Android 编译全部通过（`--rerun-tasks`）。
+- 修复的跨平台问题：`@Volatile` 与无参 `toByteArray()` 在 Kotlin/Native 不可用 → 去掉 Volatile（快照在 mutex 内一次发布、binding 只读）并改 `encodeToByteArray()`。
+
+### 17.4 如实声明的限制（不伪称已隔离）
+
+1. **quickjs-kt 1.0.15 的 JS→Kotlin 字符串实参存在包装类型差异**：binding 收到的字符串 `toString()` 相同但 `equals/hashCode` 与纯 Kotlin String 不一致，直接作 Map key 查不到；已改为 `toString()` 文本匹配 + 提供 Kotlin 侧门禁语义测试，但 **JS 内 `require()` 的完整往返未作为通过项**——H1 只交付"allowlist + 隔离缓存 + 执行环境"基础设施，不宣称 CommonJS require 端到端已可靠。
+2. **maxStackSize 在 commonMain 未暴露为可写属性**（JVM 字节码有 setter 但 KMP 公共 API 不稳定）→ `canSetStackSize=false` 如实回报，stack 上限未强制。
+3. **memoryLimit 为 native Context 层限制**，是否对所有平台强制由 `capabilities` 回报，不虚报。
+4. **跨求值后台 timer 不提供**（库无公开 job-queue 驱动 API，见 H0 §16.5）。
+5. **官方插件（axios/crypto-js/webdav 等 Node 模块）当前不可执行**：沙箱只承载 JSON 可序列化 exports 的审计模块，插件 CommonJS 生态适配属后续阶段。
+6. **DNS rebinding 与本沙箱无关**，仍按 H2 网关层如实保留。

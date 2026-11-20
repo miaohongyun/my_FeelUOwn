@@ -1213,3 +1213,9 @@ H0 审计结论（详见 `docs/community-source-audit.zh-CN.md` §16，全部带
 - 已具备边界：每脚本独立 QuickJS context + cacheKey(id:version:SHA) + native 求值超时中断 + SSRF(变体IP归一/元数据/私网全拒) + 逐跳重定向白名单 + 可取消 timer + 安装前静态扫描。
 - 三大缺口(H1/H2 新模块补齐，不污染 LX 核心)：①无 require/模块系统/模块缓存(库 ModuleLoader 未启用) ②memory limit/max stack/主动interrupt/gc 库支持但代码未用 ③无统一 ProviderNetworkGateway(LX 自建 client 绕开统一注入)。
 - 如实声明限制：quickjs-kt 1.0.15 跨 request timer 无法可靠实现(无公开 job-queue 驱动 API)、close() 不 join 库求值协程、DNS rebinding 未解决。三端网络引擎 Android/Desktop=OkHttp/iOS=Darwin。
+
+
+## §22 阶段 H1：CommonJS 隔离执行环境（2026-11-20）
+
+基线 `f0ba4e3`（H0），分支 `work/android-community-discovery`，未碰 master、未推送。新增 MusicFreeSandbox.kt（Limits/EngineCapabilities/ModuleRegistry allowlist+SHA/preflight）+ MusicFreeSandboxSession.kt（每Provider独立QuickJs Context、evaluationTimeoutMillis中断死循环、memoryLimit、模块ESM预载到session私有缓存、宿主仅md5、execute失败分级、close幂等）+ PhaseH1SandboxTest(10项)。musicfree 26全绿；三端编译通过。
+**如实限制**：quickjs-kt 1.0.15 JS→Kotlin字符串包装类型差异致JS内require完整往返未作通过项(只交付allowlist+隔离缓存+执行环境基础设施)、maxStackSize在commonMain未暴露(canSetStackSize=false)、memoryLimit为native层按capabilities回报、跨求值timer不提供、官方Node模块插件当前不可执行、DNS rebinding仍归H2。详见 audit §17。

@@ -30,11 +30,24 @@ kotlin {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.ktor.client.core)
+            implementation(libs.quickjs.kt)
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
             implementation(libs.kotlinx.coroutines.test)
             implementation(libs.ktor.client.mock)
         }
+    }
+}
+
+// 与 :provider:lxruntime 相同：quickjs-kt 的 Android artifact 含 native .so，
+// Android host test（桌面 JVM）加载不了，替换为 JVM 产物。
+configurations.matching {
+    it.name.endsWith("UnitTestRuntimeClasspath") ||
+        it.name.endsWith("AndroidHostTestRuntimeClasspath", ignoreCase = true)
+}.configureEach {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("io.github.dokar3:quickjs-kt-android"))
+            .using(module("io.github.dokar3:quickjs-kt-jvm:${libs.versions.quickJsKt.get()}"))
     }
 }
