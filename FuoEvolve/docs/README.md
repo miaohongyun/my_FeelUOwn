@@ -56,6 +56,7 @@
 | [listening-history-roadmap.md](listening-history-roadmap.md) | 听歌历史与统计的规划 |
 | [cast-dlna.zh-CN.md](cast-dlna.zh-CN.md) | 投屏实现与排障 |
 | [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 社区音源全量台账、静态审查、LX模拟验证、阶段 F 真实网络验证（含失败请求/错误码/域名拒绝） |
+| [lx-action-protocol-audit.zh-CN.md](lx-action-protocol-audit.zh-CN.md) | LX Runtime action 协议与搜索调用链审计（G0：协议无 search / 桥层兼容但产品无调用链 / 能力矩阵） |
 
 ## 阅读顺序建议
 

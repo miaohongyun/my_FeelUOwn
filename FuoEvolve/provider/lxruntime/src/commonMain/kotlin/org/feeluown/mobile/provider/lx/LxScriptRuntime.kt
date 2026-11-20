@@ -274,6 +274,34 @@ class LxScriptRuntime(
             ?: throw LxScriptException("脚本 [${s.name}] 对 $platform/$quality 未返回可播放 URL")
     }
 
+    /**
+     * G0 协议审计专用：把任意 action 的 payload 派发给脚本的 `request` 处理器，返回原始结果文本。
+     *
+     * 严格边界：
+     * - 这是 **internal 审计探针**，不是产品 API；产品代码只走 [requestMusicUrl]（固定 musicUrl）；
+     * - 不修改 [LxProtocol]，不新增 search 常量，不代表"运行时支持 search"；
+     * - 存在意义仅是用一个已知实现了 search 的测试脚本证明：JS 桥 [LxBridge] 的
+     *   `__lxDispatch` 本身是 action 无关的，缺口在"产品没有 search 调用链/结果模型"，
+     *   而不是桥接层不兼容。
+     *
+     * 结果不做 URL 抽取（search 返回的是歌曲列表 JSON），由测试自行解析比对。
+     */
+    internal suspend fun dispatchForAudit(payload: JsonObject, timeoutMs: Long = LxProtocol.DEFAULT_EVALUATION_TIMEOUT_MS): String? {
+        val s = requireSession()
+        val instance = s.quickJs
+        instance.evaluationTimeoutMillis = timeoutMs
+        val result = evaluateOrTimeout(s, timeoutMs) {
+            instance.evaluate<Any?>(
+                DISPATCH_MODULE_TEMPLATE.replace(DISPATCH_PAYLOAD, quote(payload.toString())),
+                filename = "lx_audit_dispatch.mjs", asModule = true,
+            )
+            instance.evaluate<String?>(DISPATCH_RESULT_READER)
+        }
+        val errorText = instance.evaluate<String?>("globalThis.__lxDispatchError")
+        if (!errorText.isNullOrBlank()) throw LxScriptException("审计派发失败: $errorText")
+        return result
+    }
+
     /** 脚本是否注册了 request 事件（用于加载后快速判断脚本是否完整）。 */
     suspend fun hasRequestHandler(): Boolean {
         val instance = requireSession().quickJs

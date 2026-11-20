@@ -1141,3 +1141,21 @@ sourceupdate 153 / lxruntime 93 / shared 385 desktopTest 全绿；Android / iOS 
 `shared:compileCommonMainKotlinMetadata` 因上游 AppNavHost 的 navigation3 compose 依赖报既有错误（与本改动无关），
 但 `shared:compileKotlinIosSimulatorArm64` 与 `shared:compileAndroidMain`、`shared:desktopTest` 均通过，证明 commonMain 改动跨端无 JVM-only 泄漏。
 未改 master/正式目录/公钥/签名；无自动批准/安装；BLOCK 候选未绕过。详见 `docs/community-source-audit.zh-CN.md` §12。
+
+
+## §17 阶段 G0：LX Runtime action 协议与搜索调用链审计（2026-11-20）
+
+基线 `3432eb6`（阶段 F 最终提交），分支 `work/android-community-discovery`，未碰 master。用户提出分 G0-G3 四子阶段，G0 优先于继续找源。
+
+**核心结论**：LX 自定义音源协议（移动端）本身没有 `search` action（`LxModels.kt:24-26` 只有 musicUrl/lyric/pic），
+产品运行时只有 `requestMusicUrl`（`LxScriptRuntime.kt:239`），没有 requestSearch；`initialize()` 只认含 musicUrl 的源（:218）。
+搜索由宿主侧 `LxSongSearcher` 注册表完成（`LxScriptProvider.kt:117-149`），**完全不调用脚本**；脚本只在 `resolve()` 用 musicUrl 换 URL（:151-187）。
+JS 桥 `__lxDispatch`（`LxBridge.kt:182-190`）action 无关——G0 用自写测试脚本实测证明桥能派发 search 并拿回结构化结果，
+但产品代码路径没有任何地方调用它。**因此"找实现 LX search 的音源"方向在当前协议下无落点**：不是候选偷懒，是协议没定义 + 产品无调用链/结果模型。继续批量抓源只会撞同一堵墙。
+
+**五交付物**（详见 `docs/lx-action-protocol-audit.zh-CN.md`）：①全部 action 清单（inited/request/updateAlert 事件 + musicUrl/lyric/pic，其中只有 musicUrl 被产品调用）；
+②每个 action 参数/返回/错误约定；③UI→脚本搜索调用链（SearchFeature→providerRepository.searchAll→KotlinProviderRepository→LxScriptMusicProvider.search→LxSongSearchRegistry 宿主适配器，脚本仅在 resolve 阶段被调用）；
+④已知可工作测试脚本 + 审计探针 `dispatchForAudit`（internal，不改协议不伪造真实结果）实测桥层兼容 search；⑤候选能力矩阵（DECLARED/LOADED/REAL_CALL_PASSED 三态）——声明 search 的只有 QUARANTINE 的 feichangdao，与可加载集合不相交。
+
+**对 G1 的约束**：承认协议无 search；改找"合规公开搜索接口 + musicUrl 解析脚本"组合，或启动 G2 定义脚本 search 协议/调用链/结果模型；
+不把声明 search 的 QUARANTINE 脚本当突破口，不把 MusicFree 插件直接当 LX 音源，不放宽 SSRF/会员。
