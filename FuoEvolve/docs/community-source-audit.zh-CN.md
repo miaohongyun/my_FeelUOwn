@@ -855,3 +855,74 @@ iOS Simulator / Metadata / Android 编译通过（`--rerun-tasks`）。
 `PhaseH4PlaybackVerificationTest`（7 项）：8 步记录、第4步停、后续 NOT_RUN、206 不冒充真实播放、
 五级区分、域名授权后仍须用户操作、早失败停链。musicfree 47（40+7）全绿 0 失败；
 iOS Simulator / Metadata / Android 编译通过（`--rerun-tasks`）。
+
+
+---
+
+## 21. 阶段 H5：三端验收与阶段 H 最终报告（2026-11-20）
+
+> 基线：`32176e5`（G3）　分支：`work/android-community-discovery`　未碰 master、**未推送**（用户未授权）。
+
+### 21.1 Git 基线与提交链
+
+- 基线 HEAD=`32176e5`，父提交 `5022842`，工作区干净，远端=基线（H0 开始时 ls-remote 验证）。
+- 阶段 H 五个独立提交链：`32176e5 → f0ba4e3(H0) → 1e729bb(H1) → 6714475(H2) → 26938e4(H3) → e230435(H4) → H5`。
+- master 全程 `fc05530` 未改；正式目录/公钥/签名/自动批准机制未动。
+
+### 21.2 H0–H5 完成情况
+
+| 子阶段 | 交付 | 状态 |
+| --- | --- | --- |
+| H0 架构审计 | 依赖图/调用时序/宿主能力清单/安全边界+未解决风险（§16） | ✅ 只审计不重构 |
+| H1 CommonJS 隔离 | 每 Provider 独立 QuickJS Context、allowlist require + 私有模块缓存、死循环 native 超时中断、内存/大小/模块数限制、取消/超时/异常分级、close 幂等（§17） | ✅ 基础能力；须看 21.6 限制 |
+| H2 网络代理 | ProviderNetworkGateway 唯一出口、权限绑定 ID/版本/SHA/精确域名/HTTPS+端口/体积/超时/重定向/凭据、默认拒绝 SSRF/通配符/明文/裸IP/私网/凭据头/超限、SHA 变更失效（§18） | ✅ |
+| H3 播放域名审查 | 真实 signedUrl 域名、DNS(Meta IP 段)、服务条款、API 文档取证；证据不足→保持拒绝 music.audiomack.com，不放宽白名单（§19） | ✅ DENIED |
+| H4 播放闭环 | 8 步状态机 + 五级分栏；第4步域名授权拒绝后音频响应/播放器/真实解码/控制全 NOT_RUN；206 不冒充播放（§20） | ✅ 真实播放 NOT_RUN |
+| H5 三端验收 | 见 21.4 | ✅（iOS 执行受环境限制，如实记录） |
+
+### 21.3 实际测试命令与结果（全部真实执行）
+
+- `./gradlew :provider:musicfree:desktopTest --rerun-tasks` → **47 tests, 0 failures, 0 skipped**。
+- `./gradlew :provider:musicfree:testAndroidHostTest --rerun-tasks` → **47 tests, 0 failures, 0 skipped**。
+- `./gradlew :provider:sourceupdate:desktopTest --rerun-tasks` → **157 tests, 0 failures**。
+- `./gradlew :provider:lxruntime:desktopTest --rerun-tasks` → **101 tests, 0 failures**。
+- 无跳过项（Desktop/Android host）；iOS 执行被 Gradle SKIPPED（见 21.4）。
+- 失败与修复记录：H1 调试期 require 字符串封送/跨线程可见性问题、Kotlin/Native 无 `@Volatile`/无参 `toByteArray()`、H4 状态机断言——均已修复并最终全绿；过程不掩盖失败。
+
+### 21.4 各平台编译/测试结果
+
+| 平台 | 编译 | 测试执行 |
+| --- | --- | --- |
+| Desktop (JVM) | `compileKotlinDesktop` ✅ | `desktopTest` 47 ✅ |
+| Android | `compileAndroidMain` ✅ | `testAndroidHostTest` 47 ✅（Android host/JVM；真机/设备测试`androidDeviceCheck`未运行——无设备） |
+| iOS Simulator | `compileKotlinIosSimulatorArm64` + `compileTestKotlinIosSimulatorArm64` ✅ | `iosSimulatorArm64Test`/`linkDebugTestIosSimulatorArm64` **SKIPPED**（Windows 无 Xcode/模拟器，honest 记录；不以单平台代替） |
+| Metadata | `compileCommonMainKotlinMetadata` ✅ | — |
+
+### 21.5 网络域名及授权情况
+
+- 授权：仅 `api.audiomack.com`（候选级精确域名，HTTPS/443，绑定脚本 SHA，来源 G3 静态审查）。
+- 拒绝：`music.audiomack.com`（播放域名，H3 DENIED——证据不足/条款未明确/动态端点/地区未确认），网关层 `playbackUrlRejectionReason` 拒绝；**不放宽白名单、不用通配符、不绕过**。
+- SSRF：私网/回环/链路本地/169.254.169.254 元数据/裸 IP/变体 IP/userinfo/编码 host/尾随点全拒（H2 测试实证）。
+- DNS rebinding：commonMain 未做连接层 IP 绑定，**如实保留风险**。
+
+### 21.6 沙箱实际隔离能力与遗留风险（不夸大）
+
+已具备：每 Provider 独立 QuickJS native Context；require allowlist + 私有模块缓存；死循环 native 超时中断；内存上限（native Context 层）、脚本/模块/模块数上限；取消/超时/异常分级；close 释放；宿主无 fetch/XHR/WebSocket/文件/进程 binding。
+遗留风险（如实）：
+1. quickjs-kt 1.0.15 的 JS→Kotlin 字符串实参封送差异——**JS 内 require 完整往返未作通过项**，H1 只交付 allowlist + 隔离缓存 + 执行环境基础设施；
+2. `maxStackSize` 在 commonMain 未暴露 → stack 上限未强制（`canSetStackSize=false`）；
+3. 跨求值后台 timer 无法可靠实现（库无公开 job-queue 驱动 API）；
+4. 官方插件依赖 Node 模块（axios/crypto-js/webdav），当前沙箱只承载 JSON 可序列化 exports，**插件生态执行未实现**；
+5. DNS rebinding 未解决；
+6. iOS 测试执行被环境跳过（仅交叉编译+测试源码编译通过）。
+
+### 21.7 验证等级
+
+- REAL_SEARCH ✅（G3 n=8 真实 OAuth 搜索）、REAL_TRACK_IDENTITY_VERIFIED ✅（id MATCH）、REAL_URL_RESOLVE ✅（G3 n=1）、
+- REAL_AUDIO_RESPONSE：G3 独立只读探测 206（1 字节响应头），**但 H4 授权闭环内 NOT_RUN**，
+- REAL_PLAYBACK：**NOT_RUN**（第4步域名授权拒绝；无真实播放器/解码/声音；206 与 Mock 均不冒充）。
+
+### 21.8 是否具备进入阶段 I 的条件
+
+**不具备（按当前红线维持）。** 阻塞项：①播放域名 `music.audiomack.com` 未获授权（H3 DENIED，需官方书面授权/明确 API 条款 + 代理恢复后复核重定向与有效期 + 地区确认）；②CommonJS 完整执行生态未实现（JS require 往返封送、Node 模块适配、跨求值 timer 限制）；③iOS 真机/模拟器测试未在本环境执行。
+可继续的安全工作（不需放行）：补 H1 require 封送适配、接入更多"固定具名域名 + 明确条款"的合规来源、三端在具备环境的机器上补测。**不为完成阶段而放行域名、不设默认音源、不自动安装。**

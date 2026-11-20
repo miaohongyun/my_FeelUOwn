@@ -75,7 +75,7 @@ class PhaseH1SandboxTest {
         try {
             val r = s.execute("while (true) {}")
             assertTrue(r is ExecResult.Failed, "死循环应失败，实际=$r")
-            assertEquals(FailureLevel.TIMEOUT, (r as ExecResult.Failed).level)
+            assertEquals(FailureLevel.TIMEOUT, r.level)
         } finally {
             s.close()
         }
@@ -88,7 +88,7 @@ class PhaseH1SandboxTest {
         try {
             val r = s.execute("module.exports = { title: '晴天', artist: '周杰伦' }; JSON.stringify(module.exports);")
             assertTrue(r is ExecResult.Ok, "正常脚本应成功，实际=$r")
-            assertTrue((r as ExecResult.Ok).value!!.contains("晴天"))
+            assertTrue(r.value!!.contains("晴天"))
             // 能力如实回报：memoryLimit 可设；stack 未强制。
             assertFalse(r.caps.canSetStackSize, "stack 限制未暴露，必须如实为 false")
         } finally {
@@ -103,7 +103,7 @@ class PhaseH1SandboxTest {
         try {
             val r = s.execute("x".repeat(64))
             assertTrue(r is ExecResult.Failed)
-            assertEquals(FailureLevel.REJECTED, (r as ExecResult.Failed).level)
+            assertEquals(FailureLevel.REJECTED, r.level)
         } finally {
             s.close()
         }
@@ -135,7 +135,7 @@ class PhaseH1SandboxTest {
         assertTrue(s.isClosed)
         val r = s.execute("1+1")
         assertTrue(r is ExecResult.Failed)
-        assertEquals(FailureLevel.REJECTED, (r as ExecResult.Failed).level)
+        assertEquals(FailureLevel.REJECTED, r.level)
     }
 
     @Test

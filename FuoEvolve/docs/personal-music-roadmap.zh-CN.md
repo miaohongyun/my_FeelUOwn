@@ -1234,3 +1234,13 @@ H0 审计结论（详见 `docs/community-source-audit.zh-CN.md` §16，全部带
 ## §25 阶段 H4：真实播放闭环验证台账（2026-11-20）
 
 基线 `26938e4`（H3），未碰 master、未推送。新增 MusicFreePlaybackVerification.kt：8步状态机+五级分栏(REAL_SEARCH/TRACK_IDENTITY_VERIFIED/URL_RESOLVE/AUDIO_RESPONSE/PLAYBACK),任一步失败即停后续NOT_RUN。当前Audiomack闭环: 第4步(网络权限/域名授权)因H3拒绝music.audiomack.com而FAILED, 音频响应/播放器读取/真实解码输出/播放控制全NOT_RUN; realPlaybackAchieved=false; G3的206为独立只读探测不构成经授权闭环音频响应。HTTP206/Mock解码不冒充真实播放; 即使域名未来授权仍需用户明确操作。PhaseH4PlaybackVerificationTest 7项; musicfree47全绿; 三端编译通过。详见 audit §20。
+
+
+## §26 阶段 H5：三端验收与阶段 H 最终报告（2026-11-20）
+
+基线32176e5(G3),分支work/android-community-discovery,未碰master未推送。提交链 32176e5→f0ba4e3(H0)→1e729bb(H1)→6714475(H2)→26938e4(H3)→e230435(H4)→H5。
+测试: musicfree desktopTest47/testAndroidHostTest47/sourceupdate157/lxruntime101 全0失败; iOS compileKotlinIosSimulatorArm64+compileTestKotlinIosSimulatorArm64通过但 iosSimulatorArm64Test SKIPPED(Windows无Xcode/模拟器,如实记录)。
+域名: 授权仅api.audiomack.com(精确HTTPS/SHA绑定); 拒绝music.audiomack.com(H3证据不足,不放宽白名单); DNS rebinding未解决。
+验证等级: REAL_SEARCH/IDENTITY/URL_RESOLVE达成; REAL_AUDIO_RESPONSE仅G3独立206探测(H4闭环内NOT_RUN); REAL_PLAYBACK NOT_RUN。
+沙箱遗留: quickjs-kt1.0.15 JS→Kotlin字符串封送差异致JS内require往返未作通过项/maxStackSize未强制/跨求值timer不可靠/官方Node模块插件未适配/iOS测试跳过。
+**结论: 不具备进入阶段I条件**(播放域名未授权+CommonJS执行生态未实现+iOS测试未执行); 不为完成阶段而放行/不设默认/不自动安装。详见 audit §21。
