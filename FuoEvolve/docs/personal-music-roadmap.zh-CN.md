@@ -1277,3 +1277,13 @@ J0 的 14 项 Gateway 测试全是假执行器，asProviderNetworkExecutor()（K
 
 结论：共用底座重定向/流式限额已有真实网络证据并修复 cancel 缺口；DNS rebinding 未解决、iOS 运行测试未执行、未接任何插件、未做真实搜索播放、未推送。详见 audit §24。
 
+
+
+## §30 阶段 J1.1：BodyStream 异常语义与生命周期修复（2026-11-20）
+
+基线本地=远端 work=1631567(J1)、master=fc05530，工作区干净；从 J1 继续不重置不覆盖，只本地提交不推送。
+修复：J1 的 BodyStream.read `catch(Exception)→-1` 会把真实 I/O 异常/Cancellation/Timeout 全吞成 EOF，导致 Gateway 误判 Ok。抽出 internal ktorBodyStream（含可注入 readFn 重载供测试）read 语义改为：cancel 后 -1、正常 EOF -1、真实 I/O/Cancellation/Timeout/未知异常原样上抛。Gateway 既有 catch(Exception)→Failed / catch(Cancellation)→throw / catch(Timeout)→Failed 不变。并发语义：read/cancel 串行契约（Gateway.readBounded 顺序读、超限才 cancel、cancel 后不再读），普通 Boolean 标志跨平台安全，不用 @Volatile/锁，cancel 幂等。
+生命周期：config{followRedirects=false} 只在构造 executor 时调用一次并缓存、非每请求创建；config 派生 client 共享 engine，调用方 close 父 client 即释放，KDoc 明确契约；生产当前无调用方（J2 才接入测试侧随 JVM 回收，不强改。
+测试 PhaseJ11BodyStreamSemanticsTest 11 项（真实触发 IOException/Cancellation/Timeout，非字符串检查）；desktopTest 131 项、testAndroidHostTest 131 项 0 失败；iOS 编译+测试源码编译 --rerun-tasks 通过、iosSimulatorArm64Test NOT_RUN(无 Xcode)。
+结论：异常吞 EOF 缺陷已修复、语义明确、生命周期契约清楚；未接插件/未放宽策略/未推送。详见 audit §25。
+

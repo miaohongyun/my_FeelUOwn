@@ -1121,3 +1121,46 @@ J0 的 14 项 Gateway 测试**全部使用假执行器**（`fromStringExecutor` 
 
 共用网络底座的重定向（不先行跟随 + 逐跳策略 + 上限）与流式限额（Content-Length 预检 + 流式累计 + cancel）已有**真实网络证据**，并修复了一个真实的 cancel 契约缺口。仍未解决：DNS→连接的 IP 绑定（DNS rebinding，三端未实现，J0 §23 已记）；iOS 运行测试 NOT_RUN；本阶段未接入任何插件、未做真实搜索/URL/音频/播放（不把底座验证冒充搜索或播放）。未推送。
 
+
+
+---
+
+## §25 阶段 J1.1：Ktor BodyStream 异常语义与生命周期修复（2026-11-20）
+
+基线：本地与远端 work 分支均 `1631567`(J1)、master=`fc05530`，工作区干净、远端无新提交；从 J1 继续，不重置/覆盖/改写。只本地提交，不推送。
+
+### 25.1 问题（J1 引入的缺陷）
+
+J1 为修复"cancel 后 readAvailable 仍返回已缓冲 256B"，在 `ProviderNetworkGatewayKtor.kt` 的 BodyStream.read 里写了 `catch (_: Exception) { -1 }`。这会**把所有读取异常吞成 EOF**：真实网络 I/O 失败、CancellationException、Timeout 全部变成 -1 → Gateway 误判为 Ok/正常结束，违反"网络读取失败不得误报为正常 EOF"。
+
+### 25.2 异常分类修复
+
+把 body 包装抽成 internal `ktorBodyStream(channel)`（另提供可注入 readFn 的重载供测试真实触发异常）。read 语义：
+- 主动 cancel 后 → -1（cancelled 标志同步拦截，不触碰底层 channel）；
+- 正常 EOF（底层返回 -1）→ 原样 -1；
+- 真实 I/O 异常 / CancellationException / Timeout / 未知异常 → **原样向上抛**，不吞。
+Gateway 侧既有 `catch(Exception)→Failed` 把读取失败记为 Failed、`catch(CancellationException)→throw` 原样传播、`catch(TimeoutCancellationException)→Failed(超时)`，本次未改其逻辑，仅让异常能正确到达。
+
+### 25.3 并发语义（串行约束，明确记录）
+
+BodyStream 的 read/cancel 为**串行调用契约**：Gateway.readBounded 在同一协程顺序 read → 超限/结束后才 cancel → cancel 后不再 read；不支持 read 挂起期间从另一个协程并发 cancel。串行下普通 Boolean 标志即可保证可见性，跨平台一致——**不用 @Volatile（Kotlin/Native 不支持）、不引入未验证的锁或平台专属 API**。cancel 幂等：连续调用只生效一次。
+
+### 25.4 生命周期审查（任务书第 4 节）
+
+- `HttpClient.config{followRedirects=false}` 只在**构造 executor 时调用一次**并缓存于闭包，非每请求创建；无逐请求新建 client 路径。
+- `config{}` 返回共享同一 engine 的派生 client；调用方 close 传入的父 client 时 engine 释放，派生 client 无额外 OS 资源。KDoc 已明确"调用方负责 close 传入 client""生产构造一次 executor 复用、Provider 关闭时由调用方 close"。
+- **生产当前无调用方**：J1 收窄范围后未做 Provider 正式接入（属 J2），`asProviderNetworkExecutor()` 仅测试代码使用；故不存在生产侧重复创建/重复关闭。测试侧 client 随 JVM 退出回收，按"不重复关闭"原则不强改。
+- 结论：生命周期契约已明确、无每请求创建；生产复用与释放留待 J2 接入时落实，不在本阶段伪造"已接入"。
+
+### 25.5 测试（真实触发异常，非字符串检查）
+
+新增 `PhaseJ11BodyStreamSemanticsTest`（commonTest，11 项）：active cancel 后 EOF、取消前有数据且取消后 EOF（readFn 调用次数证明 cancelled 拦截）、正常 EOF 透传、I/O 异常（注入真实 IOException）不被吞、unknown 异常不被吞、Timeout 原样、CancellationException 原样、重复 cancel 幂等、cancel 释放 channel、Gateway 读取失败→Failed、Gateway 超时→Failed。保留 J1 真实 socket server 对照实验（PhaseJ1RealNetworkBaseTest，desktop/androidHost 各 5 项，本次未改）。
+
+注入 readFn 重载仅为测试可重复触发 wire 级异常，生产路径仍走真实 `channel.readAvailable`；Gateway 层另有真实抛异常 BodyStream 验证 Failed 分类。
+
+### 25.6 验证与结论
+
+desktopTest **131 项 0 失败**（J0 115 + J1 5 + J1.1 11）、testAndroidHostTest **131 项 0 失败**；iOS `compileKotlinIosSimulatorArm64` + `compileTestKotlinIosSimulatorArm64` 以 `--rerun-tasks` 通过，`compileKotlinMetadata` SKIPPED（本模块无 metadata target），`iosSimulatorArm64Test` NOT_RUN（Windows 无 Xcode/模拟器，如实）。
+
+结论：J1 引入的"异常吞成 EOF"缺陷已修复，异常分类与串行并发语义明确且有真实触发的测试证据，生命周期契约已明确。未做插件接入、未放宽策略、未改域名授权、未推送。DNS rebinding 与 iOS 运行测试限制不变。
+
