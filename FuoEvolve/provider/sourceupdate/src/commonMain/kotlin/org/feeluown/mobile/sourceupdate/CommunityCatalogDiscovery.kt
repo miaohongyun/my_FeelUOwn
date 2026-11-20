@@ -44,6 +44,22 @@ class CommunityCatalogDiscovery(
         val ok: Boolean get() = parseError == null
     }
 
+    /**
+     * 阶段 A（锁外）的产物：远端清单的网络获取 + 解析结果。
+     * **不含任何候选库读写**——缓存回退与合并都交给阶段 B 在锁内完成，
+     * 保证合并永远基于最新候选库状态。
+     */
+    data class FetchedCandidates(
+        val raw: String?,
+        val usedUrl: String?,
+        val sources: List<CommunitySourceEntry>,
+        val parseError: String?,
+        val fetchErrors: List<String>,
+    ) {
+        /** 成功拿到一份结构合法的清单；全网络失败或结构非法都是 false。 */
+        val fetchedOk: Boolean get() = raw != null && parseError == null
+    }
+
     /** 当前候选区快照；损坏/缺失时返回空快照而不是抛异常。 */
     suspend fun loadStore(): CandidateStore {
         val raw = store.readText(CANDIDATE_STORE_PATH) ?: return CandidateStore()
@@ -56,11 +72,11 @@ class CommunityCatalogDiscovery(
     }
 
     /**
-     * 从主地址开始按序尝试镜像读取清单。全部失败时用上次成功缓存的原文继续解析；
-     * 连缓存都没有则本轮 no-op（不清空候选）。
+     * 阶段 A：**锁外**从主地址开始按序尝试镜像读取清单并解析。
+     * 只做网络请求与解析，绝不读写候选库（缓存回退与合并交给阶段 B）。
+     * 调用方必须在 Repository Mutex 之外调用本方法，避免锁内网络请求。
      */
-    suspend fun discover(listUrls: List<String>): DiscoveryReport {
-        val now = clock()
+    suspend fun fetchRemoteCandidates(listUrls: List<String>): FetchedCandidates {
         var raw: String? = null
         var usedUrl: String? = null
         val errors = mutableListOf<String>()
@@ -74,29 +90,62 @@ class CommunityCatalogDiscovery(
             }
             errors += "$url: ${result.error ?: "未知错误"} ${result.detail.orEmpty()}".trim()
         }
-
-        var usedCached = false
         if (raw == null) {
-            val cached = loadStore()
-            if (!cached.lastGoodListRaw.isNullOrBlank()) {
-                raw = cached.lastGoodListRaw
-                usedUrl = cached.lastGoodListUrl
-                usedCached = true
-            }
+            return FetchedCandidates(null, null, emptyList(),
+                parseError = "清单读取失败（尚未回退缓存）", fetchErrors = errors)
         }
-        if (raw == null) {
-            return DiscoveryReport(null, false, 0, 0, 0, 0, 0,
-                parseError = "清单读取失败且无缓存，保留现有候选", fetchErrors = errors)
-        }
-
         val parsed = CommunityListParser.parse(raw)
-        if (parsed !is CommunityListParse.Valid) {
-            // 结构非法：保留现有候选与上次成功缓存，只记录错误。
-            return DiscoveryReport(usedUrl, true, 0, 0, 0, 0, 0,
+        return if (parsed is CommunityListParse.Valid) {
+            FetchedCandidates(raw, usedUrl, parsed.list.sources, parseError = null, fetchErrors = errors)
+        } else {
+            FetchedCandidates(raw, usedUrl, emptyList(),
                 parseError = (parsed as CommunityListParse.Invalid).reason, fetchErrors = errors)
         }
+    }
 
-        val previous = loadStore()
+    /**
+     * 阶段 B：**锁内**合并。调用方（Repository）必须持有 Mutex。
+     *
+     * 保证：
+     * - 重新读取最新候选库快照，绝不使用网络请求开始前的旧快照覆盖；
+     * - 网络/解析失败时用最新快照的 lastGoodListRaw 回退，且不清空候选；
+     * - [CommunityCatalogDiscovery] 的 tombstone（用户删除的 id）命中条目直接跳过，
+     *   防止"删除后一条在途的旧刷新把候选复活"；
+     * - 人工审核状态（REJECTED/QUARANTINED）沿用最新值，不被发现结果覆盖；
+     * - 扫描证据（sha256/扫描时间/静态结论）在远端条目未变化时保留，不被空结果清除。
+     */
+    suspend fun mergeFetchedCandidates(fetched: FetchedCandidates): DiscoveryReport {
+        val now = clock()
+        val previous = loadStore() // 锁内重读：始终基于最新快照
+        var raw = fetched.raw
+        var usedUrl = fetched.usedUrl
+        var usedCached = false
+        var sources = fetched.sources
+
+        if (!fetched.fetchedOk) {
+            // 网络全失败或结构非法：尝试用最新快照的缓存原文继续。
+            // 结构非法（raw 存在但 parseError 非空）时不回退到自身，直接保留现有候选。
+            if (raw == null && !previous.lastGoodListRaw.isNullOrBlank()) {
+                val cachedParsed = CommunityListParser.parse(previous.lastGoodListRaw)
+                if (cachedParsed is CommunityListParse.Valid) {
+                    raw = previous.lastGoodListRaw
+                    usedUrl = previous.lastGoodListUrl
+                    sources = cachedParsed.list.sources
+                    usedCached = true
+                }
+            }
+            if (raw == null || sources.isEmpty() && fetched.parseError != null) {
+                // 无缓存可用，或远端清单结构非法：不清空候选、不覆盖 lastGoodListRaw。
+                return DiscoveryReport(
+                    usedUrl, usedCached, 0, 0, 0, 0, 0,
+                    parseError = fetched.parseError ?: "清单读取失败且无缓存，保留现有候选",
+                    fetchErrors = fetched.fetchErrors,
+                )
+            }
+            // 缓存回退成功：清掉远端错误，按 ok 报告。
+        }
+
+        val ignored = previous.ignoredIds.map { it.lowercase() }.toSet()
         val candidates = previous.candidates.toMutableList()
         var added = 0
         var sameIdUpdated = 0
@@ -104,7 +153,9 @@ class CommunityCatalogDiscovery(
         var revivedFromStale = 0
         val seenIds = mutableSetOf<String>()
 
-        for (entry in parsed.list.sources) {
+        for (entry in sources) {
+            // 墓碑：用户删除过的 id（含别名）不因新的发现而复活。
+            if (entry.id.lowercase() in ignored) continue
             seenIds += entry.id.lowercase()
             val norm = CommunityCatalogNormalizer.normalizeUrl(entry.url)
             val path = CommunityCatalogNormalizer.repoPath(entry.url)
@@ -134,8 +185,14 @@ class CommunityCatalogDiscovery(
                     candidates[decision.existingIndex] = old.copy(
                         name = entry.name,
                         rawUrl = entry.url,
-                        normalizedUrl = norm,
-                        repoPath = path,
+                        // URL 变了才清掉旧的哈希/扫描证据；URL 未变时保留，避免每次刷新把证据抹掉。
+                        sha256 = if (old.normalizedUrl == norm) old.sha256 else null,
+                        hashUnverified = if (old.normalizedUrl == norm) old.hashUnverified else false,
+                        sizeBytes = if (old.normalizedUrl == norm) old.sizeBytes else null,
+                        version = if (old.normalizedUrl == norm) old.version else null,
+                        scannedAtMillis = if (old.normalizedUrl == norm) old.scannedAtMillis else 0,
+                        staticVerdict = if (old.normalizedUrl == norm) old.staticVerdict else null,
+                        staticBlockReasons = if (old.normalizedUrl == norm) old.staticBlockReasons else emptyList(),
                         lastCheckedAtMillis = now,
                         reviewState = if (revived) CandidateReviewState.DISCOVERED.wireName else old.reviewState,
                         verificationLevel = old.verificationLevel,
@@ -179,20 +236,31 @@ class CommunityCatalogDiscovery(
             lastGoodListRaw = raw,
             lastGoodListUrl = usedUrl,
             candidates = candidates,
+            ignoredIds = previous.ignoredIds,
         ))
         return DiscoveryReport(
             listUrl = usedUrl,
             usedCachedList = usedCached,
-            entriesInList = parsed.list.sources.size,
+            entriesInList = sources.size,
             added = added,
             sameIdUpdated = sameIdUpdated,
             duplicateUrlsMerged = merged,
             markedStale = markedStale,
             revivedFromStale = revivedFromStale,
             parseError = null,
-            fetchErrors = errors,
+            fetchErrors = fetched.fetchErrors,
         )
     }
+
+    /**
+     * 兼容入口：一次完成「锁外获取 + 合并」两阶段，供离线/单测使用。
+     *
+     * 注意：本方法**不带锁**，合并阶段的读改写不是原子的。生产 App 必须通过
+     * [CommunityDiscoveryRepository.refresh]（它持有 Repository Mutex，锁外 fetch + 锁内 merge）
+     * 调用，禁止在生产路径直接调用本方法写候选库。
+     */
+    suspend fun discover(listUrls: List<String>): DiscoveryReport =
+        mergeFetchedCandidates(fetchRemoteCandidates(listUrls))
 
     /**
      * 把**已下载到隔离区**的脚本文本做静态扫描，只更新候选元数据与风险，

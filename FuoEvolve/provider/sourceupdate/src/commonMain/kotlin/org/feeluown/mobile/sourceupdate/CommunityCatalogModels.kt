@@ -124,6 +124,11 @@ data class CandidateStore(
     val lastGoodListRaw: String? = null,
     val lastGoodListUrl: String? = null,
     val candidates: List<DiscoveredCandidate> = emptyList(),
+    /**
+     * 墓碑：用户主动删除的候选 id（含别名）。删除=永久忽略，后续发现命中这些 id 时跳过，
+     * 避免"删除后一条在途的旧刷新结果把刚删的候选复活"。用默认值保证旧数据迁移安全。
+     */
+    val ignoredIds: List<String> = emptyList(),
 )
 
 /** 去重决策：一条新发现条目如何归并进已有候选。 */

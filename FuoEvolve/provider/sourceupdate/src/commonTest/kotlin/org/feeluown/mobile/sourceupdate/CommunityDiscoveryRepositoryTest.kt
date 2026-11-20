@@ -93,11 +93,17 @@ class CommunityDiscoveryRepositoryTest {
         val script = "/* @name 长青SVIP音源 */ const x = 1"
         val hash = Sha256.hex(script.encodeToByteArray())
 
-        // 哈希不符：整条拒绝，不写隔离脚本、不改候选。
-        val bad = repo.scanDownloadedScript("a", script, "deadbeef")
+        // 哈希不符（合法 64 位 hex 但与实际不同）：整条拒绝，不写隔离脚本、不改候选。
+        val wrongHash = "0".repeat(64)
+        val bad = repo.scanDownloadedScript("a", script, wrongHash)
         assertTrue(bad is CommunityDiscoveryRepository.QuarantineDownloadResult.Sha256Mismatch)
         assertNull(repo.quarantinedScriptText("a"), "哈希不符时不写隔离脚本")
         assertNull(repo.candidate("a")!!.sha256, "哈希不符时不更新候选")
+
+        // 预期哈希格式非法（非 64 位 hex）：拒绝提交，不写隔离区。
+        val malformed = repo.scanDownloadedScript("a", script, "deadbeef")
+        assertTrue(malformed is CommunityDiscoveryRepository.QuarantineDownloadResult.Failed)
+        assertNull(repo.quarantinedScriptText("a"), "非法哈希格式不写隔离脚本")
 
         // 哈希正确：写隔离脚本 + 扫描（BLOCK 脚本被隔离）。
         val good = repo.scanDownloadedScript("a", script, hash, version = "1.3.0")

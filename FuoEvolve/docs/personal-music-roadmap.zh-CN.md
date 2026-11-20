@@ -1073,3 +1073,40 @@ SSRF 危险目标检测（复用 `LxUrlSafety` 公开门面，私网/IPv6/metada
 （Metadata/Android/iOS Simulator/Desktop）+ androidApp + desktopRuntime + lxruntime iOS 全绿。
 新增测试：并发 5、下载器 7、Worker 决策 1、UI 逻辑 3。无 Compose UI 测试依赖，未引入新依赖；
 窄屏布局由三端编译保证，UI 状态逻辑用 Controller 单测验证。master/正式目录/公钥/验签未改。
+
+## §15 阶段 D.1：发现流程解耦与安全专项复核（2026-11-20）
+
+**目标**：架构加固 + 回归验证，不新增音源。基线 `36804ea` → 新提交见下。
+
+**P0 发现流程解耦（消除锁内网络）**：`CommunityCatalogDiscovery` 拆成两段——
+`fetchRemoteCandidates(listUrls)`（阶段 A，纯网络+解析，**不读写 store**，可在 Mutex 外调用）与
+`mergeFetchedCandidates(fetched)`（阶段 B，调用方持锁，重读最新 store 再合并写回）。
+`CommunityDiscoveryRepository.refresh()` 改为「锁外 fetch → ensureActive → 锁内 merge」，
+网络等待期间 Mutex 空闲，人工审核/删除/扫描提交不再被慢网络阻塞。
+`discover()` 保留为测试兼容入口（非原子），生产路径只走 Repository。
+
+**删除=永久忽略（tombstone）**：`CandidateStore` 新增 `ignoredIds`（默认空，旧数据安全迁移）。
+`deleteCandidate` 把主 id + 别名写入墓碑；合并时命中墓碑的条目直接跳过，
+杜绝"删除后一条在途旧刷新把候选复活"。需人工 `unignore()` 才能重新纳入。
+合并时 URL 未变的候选保留 sha256/扫描时间/静态结论等审查证据，不被空发现结果抹除；
+预期哈希非法（非 64 位 hex）拒绝提交。
+
+**P1 下载器安全复核**：新增 `validateDownloadUrl`，在 LX SSRF 门面之上补严格语法边界：
+HTTPS-only、拒绝 userinfo / 异常端口（仅 443）/ 尾随点 / 百分号编码主机 / 控制字符，
+并覆盖 localhost、私网、回环、链路本地、IPv6 字面量、IPv4-mapped IPv6、
+非标准 IPv4 表示（0x7f000001 / 127.1 / 2130706433）、元数据地址。
+3xx 一律拒绝（客户端 followRedirects=false）、Content-Length 预判 + 流式双限、15s 超时、
+取消信号上抛；下载器只到内存不落盘，哈希核验/隔离区写入在 Repository 锁内完成。
+**已知边界**：commonMain 无法做 DNS 解析后逐 IP 校验，DNS rebinding 无法彻底防住；
+缓解为"只下载候选登记 URL + 体积/时间硬限制"，不声称已彻底防护。
+
+**P1 Worker / P2 一致性复核**：确认 Worker 直接 await Repository.suspend refresh、
+CancellationException 重抛、网络错误 retry / 清单非法 failure、24h+CONNECTED+KEEP 未变、
+UI 与 Worker 共用同一 Repository 单例。所有候选库读改写均经同一 Mutex；
+扫描的内部 store 读写在锁内被 Repository 串行化；重复 refresh 幂等不复制候选、不丢人工状态。
+
+**验证**：新增 11 项解耦并发测试（门闩构造确定性时序，无随机 delay）+ 3 项下载器安全测试 +
+幂等测试；sourceupdate 132 / lxruntime 80 / shared 376 项 0 失败（以实际执行为准）；
+Android/iOS Simulator/Desktop/androidApp/desktopRuntime/Metadata 编译见提交记录。
+未引入新依赖，未删测试、未放宽任何安全断言。master/正式目录/公钥/签名未改；
+无自动批准/安装；长青/非常刀/玉宁熙/Fish/Flower 未接入真实音源。

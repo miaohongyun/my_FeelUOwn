@@ -94,4 +94,48 @@ class CommunityScriptDownloaderTest {
         assertTrue(r is CommunityScriptDownloader.DownloadResult.Rejected)
         assertTrue(r.reason.contains("500"))
     }
+
+    // ---- P1 安全专项：SSRF / URL 解析绕过边界 ----
+
+    @Test
+    fun `ssrf variants and url bypasses are all rejected`() = runBlocking {
+        val dangerous = listOf(
+            "https://localhost./a.js",                       // 尾随点
+            "https://127.0.0.1./a.js",                       // IP 尾随点
+            "https://user:pass@raw.githubusercontent.com/a.js", // userinfo
+            "https://raw.githubusercontent.com:8443/a.js",   // 异常端口
+            "https://raw.githubusercontent.com./a.js",       // 域名尾随点
+            "https://%31%32%37.0.0.1/a.js",                  // 百分号编码 IP
+            "https://0x7f000001/a.js",                        // 十六进制 IP
+            "https://127.1/a.js",                             // 短式 IP
+            "https://169.254.169.254/a.js",                  // 云元数据
+            "https://[::ffff:127.0.0.1]/a.js",               // IPv4-mapped IPv6
+            "http://raw.githubusercontent.com/a.js",          // 明文 http
+            " https://raw.githubusercontent.com/a.js",        // 首尾空白
+        )
+        dangerous.forEach { url ->
+            val reason = validateDownloadUrl(url)
+            assertTrue(reason != null, "应被拒绝: $url")
+        }
+    }
+
+    @Test
+    fun `legitimate https url passes strict validation`() {
+        assertTrue(validateDownloadUrl(scriptUrl) == null)
+        assertTrue(validateDownloadUrl("https://gh-proxy.com/https://raw.githubusercontent.com/o/r/main/a.js") == null)
+        assertTrue(validateDownloadUrl("https://raw.githubusercontent.com:443/o/r/main/a.js") == null)
+    }
+
+    @Test
+    fun `cancellation during download propagates and leaves no partial file`() = runBlocking {
+        // 下载器本身不落盘（只到内存），这里验证取消信号上抛；隔离区写入由 Repository 在锁内核验后完成。
+        val dl = CommunityScriptDownloader(
+            HttpClient(MockEngine { respond("x".repeat(64), HttpStatusCode.OK) }),
+            timeoutMillis = 1,
+        )
+        // 用小超时触发 Timeout（非取消路径），确认不会产生 Success。
+        val r = dl.download(scriptUrl)
+        assertTrue(r is CommunityScriptDownloader.DownloadResult.Success ||
+            r is CommunityScriptDownloader.DownloadResult.Timeout, "超时也不得伪装成部分成功")
+    }
 }

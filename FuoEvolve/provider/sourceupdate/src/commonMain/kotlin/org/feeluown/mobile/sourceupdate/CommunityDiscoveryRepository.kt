@@ -1,8 +1,10 @@
 package org.feeluown.mobile.sourceupdate
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.coroutines.coroutineContext
 import org.feeluown.mobile.sourceupdate.crypto.Sha256
 
 /**
@@ -70,24 +72,34 @@ class CommunityDiscoveryRepository(
     /**
      * 真正的挂起刷新：Worker 与 UI 共用。
      *
-     * 说明：清单的网络读取发生在 discovery.discover() 内部，而该方法把「读清单 → 合并 →
-     * 写 store」作为一个整体封装，无法在不动框架的前提下拆开。为保证合并结果与人工审核互斥，
-     * 这里把整个 discover 放进同一把锁——清单请求有 15s 超时上限，且刷新本身是低频操作（24h）；
-     * 真正的大 payload（脚本下载）仍在锁外执行（见 [downloadAndScan]）。
+     * 两阶段（阶段 D.1 P0）：
+     * - 阶段 A [discovery.fetchRemoteCandidates]：**锁外**做网络请求与解析，绝不读候选库；
+     * - 阶段 B [discovery.mergeFetchedCandidates]：**锁内**重读最新候选库再合并写回。
+     *
+     * 因此网络等待期间 Mutex 是空闲的，人工审核/删除/扫描提交不会被慢网络阻塞；
+     * 而合并永远基于锁内读到的最新状态，不会被请求发出前的旧快照覆盖。
      */
-    suspend fun refresh(): RefreshResult = mutex.withLock {
-        val report = discovery.discover(communityListUrls)
-        RefreshResult(
-            ok = report.ok,
-            candidateCount = discovery.loadStore().candidates.size,
-            added = report.added,
-            sameIdUpdated = report.sameIdUpdated,
-            merged = report.duplicateUrlsMerged,
-            markedStale = report.markedStale,
-            revivedFromStale = report.revivedFromStale,
-            usedCachedList = report.usedCachedList,
-            parseError = report.parseError,
-        )
+    suspend fun refresh(): RefreshResult {
+        // 阶段 A：锁外网络，CancellationException 由框架/ktor 自然上抛。
+        val fetched = discovery.fetchRemoteCandidates(communityListUrls)
+        // 网络返回后、拿锁前检查取消：取消后绝不写入这份"迟到的发现结果"。
+        coroutineContext.ensureActive()
+        // 阶段 B：锁内合并（含缓存回退），读改写全程互斥。
+        return mutex.withLock {
+            coroutineContext.ensureActive()
+            val report = discovery.mergeFetchedCandidates(fetched)
+            RefreshResult(
+                ok = report.ok,
+                candidateCount = discovery.loadStore().candidates.size,
+                added = report.added,
+                sameIdUpdated = report.sameIdUpdated,
+                merged = report.duplicateUrlsMerged,
+                markedStale = report.markedStale,
+                revivedFromStale = report.revivedFromStale,
+                usedCachedList = report.usedCachedList,
+                parseError = report.parseError,
+            )
+        }
     }
 
     suspend fun quarantine(id: String, reason: String): Boolean = updateStateLocked(id) { old ->
@@ -123,15 +135,32 @@ class CommunityDiscoveryRepository(
         true
     }
 
-    /** 删除候选及其隔离脚本；只触 community/ 子树，不碰正式目录。 */
+    /**
+     * 删除候选及其隔离脚本；只触 community/ 子树，不碰正式目录。
+     *
+     * 删除=永久忽略：把主 id 与所有别名写进 [CandidateStore.ignoredIds] 墓碑。
+     * 这样即使删除时有一条刷新正在锁外下载清单，它完成后的合并也会跳过这些 id，
+     * 不会把刚删除的候选"复活"。用户若想重新纳入，需显式调用 [unignore]。
+     */
     suspend fun deleteCandidate(id: String): Boolean = mutex.withLock {
         val snapshot = discovery.loadStore()
         val target = snapshot.candidates.firstOrNull { it.id.equals(id, ignoreCase = true) }
             ?: return@withLock false
         val next = snapshot.candidates.filterNot { it.id.equals(id, ignoreCase = true) }
-        saveStoreLocked(snapshot, next)
+        val tombstones = (snapshot.ignoredIds + listOf(target.id) + target.aliasIds)
+            .map { it.lowercase() }.distinct()
+        saveStoreLocked(snapshot.copy(ignoredIds = tombstones), next)
         val scriptPath = quarantinePath(target.id)
         if (store.exists(scriptPath)) store.delete(scriptPath)
+        true
+    }
+
+    /** 显式解除忽略：允许该 id 在下一次刷新中被重新发现（人工决定，非自动）。 */
+    suspend fun unignore(id: String): Boolean = mutex.withLock {
+        val snapshot = discovery.loadStore()
+        val next = snapshot.ignoredIds.filterNot { it.equals(id, ignoreCase = true) }
+        if (next.size == snapshot.ignoredIds.size) return@withLock false
+        saveStoreLocked(snapshot.copy(ignoredIds = next), snapshot.candidates)
         true
     }
 
@@ -208,6 +237,10 @@ class CommunityDiscoveryRepository(
         if (index < 0) return@withLock QuarantineDownloadResult.NotFound
         val current = snapshot.candidates[index]
         val actual = Sha256.hex(scriptText.encodeToByteArray())
+        // 预期哈希若声明了，必须是合法 64 位 hex；非法格式直接拒绝提交（不写隔离区）。
+        if (expectedSha256 != null && !isSha256Hex(expectedSha256)) {
+            return@withLock QuarantineDownloadResult.Failed("预期 SHA256 格式非法（应为 64 位 hex）")
+        }
         val hashOk = expectedSha256?.let { actual.equals(it.trim(), ignoreCase = true) }
 
         if (hashOk == false) {
@@ -260,6 +293,10 @@ sealed interface CommunityScriptDownloadOutcome {
     data class Downloaded(val text: String, val version: String? = null) : CommunityScriptDownloadOutcome
     data class Failed(val reason: String) : CommunityScriptDownloadOutcome
 }
+
+/** 是否是合法的 SHA256 hex（64 位十六进制）。 */
+internal fun isSha256Hex(value: String): Boolean =
+    value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
 
 /** 候选 store 的 JSON 编解码（集中一处，避免 Repository 和框架各写一份配置不一致）。 */
 internal object CommunityDiscoverySerialization {
