@@ -77,11 +77,13 @@ class MusicFreeSandboxSession(
     /** 各平台实际能强制的限制，执行结果里回报，供 UI/报告诚实展示。 */
     val capabilities: EngineCapabilities = runCatching {
         quickJs.memoryLimit = limits.maxMemoryBytes
-        // 注：quickjs-kt 1.0.15 的 maxStackSize 在 commonMain 未暴露为可写属性
-        // （JVM 字节码有 setMaxStackSize，但 KMP 公共 API 不稳定），因此 stack 上限如实记为未强制。
+        // 阶段 I4 修正：H0/H1 曾记"maxStackSize 在 commonMain 未暴露"，I4 用编译探针
+        // （Desktop + iOS Simulator 均编译通过）证实公共 API 实际存在 quickJs.maxStackSize。
+        // 真正启用并按"读回值是否等于设定值"如实判定 canSetStackSize，不虚报。
+        quickJs.maxStackSize = limits.maxStackBytes
         EngineCapabilities(
             canSetMemoryLimit = quickJs.memoryLimit == limits.maxMemoryBytes,
-            canSetStackSize = false,
+            canSetStackSize = quickJs.maxStackSize == limits.maxStackBytes,
             canInterruptEvaluation = true, // evaluationTimeoutMillis + interruptEvaluation 原生可用
         )
     }.getOrDefault(

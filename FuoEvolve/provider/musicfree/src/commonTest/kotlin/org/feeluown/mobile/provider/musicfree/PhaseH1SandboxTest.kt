@@ -89,8 +89,10 @@ class PhaseH1SandboxTest {
             val r = s.execute("module.exports = { title: '晴天', artist: '周杰伦' }; JSON.stringify(module.exports);")
             assertTrue(r is ExecResult.Ok, "正常脚本应成功，实际=$r")
             assertTrue(r.value!!.contains("晴天"))
-            // 能力如实回报：memoryLimit 可设；stack 未强制。
-            assertFalse(r.caps.canSetStackSize, "stack 限制未暴露，必须如实为 false")
+            // 阶段 I4 修正：maxStackSize 公共 API 实测可用（编译探针 Desktop+iOS 通过），
+            // 现按读回值如实回报，不再恒 false。此处只断言能力字段存在且为布尔值。
+            assertTrue(r.caps.canSetMemoryLimit, "memoryLimit 应被设置")
+            assertTrue(r.caps.canInterruptEvaluation, "超时中断能力应为真")
         } finally {
             s.close()
         }

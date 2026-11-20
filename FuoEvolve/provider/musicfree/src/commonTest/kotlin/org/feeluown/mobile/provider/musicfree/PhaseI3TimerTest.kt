@@ -82,7 +82,7 @@ class PhaseI3TimerTest {
             val n = r.value.orEmpty()
             val m = Regex("\"n\":(\\d+)").find(n)
             assertTrue(m != null, "应读到 tick 计数：$n")
-            val ticks = m!!.groupValues[1].toInt()
+            val ticks = m.groupValues[1].toInt()
             assertTrue(ticks >= 2 && ticks <= 10, "setInterval 应重复触发 2~10 次，实际=$ticks（跨求值仅 1 次说明 timer 不可靠）")
         } finally {
             s.close()
