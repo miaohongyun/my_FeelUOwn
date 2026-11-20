@@ -1265,3 +1265,15 @@ I0 封送：PhaseI0MarshallingTest 13×2 全绿，实测字符串实参为真实
 DNS 审查：三端 client(OkHttp/Darwin)有 HttpTimeout，但 DNS→连接 IP 绑定未实现，DNS rebinding 如实列未解决（字符串层 3xx 域名切换已封堵，但连接层正交风险仍留）。
 测试：PhaseJ0GatewayTest 14 项（重定向/流式/编码/权限绑定）+ I4 探测表达式修复（如实记录内置 eval 存在但无宿主能力）；desktopTest 115 项 0 失败、testAndroidHostTest 115 项 0 失败；iOS 交叉编译+测试源码编译 --rerun-tasks 通过、iosSimulatorArm64Test NOT_RUN(无 Xcode)。未接真实网络/未冒充搜索播放/未推送。详见 audit §23。
 
+
+
+## §29 阶段 J1（收窄范围）：Gateway 共用网络底座真实验证（2026-11-20）
+
+用户收窄 J1：不批量接入插件，优先验证共用网络底座（Gateway 重定向 + 流式限额）。基线本地=远端 work=3f0d758、J0=50f1871 本地未推、master=fc05530；只本地提交。
+
+J0 的 14 项 Gateway 测试全是假执行器，asProviderNetworkExecutor()（Ktor OkHttp + followRedirects=false）从未真实执行。本阶段用真实 socket HTTP server + 真实 Ktor OkHttp client 补证：对照实验证明默认 client 跟随 302 得 200，而经 asProviderNetworkExecutor 包装后得原始 302 且最终路径命中 0 次（底层确实不先行跟随的铁证）。诚实分层：get() 生产策略禁明文 HTTP/裸 IP 无法打本地 server，故 executor 契约层用真实网络、Gateway 决策层用真实抓到的 302/Location/Content-Length/body 字节喂受控执行器（非 Mock）。
+
+发现并修复真实缺口：Ktor channel.cancel 后 readAvailable 仍返回已缓冲数据（256B），BodyStream 加 cancelled 标志使 cancel 后立即返回 -1（@Volatile 因 KMP/iOS 兼容未用，cancel/read 顺序调用）。测试 PhaseJ1RealNetworkBaseTest desktop/androidHost 各 5 项；全量 desktopTest 120 项、testAndroidHostTest 120 项 0 失败；iOS 交叉编译+测试源码编译 --rerun-tasks 通过、iosSimulatorArm64Test NOT_RUN(无 Xcode)。
+
+结论：共用底座重定向/流式限额已有真实网络证据并修复 cancel 缺口；DNS rebinding 未解决、iOS 运行测试未执行、未接任何插件、未做真实搜索播放、未推送。详见 audit §24。
+

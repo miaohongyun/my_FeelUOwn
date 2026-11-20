@@ -1081,3 +1081,43 @@ H2 测试适配新契约（保留全部原断言语义，重定向用例改为�
 
 J0 五项整改（重定向/流式限额/axios 参数/SHA 绑定/DNS 审查）中前四项已实现并有真实测试证据；DNS→连接的 IP 绑定三端未实现，如实列为未解决风险。本阶段未接入真实 Ktor client 到生产 Provider（那是 J1），未做真实网络请求，不把 HTTP 206/初始化冒充搜索或播放。未推送。
 
+
+
+---
+
+## §24 阶段 J1（收窄范围）：Gateway 共用网络底座真实验证（2026-11-20）
+
+用户收窄 J1 范围：不批量接入插件，优先验证所有 MusicFree 来源共用的网络底座——Gateway 的重定向与流式限额。基线：本地与远端 work 分支均 `3f0d758`(I 最终)，J0 提交 `50f1871` 本地在、未推；master=`fc05530`。本阶段只本地提交。
+
+### 24.1 为什么要补这一层
+
+J0 的 14 项 Gateway 测试**全部使用假执行器**（`fromStringExecutor` / 自定义 `NetworkExecutor`），新增的 `asProviderNetworkExecutor()`（Ktor OkHttp + `config{followRedirects=false}`、body 包 `BodyStream`）**从未被真实执行过**。任务书 J0 2.1 明确要求"必须证明底层 executor 确实没有先行跟随"——假执行器无法给出该证据。本阶段用**真实 socket HTTP server（`com.sun.net.httpserver`）+ 真实 Ktor OkHttp client**补上。
+
+### 24.2 诚实分层（不为测试放宽生产策略）
+
+`Gateway.get()` 的生产策略禁止明文 HTTP + 裸 IP + 私网（CandidateNetworkPolicy / staticUrlRejection），完整 get() 链路**无法**打本地 127.0.0.1 server；为测试放宽即违反红线。因此分两层：
+- **executor 契约层（真实网络）**：直接调 `asProviderNetworkExecutor().execute()`，验证 3xx 原样上交、Location 原样上报、真实 Content-Length 头、真实 body 流式读取、cancel 释放。
+- **Gateway 决策层（真实数据 + 受控执行器）**：把从真实 wire 抓到的 302/Location、Content-Length、body 字节喂给 `get()`（合规域名 api.example.com），验证 DENY_ALL 拒跨域、Content-Length 预检 0 读取、无 Content-Length 时流式累计超限并 cancel。
+- 两层均非 Mock：请求真发到 socket server、响应真来自 wire。
+
+### 24.3 对照实验铁证（底层确实不先行跟随）
+
+`j1_realExecutorDoesNotFollowRedirect`：同一 302 server（`/start`→302 Location `/final`，`/final`→200 "FINAL_BODY"）——
+- 对照 A：默认 `HttpClient(OkHttp){}` 自动跟随，得到 200 "FINAL_BODY"，`/final` 命中 1 次；
+- 实验 B：`asProviderNetworkExecutor()` 包装后得到原始 **302**、Location=`/final`，**`/final` 命中 0 次**。
+这直接证明 `followRedirects=false` 真实生效、底层没有先行跟随（不是"调用 enforceRedirect 就宣称保护"）。
+
+### 24.4 发现并修复的真实缺口
+
+`j1_realStreamBodyCancellationReleasesResource` 实测发现：Ktor `channel.cancel(null)` 后再次 `readAvailable` 仍返回已缓冲数据（实测 256B），并未立即停止产出——`cancel()` 未兑现"取消立即生效、不再产出 body"的契约。修复 `ProviderNetworkGatewayKtor.kt`：BodyStream 加 `cancelled` 标志，`cancel()` 置位并取消底层 channel，`read()` 置位后直接返回 -1、异常按 EOF 处理（不把取消异常伪装成 body 数据）。修复后 5 项全绿。注：`@Volatile` 因 KMP commonMain/iOS 兼容性未使用（cancel/read 为顺序调用）。
+
+### 24.5 测试与验证
+
+新增 `PhaseJ1RealNetworkBaseTest`（desktopTest/androidHostTest 各 5 项）：真实重定向对照、真实 Location 驱动 Gateway 拒跨域、真实 Content-Length 上报与流式读取、真实 wire 响应驱动 Gateway 预检+流式限额、cancel 释放与连接复用。构建文件为两个 JVM 测试源集加 `ktor-client-okhttp`（真实引擎，非 Mock）。
+
+全量回归：desktopTest **120 项 0 失败**（J0 115 + J1 5）、testAndroidHostTest **120 项 0 失败**；iOS `compileKotlinIosSimulatorArm64` + `compileTestKotlinIosSimulatorArm64` 以 `--rerun-tasks` 通过，`compileKotlinMetadata` SKIPPED（本模块无 metadata target），`iosSimulatorArm64Test` 未执行（Windows 无 Xcode/模拟器，NOT_RUN）。
+
+### 24.6 结论与未解决
+
+共用网络底座的重定向（不先行跟随 + 逐跳策略 + 上限）与流式限额（Content-Length 预检 + 流式累计 + cancel）已有**真实网络证据**，并修复了一个真实的 cancel 契约缺口。仍未解决：DNS→连接的 IP 绑定（DNS rebinding，三端未实现，J0 §23 已记）；iOS 运行测试 NOT_RUN；本阶段未接入任何插件、未做真实搜索/URL/音频/播放（不把底座验证冒充搜索或播放）。未推送。
+

@@ -60,6 +60,7 @@
 | [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 追加 G1 合规候选（§13）/ G2 MusicFree 来源发现与受控适配层（§14） |
 | [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 阶段 I CommonJS 兼容性/Node 子集/沙箱边界/真实插件验证（§22），含封送与 maxStackSize 旧结论修正 |
 | [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 阶段 J0 Gateway 网络出口整改（§23）：重定向/流式限额/axios 编码/SHA 绑定/DNS 审查 |
+| [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 阶段 J1（收窄）Gateway 共用网络底座真实验证（§24）：真实 Ktor OkHttp 对照实验 + cancel 缺口修复 |
 
 ## 阅读顺序建议
 

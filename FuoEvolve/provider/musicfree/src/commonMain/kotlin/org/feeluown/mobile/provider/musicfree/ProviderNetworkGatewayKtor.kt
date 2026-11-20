@@ -34,10 +34,22 @@ fun HttpClient.asProviderNetworkExecutor(): ProviderNetworkGateway.NetworkExecut
                 entry.key to entry.value.firstOrNull().orEmpty()
             },
             body = object : ProviderNetworkGateway.BodyStream {
-                override suspend fun read(buffer: ByteArray): Int =
-                    channel.readAvailable(buffer, 0, buffer.size)
+                // J1：Ktor 的 channel.cancel 后，已缓冲数据仍可能被 readAvailable 返回（实测一次 256B）。
+                // 用一个 cancelled 标志同步阻断后续读取，兑现"取消立即生效、不再产出 body"的契约。
+                private var cancelled = false
+
+                override suspend fun read(buffer: ByteArray): Int {
+                    if (cancelled) return -1
+                    return try {
+                        channel.readAvailable(buffer, 0, buffer.size)
+                    } catch (_: Exception) {
+                        -1 // 底层通道已关闭视为 EOF，不把取消过程中的异常伪装成 body 数据
+                    }
+                }
 
                 override fun cancel() {
+                    if (cancelled) return
+                    cancelled = true
                     runCatching { channel.cancel(null) }
                 }
             },

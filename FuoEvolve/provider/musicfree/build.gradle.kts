@@ -37,6 +37,14 @@ kotlin {
             implementation(libs.kotlinx.coroutines.test)
             implementation(libs.ktor.client.mock)
         }
+        // 阶段 J1：executor 契约层真实验证需要真实 HTTP 引擎（非 Mock）。
+        // Gateway 决策层仍用受控执行器（生产策略禁止明文 HTTP/裸 IP，无法打本地 server）。
+        val desktopTest by getting {
+            dependencies { implementation(libs.ktor.client.okhttp) }
+        }
+        val androidHostTest by getting {
+            dependencies { implementation(libs.ktor.client.okhttp) }
+        }
     }
 }
 

@@ -222,7 +222,7 @@ class ProviderNetworkGateway(
                         }
                     }
                 }
-                result!!
+                result
             }
         } catch (_: TimeoutCancellationException) {
             GatewayResult.Failed("请求超时（${permission.candidatePolicy.requestTimeoutMs}ms）")
