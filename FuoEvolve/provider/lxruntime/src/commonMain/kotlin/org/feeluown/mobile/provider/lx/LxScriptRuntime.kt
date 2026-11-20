@@ -158,6 +158,31 @@ class LxScriptRuntime(
     }
 
     /**
+     * 阶段 F：按候选级网络权限加载脚本（最小授权 + SHA 绑定）。
+     *
+     * 与 [load] 的区别：
+     * - 先校验 policy 仍与 [CommunitySourceRegistry] 登记的 SHA 绑定（脚本一变审批即失效）；
+     * - 再校验本文件实际字节的 SHA 与 policy 绑定值一致，防止"审的是 A、跑的是 B"；
+     * - 最终把 policy.allowedHosts 作为唯一白名单交给 session（deny-all policy → 空名单 → 全部拒绝）。
+     *
+     * 任何校验失败都抛 [LxScriptException]，绝不退回到全局放开白名单。
+     */
+    suspend fun loadWithCandidatePolicy(
+        name: String,
+        source: String,
+        policy: CandidateNetworkPolicy,
+        timeoutMs: Long = LxProtocol.DEFAULT_INIT_TIMEOUT_MS,
+    ) {
+        val stale = CandidateNetworkPolicyRegistry.validateAgainstRegistry(policy)
+        if (stale != null) throw LxScriptException("候选 [$name] 网络权限审批失效：$stale")
+        val actualSha = org.feeluown.mobile.sourceupdate.crypto.Sha256.hex(source.encodeToByteArray())
+        if (!policy.isBoundTo(actualSha)) {
+            throw LxScriptException("候选 [$name] 实际 SHA 与网络权限绑定值不一致，拒绝加载")
+        }
+        load(name, source, timeoutMs = timeoutMs, allowedHosts = policy.allowedHosts)
+    }
+
+    /**
      * 读取 `inited` 事件声明的音源能力。
      *
      * 官方约束：初始化事件发送前出现任何错误即视为初始化失败，因此没有 `inited` 是硬错误，

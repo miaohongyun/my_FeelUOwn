@@ -283,3 +283,129 @@ QQ音乐 v1.9.26、酷我 v1.9.24、酷狗 v1.9.24、咪咕 v1.9.20、网易云 
 **两轮总结**：E0–E2 建立 31 候选台账与静态审查（33 脚本取证、长青 BLOCK 保持）；E3–E5 完成 LX 架构验证
 （3 个 SIMULATED_INIT 通过、SSRF 门禁实测生效）、聚合/插件生态拆解（星澜越权确认+BLOCK、MusicFree 57 插件清单）、
 管理 UI 增强（统计/筛选/安装边界）。**全程未执行真实商业音频下载、未绕会员、未自动批准或安装、未改 master/正式目录/公钥/签名。**
+
+
+---
+
+## 12. 阶段 F：合规音源真实功能验证与受控接入准备（2026-11-20）
+
+> 本节是**真实网络验证报告**，与 E3 的 MockEngine 模拟验证严格分栏。
+> 验证方式：本机 HTTPS 代理出网 + 只读公开端点 + 严格超时（8–15s）+ 响应体/响应头有限读取。
+> 未下载任何商业音频文件、未提供 Cookie/Token、未做会员/访问控制绕过、未保存音频正文。
+> **一次成功不等于长期稳定，HTTP 200/206 ≠ 真实播放。** 所有失败请求、错误码、域名拒绝原因一并列出。
+
+### 12.1 F0 第一批（至尊 / HUIBQ / gdstudio）真实结果
+
+先重新核对来源/版本/SHA/平台/域名（与 E2 登记表一致，SHA 未变，故沿用审查结论）：
+
+| 候选 | 版本 | SHA256(前12) | 声明域名 | 静态 | E3 LX模拟 | 脚本 action |
+| --- | --- | --- | --- | --- | --- | --- |
+| 至尊 zhizun | v0.8.4_beta5 | ddc095aca3dc | `110.42.36.53:1314`（裸IP+HTTP+非标端口） | PASS | SIMULATED_INIT | **仅 musicUrl** |
+| HUIBQ | v1.2.0 | a9adeb456690 | `lxmusicapi.onrender.com` | PASS | SIMULATED_INIT | **仅 musicUrl** |
+| gdstudio | 1.0.1 | 05631b29ff18 | `music-api.gdstudio.xyz` | PASS | SIMULATED_INIT | **仅 musicUrl** |
+
+**关键结论：三者 `inited.sources[].actions` 都只有 `musicUrl`，没有任何一个实现 LX `search` action，
+因此都不可能通过 LX 接口升级为 `REAL_SEARCH_PASSED`。** 这是脚本能力边界，不是网络或权限问题。
+
+真实请求明细（成功失败都列）：
+
+| 候选 | 阶段 | 端点 host | HTTP | 错误码 | 结论 |
+| --- | --- | --- | --- | --- | --- |
+| 至尊 | 真实搜索 | 110.42.36.53 | **502** | HTTP_502 | 失败；且无 search action；网络权限已 deny-all（裸IP/HTTP/1314） |
+| 至尊 | URL解析 | 110.42.36.53 | **502** | HTTP_502 | 失败；`/url/wy/{id}/{quality}` 空响应 |
+| HUIBQ | 真实搜索 | lxmusicapi.onrender.com | — | NO_SEARCH_ACTION | 不支持（无 search action） |
+| HUIBQ | URL解析 | lxmusicapi.onrender.com | **503** | SERVICE_SUSPENDED | 失败；"This service has been suspended by its owner" |
+| gdstudio | 真实搜索 | music-api.gdstudio.xyz | **200** | — | 通过；`types=search` 返回合法 JSON 数组，首条「屋顶 / 周杰伦、温岚、吴宗宪」（n=1；仅为上游 API 搜索，非 LX search action） |
+| gdstudio | URL解析 | music-api.gdstudio.xyz | **200** | — | 通过；`types=url(id=5257138,br=320)` 返回 HTTPS 地址，br=320，size=12764517 |
+| gdstudio | URL解析(异常) | music-api.gdstudio.xyz | 200 | EMPTY_URL | 无效 id → `{"url":"","br":-1}`，错误返回符合预期 |
+| gdstudio | 音频响应 | m701.music.126.net | **206** | — | Range 0-0：206 Partial Content / audio/mpeg / Accept-Ranges；仅读 1 字节响应头，未存音频 |
+| gdstudio | 真实播放 | — | — | — | NOT_RUN（需用户本人有权访问且明确控制，HTTP 206 不冒充播放） |
+
+**域名一致性发现**：gdstudio 解析出的播放地址域名是 `m701.music.126.net`（第三方 CDN），
+**并非**其授权域名 `music-api.gdstudio.xyz`。这符合"上游代理返回第三方 CDN"的常见形态，
+但意味着播放地址域名不在候选授权列表内，播放链路的域名安全无法用本候选权限覆盖，需单列风险。
+
+### 12.2 F1 第二批（ikun / juhe / animemusic / Flower）初始化与调用链分析
+
+| 候选 | 初始化是否必须联网 | 具体调用链 | E3 空 allowedHosts 失败的真实原因 | 真实探测 | 结论 |
+| --- | --- | --- | --- | --- | --- |
+| ikun | 否（可选 checkUpdate） | `UPDATE_ENABLE=true` → `checkUpdate()` → `lx.request(/script/lxmusic?key=&checkUpdate=)`；`inited` 同步发送 | 初始化期 checkUpdate 被空名单拒绝（门禁生效） | api.ikunshare.com **TLS 握手失败**（schannel，HTTP=000，2.2s） | 区分错误类型：候选权限已授权该域名，真实失败是 TLS 而非权限；不接入 |
+| juhe | **是**（init 载荷来自服务器） | 顶层 `h(A+'/init.conf').then(r=>{ if(code!==200) throw; send(inited, r.data.init) })`；musicUrl 走 303 响应体内二次动态 URL | init.conf 是初始化必需请求，空名单直接导致初始化失败 | init.conf=**200**（code=200，含 sources）；但动态 DNS `dpdns.org` + 303 二次 URL 由响应体决定 | 仅授权 init 域名；二次动态 URL 静态不可审、fail-closed；不接入 |
+| animemusic | 否（可选 checkUpdate） | `UPDATE_ENABLE=true` → `checkUpdate()` → `/script/lxmusic?checkUpdate=&key=` | 初始化 checkUpdate 被空名单拒绝 | 端点=200 但 `{"code":500,"message":"不支持的平台: (空)"}`，约 9.8s | 慢且返回错误；不升级等级，不接入 |
+| Flower | 是（配置远程加载） | 混淆脚本 `Promise.all([L(裸IP 97.64.37.235), L(gist/npm)])` → 失败即 AggregateError | 裸IP+远程加载被 deny-all 拒绝 | E3: **AggregateError** | 重度混淆、QUARANTINE 保持，禁止执行 |
+
+**F1 结论**：这四个都不应通过"放宽全局白名单"来救活。ikun 的真实失败是 TLS（与权限无关）；
+juhe 的初始化确实需要网络，正确做法是**按候选授权 init.conf 单个域名**而非全局放开，且其 303 动态端点仍不可信；
+animemusic 接口返回错误；Flower 混淆+裸IP，必须保持隔离。所有失败均如实记录，未因"想让它初始化成功"放宽任何门禁。
+
+### 12.3 网络权限报告
+
+实现 `CandidateNetworkPolicy`（`provider/lxruntime/.../CandidateNetworkPolicy.kt`）：
+- 字段：candidateId / allowedHosts / allowedSchemes / allowedPorts / maxResponseBytes /
+  connectTimeout / requestTimeout / redirectPolicy / credentialPolicy / authorizationBasis；
+- 每个候选独立授权、不继承；**禁止通配符**；默认仅 HTTPS + 443；
+- SSRF 复用 `LxUrlSafety`（localhost / 私网 / 回环 / 链路本地 / 元数据地址一律拒绝）；
+  另拒绝 userinfo、百分号编码 host、尾随点、IPv6 字面量、裸 IP 域名、非授权端口；
+- 权限与版本+SHA 绑定：`validateAgainstRegistry()` 在登记表无 SHA / 候选未登记 / SHA 变化时一律失效；
+  `LxScriptRuntime.loadWithCandidatePolicy()` 先校验审批有效、再校验脚本实际字节 SHA 一致，否则拒绝加载；
+- credentialPolicy 只有 NONE：禁止把任何用户 Cookie/Token 写入候选网络权限；
+- 重定向默认 DENY_ALL（本阶段不启用 REVALIDATE_EACH_HOP）。
+
+| 候选 | 授权域名 | 授权依据 | 被拒请求/原因 |
+| --- | --- | --- | --- |
+| gdstudio | music-api.gdstudio.xyz | E2 静态无 BLOCK + 唯一 API 域名 | http 明文 / 非443端口 / 其它域名全拒 |
+| HUIBQ | lxmusicapi.onrender.com | 同上 | 同上 |
+| ikun-v515 | api.ikunshare.com | 同上 | 同上 |
+| animemusic | animemusic.bzxhkj.com | 同上 | 同上 |
+| juhe | api.music.lerd.dpdns.org（仅 init.conf） | 初始化必需 | 303 动态二次 URL 未审不授权 |
+| 至尊 | 无（deny-all） | 裸IP+HTTP+1314 不合规 | 全部请求拒绝，附 denialReason |
+| Flower | 无（deny-all） | QUARANTINE + 混淆+裸IP | 全部请求拒绝 |
+
+**DNS rebinding 遗留风险**：commonMain 仍无法在连接层做"解析 IP ↔ 连接 IP"绑定，
+本阶段**不声称已解决**；通过"仅具名域名 + HTTPS + 候选级最小授权 + 请求限流"缓解，
+且真实验证仅限只读公开端点，不做需要该防护的敏感操作。
+
+### 12.4 质量评分与主备建议
+
+评分维度（权重）：搜索成功率25 / 结果准确性20 / URL解析20 / 播放稳定性20 / 错误处理10 / 来源可信5。
+诚实约束：无真实样本维度记 0；样本 <3 的维度封顶；播放分必须有真实播放样本；一次成功不判 EXCELLENT；
+真实播放数据与模拟数据分开；FLAC 不等于母带。评分器见 `CommunityQualityScorer`。
+
+| 候选 | 真实搜索 | URL解析 | 音频响应 | 真实播放 | 评分 | 等级 | 建议 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| gdstudio | PASSED(n=1) | PASSED(n=2,含1异常) | PASSED(n=1,206) | NOT_RUN(n=0) | 依代码实算 | UNVERIFIED（播放样本不足） | 限定平台使用/继续观察，不做默认 |
+| HUIBQ | NOT_SUPPORTED | FAILED(503 停服) | — | — | 依代码实算 | UNVERIFIED→暂不接入 | 暂不接入（服务已暂停） |
+| 至尊 | FAILED(502) | FAILED(502) | — | — | 依代码实算 | BLOCK（网络权限拒绝） | 暂不接入/阻断 |
+| ikun/juhe/animemusic | FAILED | — | — | — | 依代码实算 | UNVERIFIED | 暂不接入 |
+| Flower / 长青 / 星澜 / 六音 等 | — | — | — | — | BLOCK | BLOCK | 保持阻断，不绕过 |
+
+**门禁（F3）**：至少两个合规候选 `REAL_SEARCH` 通过才启用主备调度器。当前仅 gdstudio 一项真实搜索 PASSED
+（且它不是 LX search action），**门禁未打开**，因此不产生任何"建议主音源/建议备用音源"，
+UI 明确显示"主备调度器未启用（真实搜索通过 <2）"。`SourceFallbackScheduler` 的
+最大尝试次数（默认3）、冷却（默认60s）、失败原因记录、平台隔离、结果身份防冒充、非递归、
+不后台全量请求均已实现并有离线测试。**没有任何候选达到"默认音源"门槛。**
+
+### 12.5 淘汰与保持阻断
+
+- **至尊**：唯一端点裸IP+明文HTTP+非标端口，网络权限 deny-all，真实探测 502 → 淘汰。
+- **HUIBQ**：服务被所有者暂停（503）→ 淘汰（若将来恢复需重新取证 SHA/来源/静态审查/真实验证，不继承旧结论）。
+- **gdstudio**：解析能力真实可用，但无 search action、解析域名非授权域名、播放未验证 → 暂作为"限定平台使用/继续观察"，不设默认。
+- **ikun/juhe/animemusic**：TLS失败 / 动态端点不可信 / 接口错误 → 暂不接入。
+- **长青（会员绕过）/ 星澜（内嵌Cookie+platform=23 越权）/ 元力菌反编译 / Flower（混淆+裸IP）**：BLOCK 保持，
+  未关闭任何绕过规则、未伪装危险函数、未拆分 Cookie 后端当普通音源接入。
+
+### 12.6 完成标准对照
+
+| 标准 | 状态 |
+| --- | --- |
+| 第一批完成真实验证或明确失败原因 | ✅ 至尊 502 / HUIBQ 503 / gdstudio 200+206，均含错误码与域名拒绝原因 |
+| 候选级最小网络权限，无全局放开 | ✅ CandidateNetworkPolicy + deny-all 占位 + SHA 绑定 |
+| URL 解析与真实播放严格区分 | ✅ REAL_URL_RESOLVE / REAL_AUDIO_RESPONSE / REAL_PLAYBACK 分立，播放 NOT_RUN |
+| 有真实数据与样本量 | ✅ 台账逐请求含 host/状态/错误码/响应时长/样本量；未把一次成功写成稳定 |
+| 至少形成主备建议或如实报告 | ✅ 如实报告：门禁未开，无候选达默认/主备门槛 |
+| 调度器有最大尝试与冷却 | ✅ SourceFallbackScheduler + 离线测试 |
+| UI 展示真实验证等级 | ✅ 详情页分栏展示模拟/真实各阶段、样本量、失败原因、评分、接入建议、主备选择（仅记录） |
+| BLOCK 候选未绕过 | ✅ 长青/星澜/元力菌/Flower 保持阻断 |
+| 无未经批准安装 | ✅ 无安装按钮，主备选择仅写入 UI state，不启用/安装 |
+| 测试与编译真实可复核 | ✅ sourceupdate 153 / lxruntime 93 / shared 385 desktopTest 全绿；Android/iOS Sim/Metadata 编译通过 |
+| DNS rebinding 遗留风险 | ✅ 如实声明未彻底解决，限制真实验证范围 |

@@ -1110,3 +1110,34 @@ UI 与 Worker 共用同一 Repository 单例。所有候选库读改写均经同
 Android/iOS Simulator/Desktop/androidApp/desktopRuntime/Metadata 编译见提交记录。
 未引入新依赖，未删测试、未放宽任何安全断言。master/正式目录/公钥/签名未改；
 无自动批准/安装；长青/非常刀/玉宁熙/Fish/Flower 未接入真实音源。
+
+
+## §16 阶段 F：合规音源真实功能验证与受控接入准备（2026-11-20）
+
+**目标**：验证静态审查通过的候选是否真的能搜索/解析/播放，解决网络权限兼容，建立评分与淘汰，准备受控接入材料；
+保持所有绕过与不可验证候选阻断。基线 `1eb8e60`（E3–E5），父提交 `dbcead9`（E0–E2），分支 `work/android-community-discovery`，未改 master。
+
+**F0 真实验证（如实，含失败）**：至尊=502（裸IP/HTTP/1314，权限 deny-all）、HUIBQ=503（服务被所有者暂停）、
+gdstudio=搜索200+URL解析200+音频206（audio/mpeg，仅读响应头）。三者脚本只有 `musicUrl` action、**无 search**，
+故都无法升级 REAL_SEARCH；gdstudio 解析域名是第三方 CDN（m701.music.126.net），非其授权域名，单列风险。
+真实播放一律 NOT_RUN（需用户有权访问且明确控制，HTTP 206 不冒充播放）。
+
+**F1 初始化调用链**：ikun（可选 checkUpdate）真实 TLS 握手失败；juhe 初始化必须联网（init.conf），
+按候选授权单域名而非放宽全局白名单，303 动态端点不可信 fail-closed；animemusic 接口返回 code 500；
+Flower 混淆+裸IP初始化 AggregateError，QUARANTINE 保持。区分了初始化错误/权限拒绝/脚本自身错误。
+
+**F 网络权限工程**：新增 `CandidateNetworkPolicy`（candidateId/allowedHosts/schemes/ports/maxBytes/timeouts/
+redirect/credential），候选级独立授权、禁通配符、默认 HTTPS+443、SSRF 复用 LxUrlSafety、禁 userinfo/编码host/
+尾随点/IPv6/裸IP、SHA 绑定（脚本一变审批失效，`loadWithCandidatePolicy` 双重校验）。
+DNS rebinding 遗留风险如实声明未彻底解决。
+
+**F3 调度与 F4 UI**：`SourceFallbackScheduler`（最大尝试3/冷却60s/失败原因/平台隔离/结果防冒充/非递归/不后台全量），
+门禁=≥2 真实搜索通过，**当前未开**故无主备建议；`CommunityQualityScorer`（6维权重+样本量约束+真实/模拟分栏），
+候选均 UNVERIFIED 或 BLOCK，无默认音源。UI 详情页分栏展示 LX模拟/真实搜索/URL解析/音频响应/真实播放、样本量、
+失败原因、评分、接入建议、主备选择（仅写 UI state，不启用/安装）；顶部声明调度器门槛与诚实边界。
+
+**测试/编译**：新增 CandidateNetworkPolicyTest / PhaseFVerificationTest / PhaseFPresentationTest；
+sourceupdate 153 / lxruntime 93 / shared 385 desktopTest 全绿；Android / iOS Simulator / Metadata（sourceupdate、lxruntime）编译通过；
+`shared:compileCommonMainKotlinMetadata` 因上游 AppNavHost 的 navigation3 compose 依赖报既有错误（与本改动无关），
+但 `shared:compileKotlinIosSimulatorArm64` 与 `shared:compileAndroidMain`、`shared:desktopTest` 均通过，证明 commonMain 改动跨端无 JVM-only 泄漏。
+未改 master/正式目录/公钥/签名；无自动批准/安装；BLOCK 候选未绕过。详见 `docs/community-source-audit.zh-CN.md` §12。

@@ -5,11 +5,20 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.feeluown.mobile.sourceupdate.AdmissionRecommendation
+import org.feeluown.mobile.sourceupdate.CandidateAdmission
 import org.feeluown.mobile.sourceupdate.CandidateReviewState
 import org.feeluown.mobile.sourceupdate.CommunityDiscoveryRepository
+import org.feeluown.mobile.sourceupdate.CommunityQualityScorer
+import org.feeluown.mobile.sourceupdate.CommunityRealVerificationLedger
 import org.feeluown.mobile.sourceupdate.CommunityScriptDownloadOutcome
 import org.feeluown.mobile.sourceupdate.DiscoveredCandidate
+import org.feeluown.mobile.sourceupdate.QualityGrade
+import org.feeluown.mobile.sourceupdate.QualityScore
+import org.feeluown.mobile.sourceupdate.StageSummary
 import org.feeluown.mobile.sourceupdate.VerificationLevel
+import org.feeluown.mobile.sourceupdate.VerificationOutcome
+import org.feeluown.mobile.sourceupdate.VerificationStage
 
 /**
  * 社区音源发现页的状态容器（阶段 D）。
@@ -35,6 +44,10 @@ interface CommunityDiscoveryController {
     fun setFilterText(text: String)
     /** E5：设置审核状态筛选（null = 全部）。 */
     fun setStatusFilter(status: CandidateReviewState?)
+    /** F4：用户指定主音源（受控：仅记录选择，不自动启用/安装）。 */
+    fun selectPrimary(candidateId: String?)
+    /** F4：用户指定备用音源（受控：仅记录选择，不自动启用/安装）。 */
+    fun selectBackup(candidateId: String?)
 }
 
 /** 操作错误的分类，供 UI 精确提示（网络/哈希/BLOCK/存储/安全拒绝）。 */
@@ -55,6 +68,10 @@ data class CommunityDiscoveryUiState(
     val filterText: String = "",
     /** E5：审核状态筛选；null = 全部。 */
     val statusFilter: CandidateReviewState? = null,
+    /** F4：用户选定的主音源（仅记录，不启用）。 */
+    val primaryId: String? = null,
+    /** F4：用户选定的备用音源（仅记录，不启用）。 */
+    val backupId: String? = null,
 ) {
     /** 按筛选条件过滤后的候选列表（纯函数，供 UI 与测试共用）。 */
     val visibleCandidates: List<DiscoveredCandidate>
@@ -63,6 +80,10 @@ data class CommunityDiscoveryUiState(
     /** E5 顶部统计（全部候选，不受筛选影响）。 */
     val stats: CommunityDiscoveryPresentation.CandidateStats
         get() = CommunityDiscoveryPresentation.CandidateStats.from(candidates)
+
+    /** F4：主备调度器是否达到启用门槛（≥2 个真实搜索通过候选）。 */
+    val schedulerEnabled: Boolean
+        get() = CommunityDiscoveryPresentation.realSearchEligibleIds().size >= 2
 }
 
 /** 展示辅助：把候选映射成 UI 文案，集中在此以便测试与多端一致。 */
@@ -179,6 +200,85 @@ object CommunityDiscoveryPresentation {
         CommunityOperationError.NOT_FOUND -> "候选不存在"
         CommunityOperationError.OTHER -> "操作失败"
     }
+
+    // ===== F4：真实验证等级展示（模拟与真实严格分栏） =====
+
+    /** 基于真实台账的调度器门槛（与 UI state.schedulerEnabled 一致，但可被离线测试直接调用）。 */
+    fun schedulerEnabledByLedger(): Boolean = realSearchEligibleIds().size >= 2
+
+    /** 真实搜索通过的候选 id（REAL_SEARCH 有成功样本）。 */
+    fun realSearchEligibleIds(): Set<String> =
+        VerificationStage.entries
+            .filter { it == VerificationStage.REAL_SEARCH }
+            .let { stages ->
+                listOf("zhizun", "huibq", "gd-studio", "ikun-v515", "juhe", "animemusic", "flower-pdone")
+                    .filter { id -> stages.any { st ->
+                        CommunityRealVerificationLedger.summarize(id, st).outcome == VerificationOutcome.PASSED
+                    } }
+                    .toSet()
+            }
+
+    /** 把验证等级标成真实/模拟两类，绝不把 LX 模拟或 MockEngine 混进真实统计。 */
+    fun verificationTierLabel(candidateId: String): String {
+        val search = CommunityRealVerificationLedger.summarize(candidateId, VerificationStage.REAL_SEARCH)
+        val url = CommunityRealVerificationLedger.summarize(candidateId, VerificationStage.REAL_URL_RESOLVE)
+        val audio = CommunityRealVerificationLedger.summarize(candidateId, VerificationStage.REAL_AUDIO_RESPONSE)
+        val play = CommunityRealVerificationLedger.summarize(candidateId, VerificationStage.REAL_PLAYBACK)
+        return buildString {
+            append("LX模拟=").append(CommunityRealVerificationLedger.attemptsFor(
+                candidateId, VerificationStage.LX_SIMULATED_INIT
+            ).firstOrNull()?.outcome?.name ?: "NOT_RUN")
+            append(" · 真实搜索=").append(search.outcome.name).append("(n=${search.sampleSize})")
+            append(" · URL解析=").append(url.outcome.name).append("(n=${url.sampleSize})")
+            append(" · 音频响应=").append(audio.outcome.name).append("(n=${audio.sampleSize})")
+            append(" · 真实播放=").append(play.outcome.name).append("(n=${play.sampleSize})")
+        }
+    }
+
+    fun stageLines(candidateId: String): List<String> =
+        listOf(
+            VerificationStage.REAL_SEARCH,
+            VerificationStage.REAL_URL_RESOLVE,
+            VerificationStage.REAL_AUDIO_RESPONSE,
+            VerificationStage.REAL_PLAYBACK,
+        ).map { stage ->
+            val s = CommunityRealVerificationLedger.summarize(candidateId, stage)
+            val avg = s.avgResponseMs?.let { "${it}ms" } ?: "—"
+            "${stage.name}: ${s.outcome.name} 样本=${s.sampleSize} 成功=${s.successCount} 失败=${s.failureCount} 均响应=$avg"
+        }
+
+    fun lastFailureLine(candidateId: String): String {
+        val all = VerificationStage.entries.flatMap { st ->
+            CommunityRealVerificationLedger.attemptsFor(candidateId, st)
+                .filter { it.outcome == VerificationOutcome.FAILED }
+        }
+        val last = all.lastOrNull()
+            ?: return "最近失败原因：无真实失败记录"
+        return "最近失败原因[${last.stage.name}]: ${last.errorCode ?: ""} ${last.error ?: ""}".trim()
+    }
+
+    fun qualityLine(candidateId: String): String {
+        val q = CommunityQualityScorer.score(candidateId)
+        return "评分=${q.total}/100 等级=${q.grade.name} 真实样本(搜索${q.realSearchSamples}/解析${q.realUrlSamples}/播放${q.realPlaybackSamples})"
+    }
+
+    fun qualityFor(candidateId: String): QualityScore = CommunityQualityScorer.score(candidateId)
+
+    fun admissions(): List<CandidateAdmission> = CommunityQualityScorer.admissions()
+
+    fun admissionLabel(recommendation: AdmissionRecommendation): String = when (recommendation) {
+        AdmissionRecommendation.PRIMARY -> "建议主音源"
+        AdmissionRecommendation.BACKUP -> "建议备用音源"
+        AdmissionRecommendation.LIMITED -> "限定平台使用"
+        AdmissionRecommendation.OBSERVE -> "继续观察"
+        AdmissionRecommendation.DO_NOT_ADMIT -> "暂不接入"
+        AdmissionRecommendation.BLOCK -> "BLOCK"
+    }
+
+    /** F4 明确的等级/诚实说明，避免把「可用」误读为「已验证可播放」。 */
+    const val VERIFICATION_HONESTY_NOTE =
+        "LX模拟初始化≠真实搜索；URL解析成功≠播放成功；HTTP 206/audio类型≠真实播放。" +
+            "真实播放需用户本人有权访问并在用户控制下验证；一次成功不代表长期稳定。"
 }
 
 class RealCommunityDiscoveryController(
@@ -347,6 +447,17 @@ class RealCommunityDiscoveryController(
         mutable.value = mutable.value.copy(statusFilter = status)
     }
 
+    override fun selectPrimary(candidateId: String?) {
+        // 主备不能是同一个；仅记录选择，不启用/安装任何音源。
+        val next = if (candidateId == mutable.value.backupId) null else candidateId
+        mutable.value = mutable.value.copy(primaryId = next)
+    }
+
+    override fun selectBackup(candidateId: String?) {
+        val next = if (candidateId == mutable.value.primaryId) null else candidateId
+        mutable.value = mutable.value.copy(backupId = next)
+    }
+
     private fun mutateWithFeedback(id: String, action: suspend () -> Boolean) {
         if (mutable.value.isBusy) return
         scope.launch {
@@ -388,4 +499,6 @@ class NoOpCommunityDiscoveryController : CommunityDiscoveryController {
     override fun clearFeedback() = Unit
     override fun setFilterText(text: String) = Unit
     override fun setStatusFilter(status: CandidateReviewState?) = Unit
+    override fun selectPrimary(candidateId: String?) = Unit
+    override fun selectBackup(candidateId: String?) = Unit
 }

@@ -109,6 +109,19 @@ fun CommunityDiscoveryScreen(
                 color = MaterialTheme.colorScheme.error,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             )
+            // F4 真实验证诚实声明 + 调度器门槛（模拟/真实严格分栏）。
+            Text(
+                "主备调度器：" + (if (state.schedulerEnabled) "达到门槛（≥2 真实搜索通过）" else "未启用（真实搜索通过 <2）") +
+                    " · 主=${state.primaryId ?: "未选"} 备=${state.backupId ?: "未选"}",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+            )
+            Text(
+                CommunityDiscoveryPresentation.VERIFICATION_HONESTY_NOTE,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+            )
             // E5 筛选：关键词 + 状态（点同一状态取消筛选）。
             OutlinedTextField(
                 value = state.filterText,
@@ -156,6 +169,10 @@ fun CommunityDiscoveryScreen(
                 onReopen = { controller.reopen(id) },
                 onRequestDelete = { controller.requestDelete(if (state.deleteConfirmId == id) null else id) },
                 onCancelDelete = { controller.requestDelete(null) },
+                isPrimary = state.primaryId == id,
+                isBackup = state.backupId == id,
+                onSelectPrimary = { controller.selectPrimary(if (state.primaryId == id) null else id) },
+                onSelectBackup = { controller.selectBackup(if (state.backupId == id) null else id) },
             )
         }
     }
@@ -232,6 +249,10 @@ fun CandidateDetailDialog(
     onReopen: () -> Unit,
     onRequestDelete: () -> Unit,
     onCancelDelete: () -> Unit,
+    isPrimary: Boolean = false,
+    isBackup: Boolean = false,
+    onSelectPrimary: () -> Unit = {},
+    onSelectBackup: () -> Unit = {},
 ) {
     val scroll = rememberScrollState()
     val busy = isDownloading || isBusy
@@ -270,6 +291,32 @@ fun CandidateDetailDialog(
                 Spacer(Modifier.height(8.dp))
                 Text("镜像 ID：${candidate.aliasIds.joinToString(", ").ifBlank { "无" }}",
                     style = MaterialTheme.typography.bodySmall)
+                // F4 真实验证分栏：LX 模拟、真实搜索/解析/音频/播放各阶段 + 样本量 + 失败原因 + 评分。
+                Spacer(Modifier.height(8.dp))
+                Text("真实验证等级（模拟≠真实）：", style = MaterialTheme.typography.labelMedium)
+                Text(CommunityDiscoveryPresentation.verificationTierLabel(candidate.id),
+                    style = MaterialTheme.typography.bodySmall)
+                CommunityDiscoveryPresentation.stageLines(candidate.id).forEach {
+                    Text("· $it", style = MaterialTheme.typography.bodySmall)
+                }
+                Text(CommunityDiscoveryPresentation.qualityLine(candidate.id),
+                    style = MaterialTheme.typography.bodySmall)
+                Text(CommunityDiscoveryPresentation.lastFailureLine(candidate.id),
+                    style = MaterialTheme.typography.bodySmall)
+                CommunityDiscoveryPresentation.admissions().firstOrNull { it.candidateId == candidate.id }?.let { a ->
+                    Text("接入建议：${CommunityDiscoveryPresentation.admissionLabel(a.recommendation)} — ${a.reason}",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("主备选择（仅记录，不启用）：", style = MaterialTheme.typography.labelMedium)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    OutlinedButton(onClick = onSelectPrimary, modifier = Modifier.weight(1f)) {
+                        Text(if (isPrimary) "✓ 主音源" else "设为主音源")
+                    }
+                    OutlinedButton(onClick = onSelectBackup, modifier = Modifier.weight(1f)) {
+                        Text(if (isBackup) "✓ 备用音源" else "设为备用")
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
                 Text(CommunityDiscoveryPresentation.INSTALL_POLICY_NOTE,
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)

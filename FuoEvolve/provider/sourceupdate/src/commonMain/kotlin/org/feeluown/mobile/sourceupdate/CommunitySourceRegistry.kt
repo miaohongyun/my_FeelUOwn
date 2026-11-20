@@ -343,6 +343,29 @@ object CommunitySourceRegistry {
             evidence = "pdone 官方 ikun/latest.js（4991B）。静态无 BLOCK；据第三方描述覆盖五平台、128k~master，" +
                 "但宣传音质与成功率未经真实验证。公益版/不同版本号需分别登记（此处仅登记实际获取的 v515 类文件）。",
         ))
+        // F1 兼容性候选：E3 已取证的真实脚本（此前仅在 E3 harness，未进入 E0-E2 台账，本阶段补全登记）。
+        add(CommunityCandidateRecord(
+            candidateId = "juhe", name = "聚合接口音源 (juhe)", aliases = listOf("聚合 juice", "lerd"),
+            repositoryUrl = PDONE_BASE,
+            downloadUrl = "$PDONE_BASE/juhe/latest.js",
+            sha256 = "f7a661f01af7ea23035d5fac3b89d7c756372fc8a64bbfd649918f8a101cbf33",
+            fileSize = 994, sourceType = CommunitySourceType.AGGREGATOR,
+            status = CommunityAuditStatus.FETCHED,
+            evidence = "F1 登记：pdone 聚合接口脚本（994B）。初始化顶层即请求 init.conf（init 载荷来自服务器），" +
+                "空 allowedHosts 导致初始化失败（SSRF 门禁生效）。musicUrl 走 303 响应体内二次动态 URL，" +
+                "静态不可审计。仅授权 init 域名，二次 URL 未审不授权。真实探测 init.conf=200 但动态端点不可信。",
+        ))
+        add(CommunityCandidateRecord(
+            candidateId = "animemusic", name = "AnimeMusic 音源", aliases = listOf("动漫音源"),
+            repositoryUrl = PDONE_BASE,
+            downloadUrl = "$PDONE_BASE/animemusic/latest.js",
+            sha256 = "cb26455f3d08be3d9fa034740a8d4bf186caf6c4200493c096026a6e2c3d0fa8",
+            fileSize = 4134, sourceType = CommunitySourceType.STANDALONE,
+            status = CommunityAuditStatus.FETCHED,
+            evidence = "F1 登记：pdone 动漫音源脚本（4134B）。UPDATE_ENABLE=true，初始化触发 checkUpdate，" +
+                "空 allowedHosts 下被拒（门禁生效）。仅声明 musicUrl。真实探测端点返回 code=500「不支持的平台」，" +
+                "响应约 9.8s；不升级验证等级，暂不接入。",
+        ))
         add(CommunityCandidateRecord(
             candidateId = "mygo", name = "MyGO 音源",
             sourceType = CommunitySourceType.STANDALONE, status = CommunityAuditStatus.UNVERIFIABLE,
