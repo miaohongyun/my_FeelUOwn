@@ -91,20 +91,35 @@ class MusicFreeSandboxSession(
                 // 的 asModule 模板同样处理），导致 modulesByName 值全为 null，JS require 必然
                 // 报"未预载"。改为非 asModule 的 IIFE：每个模块拥有独立 module/exports 对象，
                 // 结果写回 globalThis 后再以普通 evaluate 读取。
+                // __mfModules 保存"函数导出模块"的真实 JS 对象（不经 JSON）；其余模块走 JSON 缓存。
+                quickJs.evaluate<Any?>("globalThis.__mfModules = {};", "mf_modules_table.js")
                 val cache = LinkedHashMap<String, String>()
                 val byName = LinkedHashMap<String, String>()
                 MusicFreeSandbox.ModuleRegistry.all().forEach { module ->
                     if (module.source.encodeToByteArray().size > limits.maxModuleBytes) return@forEach
-                    quickJs.evaluate<Any?>(
-                        "globalThis.__mfModOut = (function(){ " +
-                            "var module = { exports: {} }; var exports = module.exports; " +
-                            module.source + "\n; " +
-                            "return JSON.stringify(globalThis.__mfCollect(module.exports)); })();",
-                        "mfmod_${module.sha256}",
-                    )
-                    val exportsJson = quickJs.evaluate<String>("globalThis.__mfModOut || '{}'")
-                    cache[module.sha256] = exportsJson
-                    byName[module.name] = exportsJson
+                    if (module.allowFunctionExports) {
+                        // 真实对象通道：module.exports 含函数，直接挂到 JS 侧模块表。
+                        // 仍在同一受控 Context 内执行审查源码，无宿主网络/文件/进程能力。
+                        quickJs.evaluate<Any?>(
+                            "(function(){ var module = { exports: {} }; var exports = module.exports; " +
+                                module.source + "\n; " +
+                                "globalThis.__mfModules[" + kotlinJsQuote(module.name) + "] = module.exports; })();",
+                            "mfmod_fn_${module.sha256}",
+                        )
+                        cache[module.sha256] = "<functions>"
+                        byName[module.name] = "<functions>"
+                    } else {
+                        quickJs.evaluate<Any?>(
+                            "globalThis.__mfModOut = (function(){ " +
+                                "var module = { exports: {} }; var exports = module.exports; " +
+                                module.source + "\n; " +
+                                "return JSON.stringify(globalThis.__mfCollect(module.exports)); })();",
+                            "mfmod_${module.sha256}",
+                        )
+                        val exportsJson = quickJs.evaluate<String>("globalThis.__mfModOut || '{}'")
+                        cache[module.sha256] = exportsJson
+                        byName[module.name] = exportsJson
+                    }
                 }
                 // 恢复真实 require 并清空预载期可能写入的伪缓存。
                 quickJs.evaluate<Any?>(
@@ -198,6 +213,22 @@ class MusicFreeSandboxSession(
     val isClosed: Boolean get() = closed
 
     companion object {
+        /** Kotlin 字符串 -> JS 字符串字面量（供受控模块注入用，不依赖 JVM API）。 */
+        private fun kotlinJsQuote(value: String): String {
+            val sb = StringBuilder(value.length + 2).append('"')
+            value.forEach { c ->
+                when (c) {
+                    '\\' -> sb.append("\\\\")
+                    '"' -> sb.append("\\\"")
+                    '\n' -> sb.append("\\n")
+                    '\r' -> sb.append("\\r")
+                    '\t' -> sb.append("\\t")
+                    else -> if (c.code < 0x20) sb.append("\\u").append(c.code.toString(16).padStart(4, '0')) else sb.append(c)
+                }
+            }
+            return sb.append('"').toString()
+        }
+
         /**
          * CommonJS 形状 shim：module/exports/require 最小面；
          * __mfCollect 过滤不可序列化值（函数/符号），只保留 JSON 数据 —— 这是有意的能力收缩。
@@ -224,6 +255,10 @@ class MusicFreeSandboxSession(
             globalThis.__mfRequireCache = {};
             globalThis.require = function(name) {
                 var key = String(name);
+                // 函数导出模块（I2 Node 兼容子集）：直接返回 JS 侧真实对象，不经 JSON。
+                if (globalThis.__mfModules && Object.prototype.hasOwnProperty.call(globalThis.__mfModules, key)) {
+                    return globalThis.__mfModules[key];
+                }
                 if (Object.prototype.hasOwnProperty.call(globalThis.__mfRequireCache, key)) {
                     return globalThis.__mfRequireCache[key];
                 }

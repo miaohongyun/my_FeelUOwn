@@ -62,6 +62,13 @@ object MusicFreeSandbox {
         val sha256: String,
         val auditedAt: String,
         val note: String,
+        /**
+         * 阶段 I2：模块导出含函数（如 crypto-js.HmacSHA1/events.EventEmitter）时为 true。
+         * 这类模块在 JS context 内以**真实对象**注册到 __mfModules 表，不经 JSON 字符串
+         * 往返（函数无法 JSON 序列化）。模块源码仍是 SHA 绑定的审查代码，且不得引用任何
+         * 宿主能力（无 fs/process/net/eval）。默认 false 保持 H1 数据模块的 JSON 通道。
+         */
+        val allowFunctionExports: Boolean = false,
     )
 
     object ModuleRegistry {
