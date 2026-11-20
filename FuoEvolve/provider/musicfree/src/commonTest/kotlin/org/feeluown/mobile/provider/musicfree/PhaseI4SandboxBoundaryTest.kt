@@ -57,7 +57,8 @@ class PhaseI4SandboxBoundaryTest {
         setup()
         val s = MusicFreeSandboxSession("allow")
         try {
-            for (mod in listOf("fs", "http", "https", "net", "child_process", "vm", "process", "axios", "webdav")) {
+            // axios 是 I5 内建注入模块（走 Gateway，受控），不属于"未登记"；其余必须拒绝。
+            for (mod in listOf("fs", "http", "https", "net", "child_process", "vm", "process", "superagent", "webdav")) {
                 val r = s.execute("require('$mod')")
                 assertTrue(r is ExecResult.Failed, "$mod 未登记必须拒绝：$r")
             }

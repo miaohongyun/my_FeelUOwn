@@ -34,7 +34,10 @@ class PhaseH1SandboxTest {
         val limits = Limits()
         assertTrue(MusicFreeSandbox.requireRejection("fs", limits)!!.contains("未登记"))
         assertTrue(MusicFreeSandbox.requireRejection("child_process", limits)!!.contains("未登记"))
-        assertTrue(MusicFreeSandbox.requireRejection("axios", limits)!!.contains("未登记"))
+        // 阶段 I5：axios 变为内建注入模块（走 Gateway，受控非绕过），不再是"未登记"。
+        // 但它是唯一豁免，其它 Node 模块仍未登记：
+        assertTrue(MusicFreeSandbox.requireRejection("cheerio", limits)!!.contains("未登记"))
+        assertEquals(null, MusicFreeSandbox.requireRejection("axios", limits))
         assertTrue(MusicFreeSandbox.requireRejection("../etc/passwd", limits)!!.contains("路径穿越"))
         assertTrue(MusicFreeSandbox.requireRejection("/abs/module", limits)!!.contains("路径穿越"))
         assertEquals(null, MusicFreeSandbox.requireRejection("audited-helper", limits))

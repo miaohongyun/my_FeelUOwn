@@ -926,3 +926,113 @@ iOS Simulator / Metadata / Android 编译通过（`--rerun-tasks`）。
 
 **不具备（按当前红线维持）。** 阻塞项：①播放域名 `music.audiomack.com` 未获授权（H3 DENIED，需官方书面授权/明确 API 条款 + 代理恢复后复核重定向与有效期 + 地区确认）；②CommonJS 完整执行生态未实现（JS require 往返封送、Node 模块适配、跨求值 timer 限制）；③iOS 真机/模拟器测试未在本环境执行。
 可继续的安全工作（不需放行）：补 H1 require 封送适配、接入更多"固定具名域名 + 明确条款"的合规来源、三端在具备环境的机器上补测。**不为完成阶段而放行域名、不设默认音源、不自动安装。**
+
+
+---
+
+## §22 阶段 I：MusicFree Provider CommonJS 兼容性与沙箱补齐（2026-11-20）
+
+基线核对（任务书要求，不推测）：本地 HEAD=`9c80297`（H5），父链 `9c80297→e230435→26938e4→6714475→1e729bb→f0ba4e3→32176e5(G3)` 完整，工作区干净；**live ls-remote 显示远端 `work/android-community-discovery=9c80297`、master=`fc05530`**。因此"H 未推送"是历史时点描述，"远端停留 G3"是旧信息——上一轮用户授权后 H0-H5 已推送，远端现为 H5。本阶段按任务书"未经明确授权不推送"全程只本地提交。
+
+提交链（本地，未推送）：`9c80297 → 6a99fc7(I0-I1) → 53eceb8(I2) → 1356b93(I3) → 4a441d9(I4) → ec8636a(I5)`。
+
+### 22.1 I0：quickjs-kt 1.0.15 字符串封送独立取证（真实 QuickJS，非 Mock）
+
+新增 `PhaseI0MarshallingTest`（desktop/androidHost 各 13 项全绿）。覆盖普通字符串、Unicode 中文、特殊字符、JSON 字符串、20KiB 大字符串、null/undefined、异常返回、多次调用、跨 Context 调用，另补 binding 返回值往返、asyncFunction 参数、ESM 模块内 binding 调用。
+
+**实测结论（推翻 H1 记录）**：`runtimeType=kotlin.String, isString=5/5, equalsLiteral=5/5, rawMapHit=5/5, textMapHit=5/5`。同步/异步/ESM 三种路径的字符串实参均为真实 `kotlin.String`，`equals/hashCode` 正常、可直接作 Map key。**H1 §17.4 所述"包装类型差异致 equals/hashCode 不一致"在本轮当前版本所有已测路径均未复现**——判定为历史调试期问题（H1 最终代码已用 `toString()` 归一规避，本轮实测证明该归一在非必需情况下也无害）。唯一新发现：quickjs-kt 1.0.15 的 `addModule+import` 可能触发同一 ESM 模块多次求值（实测一次 import 调用 binding 2 次），已如实记录为库行为、测试不强求调用次数。
+
+### 22.2 I1：CommonJS require 完整往返（真实加载，非 Kotlin 侧等价语义）
+
+新增 `PhaseI1CommonJsTest`（各 9 项全绿）。**根因修复**：H1 用 `evaluate<String>(..., asModule = true)` 读取模块 exports，但该模式在 quickjs-kt 1.0.15 不回传求值结果，导致 `modulesByName` 值全为 null，JS 内 require 必然报"未预载"——这就是 H1 只敢验证 Kotlin 侧门禁、从不真实调用 JS require 的真正原因。I1 改为非 asModule 的 IIFE：每模块独立 `module/exports` 对象，结果写回 globalThis 再普通 evaluate 读回。
+
+覆盖：module.exports / exports 别名 / require 完整往返并读取导出值 / 模块缓存（重复 require 同一对象）/ 受控相对路径 `lib/helper`（拒绝 `..` 与绝对路径）/ 未登记与路径穿越 fail-closed / 循环依赖不挂死 / 跨 Provider 缓存隔离。全部真实通过（循环依赖按"预载期空对象桩断开、不伪称 Node 完整语义"如实标注）。
+
+### 22.3 I2：Node 模块安全子集（真实取证驱动，非凭空实现）
+
+**真实需求取证**（此前 G2 台账只有集体描述、缺 per-plugin 清单）：经 7897 代理从 Gitee `v0.1/dist` 下载 6 个官方插件正文并静态扫描 require。SHA 核对结果——audiomack `1b1f49fc`、geciwang `b9535714`、navidrome `2f1e930e`、webdav `64e00a41`、youtube `75b8a113` 均与 G2 台账一致；**bilibili 取证 `3e49093f` ≠ 台账 `930e3258`（版本漂移），按 fail-closed 拒绝纳入**。真实依赖矩阵：audiomack=axios/cheerio/crypto-js/dayjs，bilibili 另需 he（已排除），geciwang=axios/cheerio，navidrome=axios/crypto-js，webdav=webdav，youtube=axios。红线扫描零会员绕过/eval/process/动态 require。
+
+新增 `NodeCompatModules.kt`（每模块支持范围/不支持范围/安全限制的可审查清单）与 `NodeCompatShims.kt`（events/querystring/url/path/util/crypto/buffer/dayjs/he/cheerio 共 10 个纯 JS 安全子集）。文件系统/进程/原生网络/动态加载一律不提供。关键实现修正：SHA1 padding 长度字段为 **big-endian**（误用 MD5 的 little-endian 曾导致值错误），修复后 MD5('abc')=`90015098…`、HMAC-SHA1(RFC2202)=`de7c9b85…`、Base64=`3UdwPYFenLcwWyKXpH85mLmXAMw=` 全部与 Python hmac 实算一致。crypto/events/cheerio 等导出函数无法走 JSON 字符串往返，新增 `allowFunctionExports` 通道：审查模块在 JS Context 内以真实对象注册到 `__mfModules`，不经 JSON（模块仍 SHA 绑定、无宿主能力）。`PhaseI2NodeModulesTest` 各 10 项全绿。
+
+### 22.4 I3：异步任务与 timer（宿主发信号，回调留 JS 侧）
+
+新增 `executeAwait`（ESM 顶层 await + 结果写回 globalThis，与 LX DISPATCH 模板同模式）、`__mfDelay/__mfCancelTimer` async binding、`__mfModules` 之外注入 setTimeout/clearTimeout/setInterval/clearInterval（企业 64 个上限）。回调始终在 JS Context 执行，宿主只提供"延时到了"信号；close 取消信号 + cancel scope + join 等待宿主 Job 退出后再销毁 Context。`PhaseI3TimerTest` 各 8 项全绿，含加严断言：setInterval 实测重复 tick 2~10 次、超限 timer 返回 id=0 被拒。
+
+**诚实限制不变**：quickjs-kt 1.0.15 的 async binding 只在 evaluate 期间被 pump，顶层 fire-and-forget setTimeout 在求值返回后不会运行——因此跨求值后台 timer 仍需 `executeAwait` 驱动，不伪称支持常驻心跳。
+
+### 22.5 I4：沙箱边界复核（10 项 + 新攻击面）
+
+新增 `PhaseI4SandboxBoundaryTest`（各 10 项全绿）：Context 独立、模块缓存隔离、require allowlist fail-closed、无 fs/process/fetch/XHR/WebSocket/eval/Function 能力、无原生网络 binding、函数导出表篡改不能获宿主能力、超时+内存+栈能力、lifecycle close 幂等并拒绝后续执行、深递归被中断。
+
+**关键结论修正**：H0/H1 记"maxStackSize 在 commonMain 未暴露、未强制"。I4 用编译探针（`MaxStackProbe`，已删）在 Desktop + iOS Simulator **均编译通过**，证实公共 API `quickJs.maxStackSize` 实际存在。现真正启用并按读回值判定 `canSetStackSize`。实测 `I4_CAPS memory=true stack=true interrupt=true`——三项能力全部真实可用。这是对本阶段此前报告错误结论的明确更正。
+
+### 22.6 I5：真实插件兼容性测试（真实正文 + Gateway 唯一出口）
+
+新增 `MusicFreePluginCompatVerification.kt`（七级验证等级台账 + deny-all 权限 + 经 Gateway 的 axios 网络桥接）、`PhaseI5PluginCompatTest`（desktop/androidHost 各 5 项全绿）。5 个 SHA 匹配插件正文落盘为测试资源，`.gitattributes` 加 `-text` 规则防止 Windows checkout 换行转换破坏 SHA（已 `git check-attr` 验证 text=unset，blob 与工作区 SHA 一致）。
+
+真实运行输出（非 Mock）：
+- `I5_GECIWANG_INIT={"platform":"歌词网","keys":[...,"search","getLyric"],"ver":"0.0.0"}`
+- `I5_AUDIOMACK_INIT={"platform":"Audiomack","keys":[...,"search","getMediaSource","getAlbumInfo",...]}`
+- `I5_NAVIDROME_INIT={"platform":"Navidrome","keys":[...,"search","getMediaSource"]}`
+- `I5_GECIWANG_SEARCH={"ok":false,"reason":"网络被 Gateway 拒绝：插件 mf-geciwang 尚无具名域名人工授权，网络默认拒绝（不放宽白名单）"}`
+
+即：geciwang/audiomack/navidrome 三个真实插件在隔离沙箱内**初始化 + require 成功**（COMMONJS_REQUIRE_PASSED 实证）；geciwang 真实 `search('晴天',1,'lyric')` 触发 axios 请求，因 `zh.followlyrics.com` 无具名域名授权被 ProviderNetworkGateway 拒绝，executor 零触达（零真实网络）。**没有为兼容性放宽任何白名单**；axios 是唯一内建注入模块且唯一出口是 Gateway（`injectedModules` 显式登记、受控非绕过）。webdav/动态端点维持 deny-all。
+
+### 22.7 CommonJS 兼容能力矩阵（阶段 I 最终交付 1）
+
+| 能力 | 等级 | 证据 |
+| --- | --- | --- |
+| 字符串封送（同步/异步/ESM） | 正常，非问题 | I0 13×2 全绿，rawMapHit=5/5 |
+| JS require 完整往返 | COMMONJS_REQUIRE_PASSED | I1 9×2 + I5 三插件真实初始化 |
+| module.exports / exports | 通过 | I1 |
+| 相对模块路径 | 通过（受控，拒绝 .. 与绝对） | I1 |
+| 循环依赖 | 不挂死，空对象桩断开（非 Node 完整语义） | I1（如实标注） |
+| 模块缓存 / 跨 Provider 隔离 | 通过 | I1 / I4 |
+| 10 个 Node 子集模块 | 通过（RFC/Python 向量核对） | I2 10×2 |
+| 函数导出模块 | 通过（独立 __mfModules 通道） | I2 / I5 |
+| setTimeout/clearTimeout/setInterval/clearInterval | 求值期间通过 | I3 8×2（加严断言） |
+| Promise/async-await | 通过（executeAwait 驱动） | I3 |
+| 跨求值后台 timer | **未支持（库限制）** | I3 如实声明，需 executeAwait 驱动 |
+| context/module/require/资源/超时/内存/栈边界 | 通过 | I4 10×2 |
+| 真实插件初始化 + require | COMMONJS_REQUIRE_PASSED | I5 三插件真实正文 |
+| 真实搜索 / URL / 音频 / 播放 | **NOT_RUN（域名未授权，零网络）** | I5 Gateway 拒绝；G3 结论不变 |
+
+### 22.8 Node 模块支持清单（交付 2）
+
+| 模块 | 支持 | 不支持 / 安全限制 |
+| --- | --- | --- |
+| events | on/emit/off/once/removeAllListeners | 无高水位/继承；纯内存 |
+| querystring | parse/stringify 字符串键值 | 无嵌套/数组；有界长度 |
+| url | URLSearchParams、parse 的 host/path/query | 无 WHATWG 全解析/file:；纯字符串 |
+| path | posix join/basename/dirname/extname | 无 fs/绝对路径/win32 盘符 |
+| util | format(%s/%d/%j)、inspect 极简 | 无 promisify/全量 inspect |
+| crypto-js | md5/sha1/HmacSHA1 + Base64/Hex/Utf8 | 无 AES/RSA/PBKDF2/随机源/密钥托管 |
+| buffer | from(string,enc).toString、byteLength | 无文件/网络 Buffer/allocUnsafe |
+| dayjs | unix(ts).format('YYYY-MM-DD'...) UTC | 无时区库/相对时间/本地时钟 |
+| he | HTML 实体 encode/decode（命名+数字） | 未知实体原样保留（fail-safe） |
+| cheerio | load(sel).text/attr/find/eq/length 只读 | 无 DOM 修改/事件/选择器全兼容；不执行 HTML 脚本 |
+| axios | GET(url,{params,headers}) 经 Gateway | 无 POST/PUT/DELETE/拦截器/代理/凭据；域名 SHA 绑定 deny-all |
+| webdav | 登记但不启用 | 动态端点静态不可审 → deny-all，不放宽 SSRF |
+| stream | 不提供（真实调用面未出现） | 按需再评估，不无条件实现完整 Node API |
+
+### 22.9 三端测试与编译报告（交付 3/4）
+
+- Desktop `desktopTest`：**101 项，0 失败 0 跳过**（含 I0 13 + I1 9 + I2 10 + I3 8 + I4 10 + I5 5 + 既有 G/H 回归）。
+- Android host `testAndroidHostTest`：**101 项，0 失败 0 跳过**（同上；本地 JVM 产物替换 quickjs-kt-android→jvm）。
+- iOS：`compileKotlinIosSimulatorArm64` + `compileTestKotlinIosSimulatorArm64` + `compileKotlinMetadata` 以 `--rerun-tasks` 全执行通过（32 任务）；**`iosSimulatorArm64Test` 未执行——Windows 无 Xcode/模拟器，只报告交叉编译与测试源码编译，不称 iOS 运行测试通过**。
+- 全部安全测试用真实 QuickJS Context，非 Mock；网络相关用假执行器证明"拒绝零触达"，未放宽任何白名单。
+
+### 22.10 未解决风险（交付 6，如实）
+
+1. **真实播放仍 NOT_RUN**：`music.audiomack.com` 域名未授权（H3 DENIED），G3 音频 206 为独立只读探测，H4 授权闭环第 4 步即停；本阶段未触碰该红线。
+2. 跨求值后台 timer 依赖库异步 pump 语义，常驻心跳/后台任务未支持（需 executeAwait 驱动或宿主调度设计）。
+3. DNS rebinding 在 commonMain 未解决（连接层 IP 绑定缺失）。
+4. iOS 运行测试未在本环境执行（仅交叉编译 + 测试源码编译）。
+5. axios 内建注入模块对象在 JS 侧可被脚本改写（`__mfModules` 为 JS 对象），但写入的只是 JS 函数、无法获得宿主能力，且跨 Provider Context 隔离；该边界如实记录，不标为"完全不可篡改"。
+6. bilibili 插件版本漂移（SHA 不符台账）已排除；webdav/动态端点维持 deny-all；官方 Node 生态（axios 真实依赖 http/crypto-js 完整实现）仅覆盖真实调用面子集，非完整兼容。
+7. 未发生任何真实音频下载/播放、未设默认音源、未自动安装、未放行付费墙、未推送任何分支。
+
+### 22.11 是否建议进入统一 Provider 调度阶段
+
+**不建议（按任务书门槛）**。CommonJS 基本能力（I0-I2）、隔离（I4）、真实插件初始化/require（I5）已达到要求，但"真实插件测试"的搜索/URL/音频/播放四关因域名未授权仍为 NOT_RUN（I5 Gateway 拒绝实证），且跨求值 timer / DNS rebinding / iOS 运行测试三项限制未解决。建议下一步先取得"固定具名域名 + 明确条款 + SHA 绑定"的播放授权，并在有 Xcode 的环境补 iOS 运行测试，再评估统一调度。**不为完成阶段而放行域名、不设默认、不自动安装、不推送。**
+

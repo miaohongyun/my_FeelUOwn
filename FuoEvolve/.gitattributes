@@ -11,3 +11,6 @@ config/source-catalog/*.schema.json -text
 config/source-catalog/third-party-raw/*.js -text
 provider/lxruntime/src/desktopTest/resources/third-party/*.js -text
 provider/lxruntime/src/androidHostTest/resources/third-party/*.js -text
+# 阶段 I5：MusicFree 插件正文同样按原始字节做 SHA-256 核验（与 G2 台账绑定），禁止换行转换。
+provider/musicfree/src/desktopTest/resources/plugins/*.js -text
+provider/musicfree/src/androidHostTest/resources/plugins/*.js -text

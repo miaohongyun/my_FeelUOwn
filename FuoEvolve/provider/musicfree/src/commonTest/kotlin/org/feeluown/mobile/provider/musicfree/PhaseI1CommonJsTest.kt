@@ -68,7 +68,8 @@ class PhaseI1CommonJsTest {
     @Test
     fun i1_requireUnlistedModuleRejectedInJs(): Unit = runTest {
         setupRegistry()
-        val r = run("require('axios')")
+        // axios 在 I5 变为内建注入模块（走 Gateway），改用真正未登记的 superagent 验证 fail-closed。
+        val r = run("require('superagent')")
         assertTrue(r is ExecResult.Failed, "未登记模块 require 必须失败，实际=$r")
         assertTrue(r.reason.contains("未登记") || r.reason.contains("allowlist"), "拒绝原因应明确：$r")
     }

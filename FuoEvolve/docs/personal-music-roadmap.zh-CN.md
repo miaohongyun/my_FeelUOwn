@@ -1244,3 +1244,15 @@ H0 审计结论（详见 `docs/community-source-audit.zh-CN.md` §16，全部带
 验证等级: REAL_SEARCH/IDENTITY/URL_RESOLVE达成; REAL_AUDIO_RESPONSE仅G3独立206探测(H4闭环内NOT_RUN); REAL_PLAYBACK NOT_RUN。
 沙箱遗留: quickjs-kt1.0.15 JS→Kotlin字符串封送差异致JS内require往返未作通过项/maxStackSize未强制/跨求值timer不可靠/官方Node模块插件未适配/iOS测试跳过。
 **结论: 不具备进入阶段I条件**(播放域名未授权+CommonJS执行生态未实现+iOS测试未执行); 不为完成阶段而放行/不设默认/不自动安装。详见 audit §21。
+
+
+## §27 阶段 I：MusicFree CommonJS 兼容性与沙箱补齐（2026-11-20）
+
+基线核对：本地 HEAD=9c80297(H5) 且父链完整、工作区干净；live 远端 work/android-community-discovery=9c80297、master=fc05530（H 已在上轮授权后推送，远端非 G3）。按本阶段任务书"未经授权不推送"，全程只本地提交，提交链 9c80297→6a99fc7(I0-I1)→53eceb8(I2)→1356b93(I3)→4a441d9(I4)→ec8636a(I5)。
+
+I0 封送：PhaseI0MarshallingTest 13×2 全绿，实测字符串实参为真实 kotlin.String（rawMapHit=5/5），**推翻 H1"包装类型差异"记录**（判为历史调试期问题）；新发现 addModule+import 可能重复求值。I1 require 往返：根因=H1 用 asModule=true 读 exports 不回传结果致值为 null；改非 asModule IIFE + 私有缓存 + JS 侧缓存，module.exports/exports/相对路径/缓存/隔离/失败/循环依赖全测，9×2 全绿。I2 Node 子集：真实取证 6 插件 require（5 个 SHA 与台账一致，bilibili 漂移排除），10 个纯 JS 安全子集，SHA1 大端序修复（RFC/Python 向量核对），函数导出走独立 __mfModules 通道，10×2 全绿。I3 timer：executeAwait 顶层 await + 宿主信号 + 回调留 JS，8×2 全绿（setInterval 加严 tick 2~10 次），跨求值后台 timer 如实为库限制。I4 边界：10×2 全绿，**编译探针证实 maxStackSize 公共 API 存在（推翻 H0/H1"未暴露"结论）并启用**，I4_CAPS memory/stack/interrupt 全 true。I5 真实插件：geciwang/audiomack/navidrome 真实正文沙箱初始化+require 成功（COMMONJS_REQUIRE_PASSED），axios 唯一出口经 Gateway，geciwang 真实 search 因域名未授权被拒、executor 零触达（不放宽白名单），各 5 项全绿；.gitattributes 加 -text 保护插件 SHA 不被 Windows checkout 破坏。
+
+测试：desktopTest 101 项 0 失败、testAndroidHostTest 101 项 0 失败；iOS compileKotlinIosSimulatorArm64 + compileTestKotlinIosSimulatorArm64 + compileKotlinMetadata 以 --rerun-tasks 32 任务全过，iosSimulatorArm64Test SKIPPED（Windows 无 Xcode/模拟器，如实）。
+
+**结论：CommonJS 基本能力/隔离/真实插件初始化已达要求，但真实搜索/URL/音频/播放四关因域名未授权仍 NOT_RUN，跨求值 timer/DNS rebinding/iOS 运行测试三项限制未解决，不建议进入统一 Provider 调度阶段。真实播放 NOT_RUN 不变、不设默认、不自动安装、不推送。** 详见 audit §22。
+
