@@ -99,6 +99,38 @@ class CommunitySourceRegistryTest {
     }
 
     @Test
+    fun e3LxSimulatedPassedOnlyWithPlatformEvidence() {
+        CommunitySourceRegistry.candidates
+            .filter { it.status == CommunityAuditStatus.LX_RUNTIME_LOAD_PASSED }
+            .forEach { c ->
+                assertTrue(c.lxSimulatedPlatforms.isNotEmpty(), "${c.candidateId} 标 LX 通过但无平台证据")
+                assertTrue(c.sha256 != null, "${c.candidateId} 标 LX 通过但无已核验文件")
+                assertTrue(c.lxSimulatedPassed, "${c.candidateId} lxSimulatedPassed 应为 true")
+            }
+        // E3 实际加载成功的候选。
+        listOf("zhizun", "huibq", "gd-studio").forEach { id ->
+            assertEquals(CommunityAuditStatus.LX_RUNTIME_LOAD_PASSED,
+                CommunitySourceRegistry.find(id)!!.status, "$id 应在 E3 加载成功")
+        }
+        // E3 因空 allowedHosts 加载失败的候选不得被错误升级。
+        assertEquals(CommunityAuditStatus.FETCHED, CommunitySourceRegistry.find("ikun-v515")!!.status)
+        // BLOCK 候选即使历史做过模拟也不得升级为 LX 通过。
+        assertEquals(CommunityAuditStatus.BLOCKED, CommunitySourceRegistry.find("changqing")!!.status)
+    }
+
+    @Test
+    fun e4BundlesHaveRealEvidenceAndNoOverclaim() {
+        val mf = CommunitySourceRegistry.bundles.first { it.bundleId == "musicfree-57" }
+        assertEquals(57, mf.verifiedCount, "E4 实际解析出 57 插件条目")
+        assertTrue(mf.children.size >= 10, "应展开插件清单示例")
+        val sw = CommunitySourceRegistry.bundles.first { it.bundleId == "stellarwave-backends" }
+        assertEquals(CommunityAuditStatus.BLOCKED, sw.status, "星澜因 QQ越权/内嵌Cookie 阻断")
+        assertTrue(sw.evidence.contains("platform=23") || sw.evidence.contains("Cookie"),
+            "星澜阻断必须含具体越权证据")
+        assertTrue(sw.verifiedCount < sw.claimedCount!!, "不得把 87 声明写成已验证")
+    }
+
+    @Test
     fun keyAggregatorsAreRegisteredAsBundles() {
         assertTrue(CommunitySourceRegistry.bundles.isNotEmpty())
         val stellar = CommunitySourceRegistry.bundles.first { it.bundleId == "stellarwave-backends" }

@@ -205,3 +205,81 @@ BLOCK 规则：`eval`/`new Function`/动态 import、Node 宿主能力（require
 | 无未经批准的正式安装 | ✅ 全部候选仅入台账/隔离，未安装 |
 
 **结论**：E0–E2 完成的是**可管理、可追踪、可验证的候选台账与安全审查**；不是“所有来源都能播放”，也没有为追求数量放宽任何门禁。通过审查的候选仍需 E3 起逐项真实验证与用户明确批准，方可进入受控接入。
+
+---
+
+## 8. E3 LX Runtime 架构兼容性验证（SIMULATED_INIT）
+
+对 E2 静态无 BLOCK 命中的候选，按登记表 SHA256 核对原文后，在 MockEngine（零真实网络）下执行
+`LxScriptRuntime.load + initialize`，只验证事件接口/QuickJS 加载/必需 Host API/平台声明/SSRF fail-closed。
+测试：`provider/lxruntime/src/desktopTest/.../PhaseEArchitectureTest.kt`（4 项），输出 `build/phase-e-architecture.txt`。
+
+| 候选 | SHA 核对 | 加载初始化 | 声明平台 | 验证等级 |
+|---|---|---|---|---|
+| 至尊 zhizun | ✓ | 成功 | kw/kg/tx/wy/mg | LX_RUNTIME_LOAD（SIMULATED_INIT） |
+| HUIBQ | ✓ | 成功 | kw/kg/tx/wy/mg | LX_RUNTIME_LOAD（SIMULATED_INIT） |
+| gdstudio（额外发现） | ✓ | 成功 | wy/kw/tx/kg/mg | LX_RUNTIME_LOAD（SIMULATED_INIT） |
+| ikun-v515 | ✓ | 失败：初始化即触发 lx.request，空 allowedHosts 被拒 | — | 未升级（FETCHED） |
+| juhe / animemusic | ✓ | 失败：同上（SSRF fail-closed 生效） | — | 未升级 |
+| flower 野花(pdone) | ✓ | 失败：AggregateError | — | 未升级（QUARANTINED） |
+
+**结论**：失败用例恰恰证明空白名单拒绝一切请求的门禁真实有效，不是"网络没跑起来"。
+成功者仅到 `LX_RUNTIME_LOAD` / `SIMULATED_INIT`——**未做真实搜索、未解析真实播放地址、未下载音频**，
+不得据此声称可播放或音质达标。登记表仅给 3 个成功者升级状态并记录平台证据。
+
+BLOCK/混淆候选（长青、Fish、Flower、六音、墨澜、元力菌等）**未进入** E3 可执行资源，测试断言其隔离未被解除。
+
+## 9. E4 聚合与插件生态拆解
+
+### 9.1 星澜 StellarWave（阻断升级为明确证据）
+
+E4 从 v3.1.1.1 发布页取得实质证据，**阻断理由从"待确认"升级为"确认存在访问控制绕过"**：
+
+- QQ越权模块**内嵌完整 Cookie**（qm_keyst、uin、pgv_pvid），三重策略：
+  - 策略A `ut.y.qq.com` 的 CgiGetHotVkey；
+  - 策略B `u.y.qq.com` 的 **platform=23 绕过**；
+  - 策略C ut+key 增强兜底；
+  - 明示用途："大幅提升 **VIP/付费歌曲** 获取成功率"，解锁 master/atmos。
+- 残像 WY 解锁 jymaster 母带；yuafeng 酷狗需用户 apikey；`@tx_cookie/@wy_cookie` 会员 Cookie 配置。
+- 后端 87（QQ26/网易19/酷我15/酷狗15/咪咕12），Fallback=并发前3+顺序其余、LRU(TTL6h/容量300)、音质降级链。
+- **处置**：BLOCK 保持，不接入任何越权后端；"99.9%+ 成功率"无复核数据，仅为宣传。
+
+### 9.2 MusicFree 插件订阅站（真实清单已展开）
+
+实际下载 `plugins.json`（11029B，sha256 `6b642083b759ca773…c61edb3`），解析出 **57 个插件**（字段 name/url/version）：
+QQ音乐 v1.9.26、酷我 v1.9.24、酷狗 v1.9.24、咪咕 v1.9.20、网易云 v1.9.27、汽水 v1.9.23、B站 v1.1.4、
+喜马拉雅 v1.2.1、Jamendo v1.0.2、聚合 v1.9.19、JOOX v1.1.3，以及大量 DJ/听书类插件（完整清单见登记台账 children 与报告附件）。
+
+**verifiedCount=57 仅指清单条目数已解析**，不代表插件正文已下载/审查/可用。插件为 MusicFree 协议（≠ LX API），
+适配需：格式转换、API 契约适配、QuickJS 兼容、依赖与网络/存储权限、许可证核查；本阶段未批量安装任何插件。
+
+### 9.3 Z系列 / 元力菌
+
+- Z 系列 14 插件：未找到可验证官方清单，UNVERIFIABLE，不伪造插件名/SHA。
+- 元力菌反编译：依赖 13413.kstore.vip（长青同域）+ SVIP + 来源/许可证不明，BLOCK 保持。
+
+## 10. E5 管理 UI 增强
+
+在 `CommunityDiscoveryScreen`（commonMain，三端共享）增强，保持窄屏与现有导航：
+
+- **统计概览**：候选总数/已发现/已下载/静态通过/BLOCK/隔离/LX验证(模拟)/真实验证，8 类分列，明确区分"LX验证(模拟)"与"真实验证"。
+- **筛选**：名称/域名关键词 + 审核状态按钮筛选（点同一状态取消）。
+- **详情**：展示验证等级（非真实标注）、安装策略说明。
+- **安装边界**：页面顶部与详情均以醒目文案声明——"安装/启用需单独人工审核与受控目录签名发布；本页不提供安装按钮，候选不会自动成为正式音源。" **不提供任何安装/启用按钮**，从 UI 上杜绝未批准安装。
+- 既有能力保留：纵向滚动详情、审核操作纵向排列、删除二次确认、操作期禁用、错误分类提示。
+
+## 11. E3–E5 完成标准对照
+
+| 标准 | 状态 |
+|---|---|
+| 静态通过者完成 LX 架构验证 | ✅ 7 个候选验证，3 个 SIMULATED_INIT 通过，失败者如实记录 |
+| Mock 不冒充真实 | ✅ 全程 MockEngine，报告明确 SIMULATED_INIT ≠ REAL_* |
+| MusicFree/聚合完成必要拆解 | ✅ 星澜 87 后端结构+越权证据、MusicFree 57 插件真实清单 |
+| UI 清楚展示状态 | ✅ 统计/筛选/验证等级/安装策略，无安装按钮 |
+| 测试与构建真实可复核 | ✅ 见提交记录 |
+| 无未授权会员绕过 | ✅ 星澜越权证据确认并 BLOCK，未接入 |
+| 无未经批准安装 | ✅ 无安装接口、无安装按钮、候选仅入台账/隔离 |
+
+**两轮总结**：E0–E2 建立 31 候选台账与静态审查（33 脚本取证、长青 BLOCK 保持）；E3–E5 完成 LX 架构验证
+（3 个 SIMULATED_INIT 通过、SSRF 门禁实测生效）、聚合/插件生态拆解（星澜越权确认+BLOCK、MusicFree 57 插件清单）、
+管理 UI 增强（统计/筛选/安装边界）。**全程未执行真实商业音频下载、未绕会员、未自动批准或安装、未改 master/正式目录/公钥/签名。**

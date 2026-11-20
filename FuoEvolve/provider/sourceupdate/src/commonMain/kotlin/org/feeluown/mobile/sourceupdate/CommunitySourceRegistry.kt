@@ -80,11 +80,16 @@ data class CommunityCandidateRecord(
     val declaredHosts: List<String> = emptyList(),
     /** 人工复核结论/风险证据/阻断原因。 */
     val evidence: String,
+    /** E3 LX 架构模拟验证声明的平台（SIMULATED_INIT 级，非空表示加载初始化通过；非真实可用）。 */
+    val lxSimulatedPlatforms: List<String> = emptyList(),
     /** 与已登记候选重复的 id（E1 去重）。 */
     val duplicateOf: String? = null,
 ) {
     val hasVerifiedHash: Boolean get() = sha256 != null
     val isBlocked: Boolean get() = status.isTerminalBlock
+    /** 是否通过 E3 架构模拟验证（仅加载级，非真实）。 */
+    val lxSimulatedPassed: Boolean get() = status == CommunityAuditStatus.LX_RUNTIME_LOAD_PASSED &&
+        lxSimulatedPlatforms.isNotEmpty()
 }
 
 /** 聚合项目/订阅集合的子项映射（E4 拆解的台账，本阶段只登记不验证）。 */
@@ -243,9 +248,11 @@ object CommunitySourceRegistry {
             repositoryUrl = PDONE_BASE, downloadUrl = "$PDONE_BASE/huibq/latest.js",
             sha256 = "a9adeb456690b523008038224091cee31977606302d79082eb06adb3c75c9146",
             fileSize = 2727, sourceType = CommunitySourceType.STANDALONE,
-            status = CommunityAuditStatus.FETCHED,
+            status = CommunityAuditStatus.LX_RUNTIME_LOAD_PASSED,
+            lxSimulatedPlatforms = listOf("kw", "kg", "tx", "wy", "mg"),
             evidence = "pdone 官方 huibq/latest.js（2727B）。与 shellsec/huibi（回避聚合，83639B）" +
-                "是不同文件、不同项目，已分别登记去重。静态无 BLOCK；宣传五平台 320k 未真实验证。",
+                "是不同文件、不同项目，已分别登记去重。静态无 BLOCK；E3 LX 模拟加载初始化通过（SIMULATED_INIT，" +
+                "声明 kw/kg/tx/wy/mg 五平台），非真实搜索/播放；宣传五平台 320k 未真实验证。",
         ))
         add(CommunityCandidateRecord(
             candidateId = "tongyi", name = "统一音乐源",
@@ -305,9 +312,25 @@ object CommunitySourceRegistry {
             repositoryUrl = XZH_BASE, downloadUrl = "$XZH_BASE/zhizun.js",
             sha256 = "ddc095aca3dc4df5a00ea6df3b84a31d17c1055fad3e1ee09edd6308ccc17210",
             fileSize = 10089, sourceType = CommunitySourceType.STANDALONE,
-            status = CommunityAuditStatus.FETCHED,
+            status = CommunityAuditStatus.LX_RUNTIME_LOAD_PASSED,
+            lxSimulatedPlatforms = listOf("kw", "kg", "tx", "wy", "mg"),
             evidence = "xzh767/lxmusic-source-all 的 zhizun.js（10089B）。静态无 BLOCK 命中，2 个声明域名。" +
-                "历史 LX 模拟通过（列表含至尊），但真实平台覆盖/音质未验证。",
+                "E3 LX 模拟加载初始化通过（SIMULATED_INIT，声明 kw/kg/tx/wy/mg），非真实搜索/播放；" +
+                "真实平台覆盖/音质未验证。",
+        ))
+
+        // ===== 额外发现：shellsec 主清单中静态干净且 E3 加载成功的候选 =====
+        add(CommunityCandidateRecord(
+            candidateId = "gd-studio", name = "gdstudio音乐源",
+            repositoryUrl = "https://github.com/shellsec/lx-music-source",
+            downloadUrl = "$SHELLSEC_BASE/gd-studio/gdstudio%E9%9F%B3%E4%B9%90%E6%BA%90.js",
+            version = "1.0.1", sha256 = "05631b29ff18a4b8688b4464abf0f38952474cd4d8d6c4149c365b0190c7fd28",
+            fileSize = 8689, sourceType = CommunitySourceType.STANDALONE,
+            status = CommunityAuditStatus.LX_RUNTIME_LOAD_PASSED,
+            lxSimulatedPlatforms = listOf("wy", "kw", "tx", "kg", "mg"),
+            evidence = "shellsec 主清单额外发现（非任务书点名候选）。静态无 BLOCK，2 个声明域名；" +
+                "E3 LX 模拟加载初始化通过（SIMULATED_INIT，声明五平台），非真实搜索/播放。" +
+                "登记入台账以便追踪，未批准/未安装。",
         ))
 
         // ===== C. 系列与功能型音源 =====
@@ -418,19 +441,28 @@ object CommunitySourceRegistry {
         CommunityBundleRecord(
             bundleId = "stellarwave-backends", name = "星澜后端清单",
             sourceUrl = "https://github.com/lick563/Xinglan-aggregate-sound-sources/releases",
-            claimedCount = 87, verifiedCount = 0, status = CommunityAuditStatus.DISCOVERED,
-            evidence = "发布页 v3.1.1.1 声明 87 后端：QQ26 / 网易19 / 酷我15 / 酷狗15 / 咪咕12。" +
-                "含 FFAPI 通用后端、Cookie 配置(@tx_cookie/@wy_cookie)、yuafeng 需 apikey。" +
-                "本阶段未逐个验证后端，不写成 87 个已验证音源。",
-            children = listOf("FFAPI", "QQ越权", "ygking", "残像", "星海酷我", "yunmge",
-                "星海酷狗", "念心", "yuafeng", "星海咪咕"),
+            claimedCount = 87, verifiedCount = 0, status = CommunityAuditStatus.BLOCKED,
+            evidence = "E4 拆解 v3.1.1.1 发布页：声明 87 后端（QQ26/网易19/酷我15/酷狗15/咪咕12），" +
+                "Fallback=并发前3+顺序其余、LRU(TTL6h/容量300)、音质降级链。" +
+                "🚨 阻断证据：QQ越权后端内嵌完整 Cookie(qm_keyst/uin/pgv_pvid)，" +
+                "三重策略含 platform=23 绕过、CgiGetHotVkey，明确用于提升 VIP/付费歌曲获取成功率——" +
+                "属访问控制绕过，与'不绕会员/付费墙'红线冲突；残像解锁 jymaster 母带、yuafeng 需 apikey。" +
+                "不写成 87 个已验证音源，不接入任何越权后端。",
+            children = listOf("FFAPI", "QQ越权(内嵌Cookie/platform=23绕过)", "ygking", "残像(jymaster)",
+                "星海酷我", "yunmge", "星海酷狗", "念心", "yuafeng(apikey)", "星海咪咕"),
         ),
         CommunityBundleRecord(
             bundleId = "musicfree-57", name = "MusicFree 插件订阅(hebijunge)",
             sourceUrl = "https://hebijunge.github.io/musicfree-plugins/plugins.json",
-            claimedCount = 57, verifiedCount = 0, status = CommunityAuditStatus.DISCOVERED,
-            evidence = "站点自述 57 插件、分类订阅(main/dj/radio/music/all)、约 643KB，多条备用线路。" +
-                "插件为 MusicFree 协议，需格式转换/API 适配/QuickJS 兼容评估；本阶段未逐一下载或验证。",
+            claimedCount = 57, verifiedCount = 57, status = CommunityAuditStatus.DISCOVERED,
+            evidence = "E4 实际下载 plugins.json（11029B，sha256 6b642083b759ca773…c61edb3），" +
+                "解析出 57 个插件（name/url/version 三字段），claimed=verified=57（仅指清单条目数，" +
+                "不代表插件已下载/审查/可用）。覆盖 QQ/酷我/酷狗/咪咕/网易/B站/喜马拉雅及大量 DJ 类。" +
+                "插件为 MusicFree 协议（≠LX API），需格式转换/API 适配/QuickJS 兼容/权限与许可证评估；" +
+                "本阶段未逐一下载插件正文、未批量安装。",
+            children = listOf("QQ音乐 v1.9.26", "酷我音乐 v1.9.24", "酷狗音乐 v1.9.24", "咪咕音乐 v1.9.20",
+                "网易云音乐 v1.9.27", "汽水音乐 v1.9.23", "B站 v1.1.4", "喜马拉雅 v1.2.1",
+                "Jamendo v1.0.2", "聚合 v1.9.19", "JOOX音乐 v1.1.3", "…共57项（详见审查报告）"),
         ),
         CommunityBundleRecord(
             bundleId = "z-series-14", name = "Z 系列插件合集(声称 14)",

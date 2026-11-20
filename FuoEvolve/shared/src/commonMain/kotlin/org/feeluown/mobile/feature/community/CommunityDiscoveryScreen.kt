@@ -31,11 +31,13 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import org.feeluown.mobile.sourceupdate.CandidateReviewState
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -93,22 +95,48 @@ fun CommunityDiscoveryScreen(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 )
             }
+            // E5 统计概览：全部候选的状态分布（不受筛选影响）。
+            val s = state.stats
             Text(
-                "以下为社区清单发现的候选，仅供审查；不会自动安装或播放。\n" +
-                    "所有音质/可用性结论需真实验证后才成立。",
+                "候选 ${s.total} · 已发现 ${s.discovered} · 已下载 ${s.downloaded} · 静态通过 ${s.staticPassed}\n" +
+                    "BLOCK ${s.blocked} · 隔离 ${s.quarantined} · LX验证(模拟) ${s.lxVerified} · 真实验证 ${s.realVerified}",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.typography.bodySmall.color.copy(alpha = 0.7f),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             )
+            Text(
+                CommunityDiscoveryPresentation.INSTALL_POLICY_NOTE,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+            // E5 筛选：关键词 + 状态（点同一状态取消筛选）。
+            OutlinedTextField(
+                value = state.filterText,
+                onValueChange = { controller.setFilterText(it) },
+                label = { Text("按名称/域名筛选") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Button(onClick = { controller.setStatusFilter(null) }) { Text("全部") }
+                CandidateReviewState.entries.take(5).forEach { st ->
+                    OutlinedButton(
+                        onClick = { controller.setStatusFilter(if (state.statusFilter == st) null else st) },
+                    ) { Text(CommunityDiscoveryPresentation.statusShortLabel(st)) }
+                }
+            }
             if (state.candidates.isEmpty() && !state.isRefreshing) {
                 Text(
                     "暂无候选。点击右上角刷新以读取社区清单。",
                     modifier = Modifier.padding(16.dp),
                     style = MaterialTheme.typography.bodyMedium,
                 )
+            } else if (state.visibleCandidates.isEmpty()) {
+                Text("没有符合筛选条件的候选。", modifier = Modifier.padding(16.dp),
+                    style = MaterialTheme.typography.bodyMedium)
             }
             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(state.candidates, key = { it.id }) { candidate ->
+                items(state.visibleCandidates, key = { it.id }) { candidate ->
                     CandidateRow(candidate, onClick = { controller.select(candidate.id) })
                 }
             }
@@ -242,6 +270,9 @@ fun CandidateDetailDialog(
                 Spacer(Modifier.height(8.dp))
                 Text("镜像 ID：${candidate.aliasIds.joinToString(", ").ifBlank { "无" }}",
                     style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(8.dp))
+                Text(CommunityDiscoveryPresentation.INSTALL_POLICY_NOTE,
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 // 隔离区下载：只用候选登记的地址，标记为手动导入候选，绝不自动安装/加载。
                 val urls = (listOf(candidate.rawUrl) + candidate.mirrorUrls).filter { it.isNotBlank() }.distinct()
                 if (urls.isNotEmpty()) {

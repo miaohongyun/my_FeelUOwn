@@ -146,4 +146,61 @@ class CommunityDiscoveryControllerTest {
         )
         assertTrue(candidate.hashUnverified, "无预期哈希下载的候选被标记，UI 据此提示不可信")
     }
+
+    // ---- E5 统计 / 筛选 / 安装策略 ----
+
+    @Test
+    fun e5StatsCountAllCategoriesWithoutOverclaim() {
+        val mk = { id: String, review: String, verdict: String?, sha: String?, level: String ->
+            org.feeluown.mobile.sourceupdate.DiscoveredCandidate(
+                id = id, name = id, rawUrl = "u", normalizedUrl = "u", repoPath = "p",
+                reviewState = review, staticVerdict = verdict, sha256 = sha, verificationLevel = level,
+            )
+        }
+        val list = listOf(
+            mk("a", "DISCOVERED", "CLEAN", null, "STATIC_REVIEW"),
+            mk("b", "QUARANTINED", "BLOCKED", "h", "STATIC_REVIEW"),
+            mk("c", "REJECTED", null, "h", "LX_RUNTIME_LOAD"),
+            mk("d", "DISCOVERED", null, null, "REAL_SEARCH"),
+        )
+        val s = CommunityDiscoveryPresentation.CandidateStats.from(list)
+        assertEquals(4, s.total)
+        assertEquals(2, s.discovered)
+        assertEquals(2, s.downloaded, "有 SHA 的算已下载")
+        assertEquals(1, s.staticPassed)
+        assertEquals(1, s.blocked)
+        assertEquals(1, s.quarantined)
+        assertEquals(2, s.lxVerified, "LX_RUNTIME_LOAD 与 REAL_SEARCH 均 >= LX 级")
+        assertEquals(1, s.realVerified, "只有 REAL_SEARCH 算真实验证")
+    }
+
+    @Test
+    fun e5FilterByNameDomainAndStatus() {
+        val mk = { id: String, name: String, domains: List<String>, review: String ->
+            org.feeluown.mobile.sourceupdate.DiscoveredCandidate(
+                id = id, name = name, rawUrl = "u", normalizedUrl = "u", repoPath = "p",
+                discoveredDomains = domains, reviewState = review,
+            )
+        }
+        val list = listOf(
+            mk("a", "星海音乐源", listOf("api.qq.com"), "DISCOVERED"),
+            mk("b", "念心", listOf("music.163.com"), "QUARANTINED"),
+            mk("c", "野花", emptyList(), "DISCOVERED"),
+        )
+        assertEquals(1, CommunityDiscoveryPresentation.filterCandidates(list, "星海", null).size)
+        assertEquals(1, CommunityDiscoveryPresentation.filterCandidates(list, "163.com", null).size)
+        assertTrue(CommunityDiscoveryPresentation.filterCandidates(list, "a", null).any { it.id == "a" },
+            "id 也应可筛选")
+        assertEquals(2, CommunityDiscoveryPresentation.filterCandidates(list, "",
+            org.feeluown.mobile.sourceupdate.CandidateReviewState.DISCOVERED).size)
+        assertEquals(3, CommunityDiscoveryPresentation.filterCandidates(list, "", null).size)
+    }
+
+    @Test
+    fun e5InstallPolicyNeverPromisesAutoInstall() {
+        val note = CommunityDiscoveryPresentation.INSTALL_POLICY_NOTE
+        assertTrue(note.contains("人工审核"), "安装必须明确需人工审核")
+        assertTrue(note.contains("签名"), "安装必须明确走受控目录签名发布")
+        assertTrue(!note.contains("自动安装"), "不得暗示自动安装")
+    }
 }

@@ -31,6 +31,10 @@ interface CommunityDiscoveryController {
     fun select(id: String?)
     fun requestDelete(id: String?) // 二次确认：先标记，再真正删除
     fun clearFeedback()
+    /** E5：设置名称/平台关键词筛选。 */
+    fun setFilterText(text: String)
+    /** E5：设置审核状态筛选（null = 全部）。 */
+    fun setStatusFilter(status: CandidateReviewState?)
 }
 
 /** 操作错误的分类，供 UI 精确提示（网络/哈希/BLOCK/存储/安全拒绝）。 */
@@ -47,7 +51,19 @@ data class CommunityDiscoveryUiState(
     val errorKind: CommunityOperationError? = null,
     val selectedId: String? = null,
     val deleteConfirmId: String? = null,
-)
+    /** E5：名称/平台关键词筛选（大小写不敏感）。 */
+    val filterText: String = "",
+    /** E5：审核状态筛选；null = 全部。 */
+    val statusFilter: CandidateReviewState? = null,
+) {
+    /** 按筛选条件过滤后的候选列表（纯函数，供 UI 与测试共用）。 */
+    val visibleCandidates: List<DiscoveredCandidate>
+        get() = CommunityDiscoveryPresentation.filterCandidates(candidates, filterText, statusFilter)
+
+    /** E5 顶部统计（全部候选，不受筛选影响）。 */
+    val stats: CommunityDiscoveryPresentation.CandidateStats
+        get() = CommunityDiscoveryPresentation.CandidateStats.from(candidates)
+}
 
 /** 展示辅助：把候选映射成 UI 文案，集中在此以便测试与多端一致。 */
 object CommunityDiscoveryPresentation {
@@ -61,6 +77,16 @@ object CommunityDiscoveryPresentation {
         CandidateReviewState.STALE -> "已失效（清单中消失）"
     }
 
+    /** E5 状态筛选按钮的短标签。 */
+    fun statusShortLabel(status: CandidateReviewState): String = when (status) {
+        CandidateReviewState.DISCOVERED -> "已发现"
+        CandidateReviewState.QUARANTINED -> "已隔离"
+        CandidateReviewState.NEEDS_REVIEW -> "待审"
+        CandidateReviewState.APPROVED -> "已批准"
+        CandidateReviewState.REJECTED -> "已拒绝"
+        CandidateReviewState.STALE -> "失效"
+    }
+
     fun verdictLabel(candidate: DiscoveredCandidate): String = when (candidate.staticVerdict) {
         "CLEAN" -> "静态扫描通过"
         "NEEDS_REVIEW" -> "需人工审查"
@@ -72,6 +98,58 @@ object CommunityDiscoveryPresentation {
         runCatching { VerificationLevel.valueOf(candidate.verificationLevel) }
             .getOrDefault(VerificationLevel.STATIC_REVIEW)
             .let { if (it.isReal) it.name else "$it（非真实音频验证）" }
+
+    /** E5 顶部统计：候选总数/已发现/已下载/静态通过/BLOCK/隔离/LX验证/真实验证。 */
+    data class CandidateStats(
+        val total: Int,
+        val discovered: Int,
+        val downloaded: Int,
+        val staticPassed: Int,
+        val blocked: Int,
+        val quarantined: Int,
+        val lxVerified: Int,
+        val realVerified: Int,
+    ) {
+        companion object {
+            fun from(list: List<DiscoveredCandidate>): CandidateStats = CandidateStats(
+                total = list.size,
+                discovered = list.count { it.review == CandidateReviewState.DISCOVERED },
+                downloaded = list.count { it.sha256 != null },
+                staticPassed = list.count { it.staticVerdict == "CLEAN" },
+                blocked = list.count { it.staticVerdict == "BLOCKED" || it.review == CandidateReviewState.QUARANTINED },
+                quarantined = list.count { it.review == CandidateReviewState.QUARANTINED },
+                lxVerified = list.count {
+                    runCatching { VerificationLevel.valueOf(it.verificationLevel) }
+                        .getOrDefault(VerificationLevel.STATIC_REVIEW).rank >= VerificationLevel.LX_RUNTIME_LOAD.rank
+                },
+                realVerified = list.count {
+                    runCatching { VerificationLevel.valueOf(it.verificationLevel) }
+                        .getOrDefault(VerificationLevel.STATIC_REVIEW).isReal
+                },
+            )
+        }
+    }
+
+    /** E5 筛选：名称含关键词（大小写不敏感）或 discoveredDomains 命中，再按审核状态过滤。 */
+    fun filterCandidates(
+        list: List<DiscoveredCandidate>,
+        text: String,
+        status: CandidateReviewState?,
+    ): List<DiscoveredCandidate> {
+        val q = text.trim()
+        return list.filter { c ->
+            val matchesText = q.isEmpty() ||
+                c.name.contains(q, ignoreCase = true) ||
+                c.id.contains(q, ignoreCase = true) ||
+                c.discoveredDomains.any { it.contains(q, ignoreCase = true) }
+            val matchesStatus = status == null || c.review == status
+            matchesText && matchesStatus
+        }
+    }
+
+    /** E5 安装限制说明：本框架不提供安装/启用入口，任何正式启用需单独人工审核 + 受控目录签名发布。 */
+    const val INSTALL_POLICY_NOTE =
+        "安装/启用需单独人工审核与受控目录签名发布；本页不提供安装按钮，候选不会自动成为正式音源。"
 
     /** 把下载/扫描的失败原因归到明确类别，避免笼统"操作失败"。 */
     fun classifyError(reason: String): CommunityOperationError = when {
@@ -261,6 +339,14 @@ class RealCommunityDiscoveryController(
         mutable.value = mutable.value.copy(feedback = null, errorKind = null)
     }
 
+    override fun setFilterText(text: String) {
+        mutable.value = mutable.value.copy(filterText = text)
+    }
+
+    override fun setStatusFilter(status: CandidateReviewState?) {
+        mutable.value = mutable.value.copy(statusFilter = status)
+    }
+
     private fun mutateWithFeedback(id: String, action: suspend () -> Boolean) {
         if (mutable.value.isBusy) return
         scope.launch {
@@ -300,4 +386,6 @@ class NoOpCommunityDiscoveryController : CommunityDiscoveryController {
     override fun select(id: String?) = Unit
     override fun requestDelete(id: String?) = Unit
     override fun clearFeedback() = Unit
+    override fun setFilterText(text: String) = Unit
+    override fun setStatusFilter(status: CandidateReviewState?) = Unit
 }
