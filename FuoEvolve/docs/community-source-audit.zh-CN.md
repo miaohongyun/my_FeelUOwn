@@ -620,3 +620,79 @@ FuoEvolve 的 QuickJS Runtime 无法直接加载，必须走适配层。
 
 **核心答案**：合规音源"真正可用"仍差最后一环——**受控的播放域名授权**（解析域名与静态授权域名不一致），
 以及 CommonJS 隔离执行环境。两者未解决前，不设默认/备用音源、不自动安装、不冒充真实播放。
+
+
+---
+
+## 16. 阶段 H0：MusicFree Provider 安全执行环境架构审计（2026-11-20）
+
+> 基线：`32176e5`（阶段 G3）　分支：`work/android-community-discovery`　未碰 master。
+> **只审计，不重构**。本节所有结论带 `文件:行号`，作为 H1/H2 的设计输入；未新增可运行代码。
+
+### 16.1 模块依赖图
+
+```
+:provider:musicfree (G2 新增，本次审计对象)
+  ├─ :provider:runtime    → KotlinMusicProvider/BaseKotlinProvider/ProviderHttpClient/ProviderNetwork
+  ├─ :provider:lxruntime  → CandidateNetworkPolicy / LxUrlSafety （复用候选级授权，不改其核心协议）
+  ├─ :provider:sourceupdate → CommunitySourceRegistry / BoundedHttpBody
+  ├─ kotlinx.coroutines.core / serialization.json / ktor.client.core
+:provider:lxruntime (QuickJS 执行环境现状)
+  ├─ quickjs-kt 1.0.15 (io.github.dokar3) → Android .so / JVM / iOSArm64 / iOSSim 四套产物
+  ├─ :provider:runtime / :provider:sourceupdate
+  └─ Android host test 用 dependencySubstitution 把 quickjs-kt-android → quickjs-kt-jvm
+```
+musicfree 依赖 lxruntime 只为复用授权策略；**不调用 LxScriptRuntime 的执行 API**（G2 适配层是纯数据映射，见 §14）。
+
+### 16.2 Provider 调用时序图（现状，LX 路径）
+
+```
+lx.request(url,opts,cb)  [BR:146-165]
+ → __lxHttp(JSON)  asyncFunction  [RT:452-456]
+ → performHttp()  [RT:522-573]
+    ├ LxNetworkPolicy.rejectionReason(url, allowedHosts)  [RT:530; NP:24-37]
+    ├ followRedirects=false 手动逐跳 [RT:582-615]，每跳重新校验 [RT:607-611]
+    └ readBodyBounded 512KiB 流式 [RT:543; BB:50-71]
+ → JS Promise → callback [BR:156-163] → __lxDispatchError → Kotlin [RT:268-271]
+```
+QuickJS 生命周期：`load()` 每次新建 `RuntimeSession`(QuickJs.create + evaluationTimeoutMillis) [RT:342-344]，
+`load`/`close` 全程 lifecycleMutex 串行 [RT:105-106]，`close()` 五步顺序释放门闩/timer/scope/job/context [RT:362-386]。
+
+### 16.3 宿主能力清单（暴露给 JS 的全部能力）
+
+| JS 可见名 | 作用 | 网络/绕过风险 |
+| --- | --- | --- |
+| `lx.request`→`__lxHttp` | 唯一出网口 | 必经 SSRF+逐跳重定向+体积/超时；JS 无 fetch/XHR/WebSocket/socket |
+| `__lxBufferFrom/BufToString/Md5` | 编解码/哈希 | 无网络 |
+| `__lxCryptoUnsupported` | randomBytes/aes/rsa 明确抛错 | 无网络，不解错误 URL |
+| `__lxDelay/__lxCancelTimer` + `setTimeout/clearTimeout` | 计时器，最多 64 个 | 无网络，可取消 |
+| `console` no-op | 丢弃日志防泄漏 | 无网络 |
+| `lx.on/send/EVENT_NAMES`、探针 `__lxInited/__lxDispatch/__lxHasHandler/__lxUpdateAlert` | 事件与宿主探针 | 无网络；`__lxUpdateAlert` 无 Kotlin 消费方 |
+
+### 16.4 安全边界（已具备，可复用）
+
+- **每脚本独立 QuickJS context**；cacheKey=`id:version:SHA256` [PR:262-269]，prune/release/releaseAll 完整 [PR:195-260]。
+- **native `evaluationTimeoutMillis` 中断死循环** [RT:396-406]；网络 `withTimeoutOrNull` [RT:540-546]。
+- **SSRF**：空白名单拒一切 [NP:13-16]；归一化 0x7f000001/2130706433/127.1 等变体 [NP:94-139]；RFC1918/回环/链路本地/169.254.169.254 元数据/CGNAT/组播全拒 [NP:148-177]。
+- **逐跳重定向白名单**：followRedirects=false，每跳重新 rejectionReason，最多 3 跳 [RT:582-615]。
+- **512KiB 流式有界读取**，伪造 Content-Length 无法绕过 [BB:50-71]。
+- **安装前静态扫描**拦截 eval/new Function/import/require/fs/process/child_process/WebSocket [SP:47-61]。
+- **凭据策略**：候选级 policy 只允许 NONE [CandidateNetworkPolicy:27,51-53]。
+
+### 16.5 未解决风险 / 当前缺失（H1/H2 必须处理或如实声明）
+
+1. **无 `require` / 模块系统 / 模块缓存**：JS shim 全文无 require [BR:44-192]；库自带 ModuleLoader 未启用 [RT:342 单参 create]。→ H1 要建受控 CommonJS，需在隔离 context 内实现 allowlist require + 按 Provider 隔离缓存。
+2. **库支持但代码未用的加固抓手**：memory limit / max stack size / 主动 interrupt / gc / memoryUsage [quickjs-jvm.jar javap 实证]。→ H1 应启用并测试。
+3. **跨 request 的 timer/后台心跳无法可靠实现**：quickjs-kt 1.0.15 每个 evaluation session 结束会 cancel 其 asyncJobs；无公开 job-queue 驱动 API；顶层 fire-and-forget setTimeout 不会运行 [DOC:493-503]。→ **如实声明为库限制，不伪称隔离**。
+4. **close() 不 join 库的求值协程**：宿主只 join 自己的 timer Job [RT:372-386]；库 cancel 后即销毁 native context。
+5. **无统一 ProviderNetworkGateway**：LX Provider 自行 `createSharedProviderHttpClient()` [PR:68,79]，绕开统一层 `ProviderHttpClient.client` 的代理/测试注入钩子 [PN:260-267]。→ H2 要建网关并让所有 Provider 网络经它。
+6. **DNS rebinding**：SSRF 只在 URL/字符串层，Ktor/OkHttp 不固定解析 IP，无连接层 IP 校验。→ **如实保留，不宣称 commonMain 已解决**。
+7. `__lxUpdateAlert` 有 JS 定义无 Kotlin 消费方 [BR:174-176]。
+8. 三端网络引擎差异：Android/Desktop=OkHttp（Dispatcher maxRequests=64/perHost=8，连接池 8/5min）[ProviderNetwork.android/desktop.kt:10-22]；iOS=Darwin [.ios.kt:9-11]。quickjs 三端均有产物，Android host test 替换为 JVM 产物 [lxruntime/build.gradle.kts:39-47]。
+
+### 16.6 H0 结论
+
+现有 LX 执行环境已具备"单脚本上下文隔离 + SSRF + 逐跳重定向 + 有界读取 + 可取消计时器"的坚实基础；
+但**不能直接当作 MusicFree 的安全执行环境**，三大缺口：①无 CommonJS require/模块隔离；②memory/stack 限制未启用；③无统一网络网关（当前 LX 自建 client）。
+H1/H2 要在**新模块内**补齐这三点（不污染 LX 核心协议），H3 单独审查播放域名，H4 播放闭环，
+DNS rebinding 与库 timer 限制全程如实声明。H0 到此为止，未做任何重构。

@@ -1201,3 +1201,15 @@ Ciallo~（fd16333b…，guoyue2010 **Apache-2.0**，searchMusic 走 api.s0o1.com
 **播放/门禁**：REAL_PLAYBACK=NOT_RUN(需用户明确操作,206不冒充播放);真实搜索通过数=1<2,调度门禁未开,无默认/备用建议;无自动安装。
 
 **G总结**: G0 LX无search / G1 无合规LX search候选 / G2 MusicFree有合规来源+受控适配层 / G3 Audiomack真实搜索解析音频通过但播放域名未授权、播放NOT_RUN。合规音源"真正可用"仍差受控播放域名授权+CommonJS隔离执行环境,未解决前不设默认/不冒充播放。新增 MusicFreeG3Verification.kt + PhaseG3VerificationTest(6项);回归 sourceupdate157/lxruntime101/musicfree16 全绿;iOS Sim/Metadata/Android编译通过。详见 audit §15。
+
+
+## §21 阶段 H0：MusicFree Provider 安全执行环境架构审计（2026-11-20）
+
+基线 `32176e5`（G3），分支 `work/android-community-discovery`，未碰 master，未推送。**只审计不重构**。
+H0 审计结论（详见 `docs/community-source-audit.zh-CN.md` §16，全部带文件:行号）：
+- 依赖图：musicfree 只依赖 runtime/lxruntime/sourceupdate，复用 CandidateNetworkPolicy 不改 LX 核心。
+- 调用时序：lx.request→__lxHttp→performHttp(SSRF+逐跳重定向+512KiB有界读)→JS Promise→__lxDispatchError→Kotlin。
+- 宿主能力清单：唯一出网口 lx.request，其余 buffer/md5/timer/console 无网络；__lxUpdateAlert 无消费方。
+- 已具备边界：每脚本独立 QuickJS context + cacheKey(id:version:SHA) + native 求值超时中断 + SSRF(变体IP归一/元数据/私网全拒) + 逐跳重定向白名单 + 可取消 timer + 安装前静态扫描。
+- 三大缺口(H1/H2 新模块补齐，不污染 LX 核心)：①无 require/模块系统/模块缓存(库 ModuleLoader 未启用) ②memory limit/max stack/主动interrupt/gc 库支持但代码未用 ③无统一 ProviderNetworkGateway(LX 自建 client 绕开统一注入)。
+- 如实声明限制：quickjs-kt 1.0.15 跨 request timer 无法可靠实现(无公开 job-queue 驱动 API)、close() 不 join 库求值协程、DNS rebinding 未解决。三端网络引擎 Android/Desktop=OkHttp/iOS=Darwin。
