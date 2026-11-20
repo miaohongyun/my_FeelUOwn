@@ -1219,3 +1219,8 @@ H0 审计结论（详见 `docs/community-source-audit.zh-CN.md` §16，全部带
 
 基线 `f0ba4e3`（H0），分支 `work/android-community-discovery`，未碰 master、未推送。新增 MusicFreeSandbox.kt（Limits/EngineCapabilities/ModuleRegistry allowlist+SHA/preflight）+ MusicFreeSandboxSession.kt（每Provider独立QuickJs Context、evaluationTimeoutMillis中断死循环、memoryLimit、模块ESM预载到session私有缓存、宿主仅md5、execute失败分级、close幂等）+ PhaseH1SandboxTest(10项)。musicfree 26全绿；三端编译通过。
 **如实限制**：quickjs-kt 1.0.15 JS→Kotlin字符串包装类型差异致JS内require完整往返未作通过项(只交付allowlist+隔离缓存+执行环境基础设施)、maxStackSize在commonMain未暴露(canSetStackSize=false)、memoryLimit为native层按capabilities回报、跨求值timer不提供、官方Node模块插件当前不可执行、DNS rebinding仍归H2。详见 audit §17。
+
+
+## §23 阶段 H2：ProviderNetworkGateway 宿主网络代理（2026-11-20）
+
+基线 `1e729bb`（H1），未碰 master、未推送。新增 ProviderNetworkGateway.kt：唯一网络出口，权限绑定 ProviderID/版本/SHA/精确域名/HTTPS端口/体积/超时/重定向/凭据，复用 CandidateNetworkPolicy.rejectionReason；默认拒绝通配符/明文/裸IP/私网/metadata/userinfo/凭据头/超限响应，被拒零网络；SHA变更失效；取消传播；DNS rebinding 如实保留未解决。PhaseH2GatewayTest 9项全绿；musicfree35；三端编译通过。详见 audit §18。

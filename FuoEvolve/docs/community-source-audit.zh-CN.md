@@ -737,3 +737,41 @@ DNS rebinding 与库 timer 限制全程如实声明。H0 到此为止，未做�
 4. **跨求值后台 timer 不提供**（库无公开 job-queue 驱动 API，见 H0 §16.5）。
 5. **官方插件（axios/crypto-js/webdav 等 Node 模块）当前不可执行**：沙箱只承载 JSON 可序列化 exports 的审计模块，插件 CommonJS 生态适配属后续阶段。
 6. **DNS rebinding 与本沙箱无关**，仍按 H2 网关层如实保留。
+
+
+---
+
+## 18. 阶段 H2：ProviderNetworkGateway 宿主网络代理（2026-11-20）
+
+> 基线：`1e729bb`（H1）　分支：`work/android-community-discovery`　未碰 master、未推送。
+
+### 18.1 实现
+
+新增 `ProviderNetworkGateway.kt`：Provider 网络请求的**唯一宿主出口**。
+- `ProviderNetworkPermission` 绑定 Provider ID / 版本 / 脚本 SHA256 / 精确域名 / HTTPS+端口 /
+  响应体积 / 超时 / 重定向策略 / 凭据策略；`isValidFor`/`validationProblem` 在 SHA 变化时使审批失效。
+- 复用阶段 F `CandidateNetworkPolicy.rejectionReason`（SSRF、私网/回环/链路本地/元数据、裸 IP、
+  userinfo、编码 host、尾随点、非授权域名、非 HTTPS/443 全部 fail-closed）。
+- 默认拒绝：通配符域名（policy 构造期 require 拒绝）、明文 HTTP、协议相对 URL、凭据头（Cookie/
+  Authorization/X-API-Key/Proxy-Authorization）、未校验重定向、响应体超限。
+- 请求经注入 `executor` 执行（不自 new client，避免旁路客户端）；被拒请求**零网络**触达 executor。
+- 重定向：DENY_ALL 默认；REVALIDATE_EACH_HOP 对下一跳重新跑完整策略，不自动跟随。
+- 取消（CancellationException）原样传播；网络异常分级 Failed。
+
+### 18.2 测试（PhaseH2GatewayTest，9 项，假执行器零真实网络）
+
+授权请求通过且触达 executor / 未授权域名零网络拒绝 / 明文+私网+裸IP+metadata+通配符默认拒绝 /
+凭据头与 userinfo 拒绝 / SHA 变更使权限失效 / 重定向 DENY_ALL 与逐跳重校验 /
+响应体超限拒绝 / 取消传播 / 沙箱无旁路网络 API（宿主能力仅 md5/base64/now 三项）。
+
+### 18.3 诚实限制
+
+- **DNS rebinding 未在 commonMain 解决**：网关只做 URL/字符串层校验，Ktor/OkHttp 不固定解析 IP，
+  无连接层 IP 绑定；本阶段如实保留风险，不宣称已彻底防御。
+- 网关是**策略执行骨架 + 注入执行器**：真正三端 Ktor 客户端由宿主注入（H5 分别验证），
+  gateway 本身不绑定具体 engine，避免在模块内再建旁路 client。
+- `REVALIDATE_EACH_HOP` 需要调用方逐跳调用 `enforceRedirect`，当前默认 DENY_ALL；不做隐式跟随。
+
+### 18.4 回归
+
+musicfree 35（26+9）全绿 0 失败；iOS Simulator / commonMain Metadata / Android 编译通过（`--rerun-tasks`）。

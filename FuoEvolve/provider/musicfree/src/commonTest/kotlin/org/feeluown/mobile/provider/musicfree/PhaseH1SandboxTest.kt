@@ -117,7 +117,7 @@ class PhaseH1SandboxTest {
         try {
             val badResult = bad.execute("throw new Error('boom')")
             assertTrue(badResult is ExecResult.Failed)
-            assertEquals(FailureLevel.ERROR, (badResult as ExecResult.Failed).level)
+            assertEquals(FailureLevel.ERROR, badResult.level)
             val goodResult = good.execute("JSON.stringify({ ok: true })")
             assertTrue(goodResult is ExecResult.Ok, "另一个 Provider 不受异常影响")
         } finally {
