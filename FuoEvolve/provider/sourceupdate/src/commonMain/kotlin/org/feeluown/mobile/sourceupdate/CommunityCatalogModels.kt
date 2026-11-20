@@ -86,11 +86,19 @@ data class DiscoveredCandidate(
     val sourceRepo: String = "",
     /** 同一脚本的镜像地址（规范化后），用于归并。 */
     val mirrorUrls: List<String> = emptyList(),
+    /**
+     * 被归并进本记录的「其他 ID / 别名」。
+     * 去重时不同 id 的同脚本会合并到一条主记录，若不保存别名，下一次清单只剩别名时
+     * STALE 检查会误判主 id 已消失。STALE 判定必须把主 id 与别名一起计算。
+     */
+    val aliasIds: List<String> = emptyList(),
     val sha256: String? = null,
     val sizeBytes: Long? = null,
     val version: String? = null,
     val discoveredAtMillis: Long = 0,
     val lastCheckedAtMillis: Long = 0,
+    /** 最近一次隔离区静态扫描的时间；与 [sha256]/[rawUrl]/[version] 一起构成审查证据。 */
+    val scannedAtMillis: Long = 0,
     val discoveredDomains: List<String> = emptyList(),
     /** SourceStaticPolicy 的判定字符串：CLEAN / NEEDS_REVIEW / BLOCKED。 */
     val staticVerdict: String? = null,
@@ -128,8 +136,10 @@ sealed interface DedupDecision {
 
 object CommunityCatalogNormalizer {
     /**
-     * 规范化 URL：小写 host、去掉 fragment、去掉末尾斜杠、解码常见百分号编码的路径、
-     * 把已知 GitHub 代理前缀剥离成统一的 raw.githubusercontent.com 形式。
+     * 规范化 URL：只规范化「协议 + 主机名」（二者大小写不敏感），去掉 fragment、末尾斜杠、
+     * 解码常见百分号编码。**路径大小写原样保留**——部分服务器路径区分大小写，
+     * 无条件 lowercase 会把两个不同的脚本判为同一个。
+     *
      * 只用于去重比较，不用于实际请求（实际请求保留 [CommunitySourceEntry.url]）。
      */
     fun normalizeUrl(raw: String): String {
@@ -140,7 +150,19 @@ object CommunityCatalogNormalizer {
             .find(value)?.groupValues?.getOrNull(1)
         if (nested != null) value = nested
         value = value.substringBefore("#").trimEnd('/')
-        return runCatching { percentDecode(value).lowercase() }.getOrDefault(value.lowercase())
+        val decoded = runCatching { percentDecode(value) }.getOrDefault(value)
+        return lowercaseSchemeAndHost(decoded)
+    }
+
+    /** 仅把 scheme 与 host 转小写，路径/查询串保持原样。 */
+    private fun lowercaseSchemeAndHost(url: String): String {
+        val schemeEnd = url.indexOf("://")
+        if (schemeEnd < 0) return url
+        val scheme = url.substring(0, schemeEnd).lowercase()
+        val rest = url.substring(schemeEnd + 3)
+        val hostEnd = rest.indexOf('/').let { if (it < 0) rest.length else it }
+        val host = rest.substring(0, hostEnd).lowercase()
+        return scheme + "://" + host + rest.substring(hostEnd)
     }
 
     private fun percentDecode(value: String): String = buildString {
@@ -161,21 +183,37 @@ object CommunityCatalogNormalizer {
     }
 
     /**
-     * 提取仓库内路径：从 raw.githubusercontent.com/<owner>/<repo>/<branch>/<path> 里取 <path>。
-     * 取不到时回退为 URL 的路径部分。用于「同一脚本不同镜像/分支」按路径去重。
+     * 仓库身份：<owner>/<repo>。仅当 URL 明确是 GitHub raw（含代理前缀）时才返回非空值。
+     * 拿不到身份就说明无法确认「是同一个仓库」，此时绝不能只按末尾路径合并。
+     */
+    fun repoIdentity(raw: String): String? {
+        val decoded = runCatching { percentDecode(raw.trim()) }.getOrDefault(raw.trim())
+        val marker = "raw.githubusercontent.com/"
+        val idx = decoded.indexOf(marker, ignoreCase = true)
+        if (idx < 0) return null
+        val segments = decoded.substring(idx + marker.length).split('/')
+        if (segments.size < 2 || segments[0].isBlank() || segments[1].isBlank()) return null
+        return "${segments[0]}/${segments[1]}"
+    }
+
+    /**
+     * 完整仓库内路径：<owner>/<repo>/<path>（保留路径大小写）。
+     * 必须是可识别的 GitHub raw 地址才返回非空；无法识别时返回空串，
+     * [dedup] 据此**不**按路径合并——不同仓库恰好有相同末尾路径时宁可保留两条候选。
      */
     fun repoPath(raw: String): String {
         val decoded = runCatching { percentDecode(raw.trim()) }.getOrDefault(raw.trim())
         val marker = "raw.githubusercontent.com/"
         val idx = decoded.indexOf(marker, ignoreCase = true)
         if (idx >= 0) {
-            val tail = decoded.substring(idx + marker.length)
-            val segments = tail.split('/')
-            if (segments.size >= 4) return segments.drop(3).joinToString("/")
+            val segments = decoded.substring(idx + marker.length).split('/')
+            // segments = [owner, repo, branch, path...]
+            if (segments.size >= 4) {
+                val path = segments.drop(3).joinToString("/")
+                if (path.isNotBlank()) return "${segments[0]}/${segments[1]}/$path"
+            }
         }
-        // 回退：取 URL 路径最后两段（通常是 sources/<id>/<file>）
-        val path = decoded.substringAfter("://").substringAfter('/')
-        return path.split('/').takeLast(3).joinToString("/")
+        return ""
     }
 
     /** 从 URL 提取主机；代理前缀下取内层真实主机。 */
@@ -187,16 +225,23 @@ object CommunityCatalogNormalizer {
             ?.groupValues?.getOrNull(1)?.lowercase()
     }
 
-    /** 判断两条规范化 URL 是否指向同一脚本。 */
+    /** 判断一条新发现条目是否指向已有候选。 */
     fun dedup(existing: List<DiscoveredCandidate>, entry: CommunitySourceEntry): DedupDecision {
         val norm = normalizeUrl(entry.url)
         val path = repoPath(entry.url)
+        // 主 id 命中：同一条记录的最新线索。
         val byId = existing.indexOfFirst { it.id.equals(entry.id, ignoreCase = true) }
         if (byId >= 0) return DedupDecision.SameId(byId)
+        // 别名 id 命中：该 id 之前因 URL/路径相同被归并进某条主记录，仍是同一脚本。
+        val byAlias = existing.indexOfFirst { c -> c.aliasIds.any { it.equals(entry.id, ignoreCase = true) } }
+        if (byAlias >= 0) return DedupDecision.DuplicateUrl(byAlias, "别名 id 相同")
         val byUrl = existing.indexOfFirst { it.normalizedUrl == norm }
         if (byUrl >= 0) return DedupDecision.DuplicateUrl(byUrl, "规范化 URL 相同")
-        val byPath = existing.indexOfFirst { it.repoPath.equals(path, ignoreCase = true) && path.isNotBlank() }
-        if (byPath >= 0) return DedupDecision.DuplicateUrl(byPath, "仓库路径相同")
+        // 仓库路径非空才参与去重；repoPath 已含 owner/repo，不同仓库撞名末尾路径不会误合并。
+        if (path.isNotBlank()) {
+            val byPath = existing.indexOfFirst { it.repoPath == path }
+            if (byPath >= 0) return DedupDecision.DuplicateUrl(byPath, "完整仓库路径相同")
+        }
         return DedupDecision.New
     }
 }

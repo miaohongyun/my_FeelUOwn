@@ -1,6 +1,7 @@
 package org.feeluown.mobile.sourceupdate
 
 import kotlinx.coroutines.test.runTest
+import org.feeluown.mobile.sourceupdate.crypto.Sha256
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -132,7 +133,8 @@ class CommunityCatalogDiscoveryTest {
 
         // 命中 membership-bypass(BLOCK) 的脚本：自动隔离，绝不 APPROVED。
         val blockedScript = "/* @name 长青SVIP音源 */ const x = 1"
-        val outcome = d.scanQuarantined("a", blockedScript, "sha-a")
+        val realHash = Sha256.hex(blockedScript.encodeToByteArray())
+        val outcome = d.scanQuarantined("a", blockedScript, realHash, version = "1.3.0")
         assertTrue(outcome is CommunityCatalogDiscovery.ScanOutcome.Scanned)
         assertEquals(CandidateReviewState.QUARANTINED, outcome.candidate.review)
         assertEquals(StaticVerdict.BLOCKED, outcome.report.verdict)
@@ -141,7 +143,9 @@ class CommunityCatalogDiscoveryTest {
 
         val store = d.loadStore()
         val c = store.candidates.single()
-        assertEquals("sha-a", c.sha256)
+        assertEquals(realHash, c.sha256, "框架内部计算并保存实际 SHA256")
+        assertEquals("1.3.0", c.version, "版本随扫描结果保留")
+        assertEquals(1_000L, c.scannedAtMillis, "扫描时间被记录")
         assertEquals(VerificationLevel.STATIC_REVIEW, c.verification, "静态扫描不得提升为 REAL 等级")
         assertFalse(c.review == CandidateReviewState.APPROVED, "发现框架绝不自动批准")
         assertFalse(store.lastGoodListRaw.isNullOrBlank(), "正式目录未被触碰")
@@ -155,11 +159,128 @@ class CommunityCatalogDiscoveryTest {
         d.discover(listOf(primary))
         // 干净脚本：扫描通过但状态不变（仍 DISCOVERED），域名只登记到候选元数据，不扩白名单。
         val clean = "const { request } = globalThis.lx; request('https://api.example.com/x')"
-        val outcome = d.scanQuarantined("a", clean, "sha-clean")
+        val outcome = d.scanQuarantined("a", clean, Sha256.hex(clean.encodeToByteArray()))
         assertTrue(outcome is CommunityCatalogDiscovery.ScanOutcome.Scanned)
         assertEquals(CandidateReviewState.DISCOVERED, outcome.candidate.review)
         assertEquals(StaticVerdict.CLEAN, outcome.report.verdict)
         assertTrue(outcome.candidate.discoveredDomains.contains("api.example.com"))
+    }
+
+    @Test
+    fun mergedMirrorAliasNotMarkedStaleWhenAliasStillInList() = runTest {
+        // 问题1回归：fish-music 与 fish-dup 因同仓库路径归并，主记录叫 fish-music。
+        val first = listJson(
+            Triple("fish-music", "Fish", "$baseMirror/sources/fish-music/fish_music.js"),
+            Triple("fish-dup", "Fish 镜像", "$base/sources/fish-music/fish_music.js"),
+        )
+        val fileStore = InMemorySourceFileStore()
+        val (d1, _) = newDiscovery(mapOf(primary to first), fileStore = fileStore)
+        assertEquals(1, d1.discover(listOf(primary)).added)
+        val merged = d1.loadStore().candidates.single()
+        assertEquals("fish-music", merged.id)
+        assertTrue(merged.aliasIds.any { it.equals("fish-dup", ignoreCase = true) }, "别名 id 被保存")
+
+        // 第二次清单只剩别名 fish-dup：主记录不得被误标 STALE。
+        val second = listJson(Triple("fish-dup", "Fish", "$base/sources/fish-music/fish_music.js"))
+        val (d2, _) = newDiscovery(mapOf(primary to second), fileStore = fileStore)
+        val report = d2.discover(listOf(primary))
+        assertEquals(0, report.markedStale, "别名仍在清单里，不算消失")
+        val c = d2.loadStore().candidates.single()
+        assertFalse(c.review == CandidateReviewState.STALE, "不得误标 STALE")
+    }
+
+    @Test
+    fun staleOnlyRevivesToDiscoveredNeverToApprovedStates() = runTest {
+        val fileStore = InMemorySourceFileStore()
+        // 先建立一条候选，再让它消失 → STALE。
+        val (d1, _) = newDiscovery(mapOf(primary to listJson(
+            Triple("a", "A", "$primary/sources/a/a.js"))), fileStore = fileStore)
+        d1.discover(listOf(primary))
+        val (d2, _) = newDiscovery(mapOf(primary to listJson(
+            Triple("b", "B", "$primary/sources/b/b.js"))), fileStore = fileStore)
+        assertEquals(1, d2.discover(listOf(primary)).markedStale)
+
+        // 手工把该候选设为 APPROVED（模拟人工结论），再让它重新出现：绝不自动降级/改写。
+        val snapshot = d2.loadStore()
+        val approved = snapshot.candidates.map {
+            if (it.id == "a") it.copy(reviewState = CandidateReviewState.APPROVED.wireName) else it
+        }
+        // 通过 store 写回（用 discovery 的 store 引用）。
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; prettyPrint = true }
+        fileStore.writeText(CommunityCatalogDiscovery.CANDIDATE_STORE_PATH,
+            json.encodeToString(CandidateStore.serializer(), snapshot.copy(candidates = approved)))
+
+        val (d3, _) = newDiscovery(mapOf(primary to listJson(
+            Triple("a", "A", "$primary/sources/a/a.js"),
+            Triple("b", "B", "$primary/sources/b/b.js"))), fileStore = fileStore)
+        val report = d3.discover(listOf(primary))
+        assertEquals(CandidateReviewState.APPROVED,
+            d3.loadStore().candidates.first { it.id == "a" }.review,
+            "APPROVED 人工结论不被自动恢复逻辑改写")
+        assertEquals(0, report.revivedFromStale, "APPROVED 不属于 STALE，不计入恢复")
+
+        // 再把一条真正的 STALE 设为 STALE 后重新出现 → 只恢复到 DISCOVERED。
+        val snap2 = d3.loadStore()
+        val staleA = snap2.candidates.map {
+            if (it.id == "a") it.copy(reviewState = CandidateReviewState.STALE.wireName) else it
+        }
+        fileStore.writeText(CommunityCatalogDiscovery.CANDIDATE_STORE_PATH,
+            json.encodeToString(CandidateStore.serializer(), snap2.copy(candidates = staleA)))
+        val (d4, _) = newDiscovery(mapOf(primary to listJson(
+            Triple("a", "A", "$primary/sources/a/a.js"),
+            Triple("b", "B", "$primary/sources/b/b.js"))), fileStore = fileStore)
+        val r4 = d4.discover(listOf(primary))
+        assertEquals(1, r4.revivedFromStale)
+        assertEquals(CandidateReviewState.DISCOVERED,
+            d4.loadStore().candidates.first { it.id == "a" }.review, "STALE 只恢复到 DISCOVERED")
+    }
+
+    @Test
+    fun repoPathCannotMergeDifferentReposWithSameTailPath() = runTest {
+        val pa = "https://raw.githubusercontent.com/owner-a/repo-x/master/sources/common/song.js"
+        val pb = "https://raw.githubusercontent.com/owner-b/repo-y/master/sources/common/song.js"
+        assertEquals("", CommunityCatalogNormalizer.repoPath("https://cdn.example.com/sources/common/song.js"),
+            "非 GitHub raw 地址无法确认仓库身份")
+        assertTrue(CommunityCatalogNormalizer.repoPath(pa) != CommunityCatalogNormalizer.repoPath(pb),
+            "不同仓库相同末尾路径必须产生不同 repoPath")
+
+        val body = listJson(
+            Triple("song-a", "Song A", pa),
+            Triple("song-b", "Song B", pb),
+        )
+        val (d, _) = newDiscovery(mapOf(primary to body))
+        val report = d.discover(listOf(primary))
+        assertEquals(2, report.added, "不同仓库的相同末尾路径不得误合并")
+        assertEquals(0, report.duplicateUrlsMerged)
+    }
+
+    @Test
+    fun normalizeUrlPreservesPathCase() = runTest {
+        val lower = "https://raw.githubusercontent.com/o/r/master/Foo.js"
+        val upper = "https://raw.githubusercontent.com/o/r/master/FOO.js"
+        assertTrue(CommunityCatalogNormalizer.normalizeUrl(lower) != CommunityCatalogNormalizer.normalizeUrl(upper),
+            "路径大小写不同（区分大小写的服务器）不得被规范化为相同")
+        // 协议与主机名大小写仍被规范化（程序化构造大写前缀，避免手拼域名出错）。
+        val prefix = lower.substringBefore("/o/r")
+        val upperCasePrefix = prefix.uppercase() + lower.substringAfter(prefix)
+        assertEquals(
+            CommunityCatalogNormalizer.normalizeUrl(lower),
+            CommunityCatalogNormalizer.normalizeUrl(upperCasePrefix),
+        )
+    }
+
+    @Test
+    fun scanRejectsMismatchedSha256AndKeepsCandidate() = runTest {
+        val (d, _) = newDiscovery(mapOf(primary to listJson(
+            Triple("a", "A", "$primary/sources/a/a.js"))))
+        d.discover(listOf(primary))
+        val script = "const x = 1"
+        val before = d.loadStore().candidates.single()
+        val outcome = d.scanQuarantined("a", script, "deadbeef")
+        assertTrue(outcome is CommunityCatalogDiscovery.ScanOutcome.Sha256Mismatch)
+        assertEquals(Sha256.hex(script.encodeToByteArray()), outcome.actual)
+        val after = d.loadStore().candidates.single()
+        assertEquals(before, after, "哈希不符时扫描结果整条拒绝写入，候选保持原样")
     }
 
     @Test

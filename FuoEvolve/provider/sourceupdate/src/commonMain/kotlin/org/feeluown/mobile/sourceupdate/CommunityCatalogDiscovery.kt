@@ -1,6 +1,7 @@
 package org.feeluown.mobile.sourceupdate
 
 import kotlinx.serialization.json.Json
+import org.feeluown.mobile.sourceupdate.crypto.Sha256
 
 /**
  * 社区音源「自动发现」框架（阶段 C）。
@@ -35,6 +36,8 @@ class CommunityCatalogDiscovery(
         val sameIdUpdated: Int,
         val duplicateUrlsMerged: Int,
         val markedStale: Int,
+        /** 本轮从 STALE 自动恢复到 DISCOVERED 的条数（仅此一种状态允许自动恢复）。 */
+        val revivedFromStale: Int = 0,
         val parseError: String?,
         val fetchErrors: List<String>,
     ) {
@@ -98,6 +101,7 @@ class CommunityCatalogDiscovery(
         var added = 0
         var sameIdUpdated = 0
         var merged = 0
+        var revivedFromStale = 0
         val seenIds = mutableSetOf<String>()
 
         for (entry in parsed.list.sources) {
@@ -123,14 +127,17 @@ class CommunityCatalogDiscovery(
                 }
                 is DedupDecision.SameId -> {
                     val old = candidates[decision.existingIndex]
+                    // 只有 STALE 会在重新出现时自动恢复到 DISCOVERED；
+                    // QUARANTINED/REJECTED/NEEDS_REVIEW/APPROVED 一律沿用人工结论，绝不自动改。
+                    val revived = old.review == CandidateReviewState.STALE
+                    if (revived) revivedFromStale++
                     candidates[decision.existingIndex] = old.copy(
                         name = entry.name,
                         rawUrl = entry.url,
                         normalizedUrl = norm,
                         repoPath = path,
                         lastCheckedAtMillis = now,
-                        // 只更新线索元数据；审核状态、验证等级、风险一律沿用人工结论。
-                        reviewState = old.reviewState,
+                        reviewState = if (revived) CandidateReviewState.DISCOVERED.wireName else old.reviewState,
                         verificationLevel = old.verificationLevel,
                         risk = old.risk,
                     )
@@ -139,9 +146,15 @@ class CommunityCatalogDiscovery(
                 is DedupDecision.DuplicateUrl -> {
                     val old = candidates[decision.existingIndex]
                     val mirrors = (old.mirrorUrls + entry.url).distinct()
+                    val aliases = (old.aliasIds + entry.id).distinct()
+                    // 别名重新出现同样只自动恢复 STALE → DISCOVERED。
+                    val revived = old.review == CandidateReviewState.STALE
+                    if (revived) revivedFromStale++
                     candidates[decision.existingIndex] = old.copy(
                         mirrorUrls = mirrors,
+                        aliasIds = aliases,
                         lastCheckedAtMillis = now,
+                        reviewState = if (revived) CandidateReviewState.DISCOVERED.wireName else old.reviewState,
                     )
                     merged++
                 }
@@ -149,10 +162,13 @@ class CommunityCatalogDiscovery(
         }
 
         // 清单中消失的条目标记 STALE（不删除本地记录）——远端删除不等于本地失效。
+        // 关键：一条候选可能因镜像合并而有多个 id，主 id 或任一别名仍在清单里就不算消失。
         var markedStale = 0
         for (i in candidates.indices) {
             val c = candidates[i]
-            if (c.id.lowercase() !in seenIds && c.review != CandidateReviewState.STALE) {
+            val allIds = (listOf(c.id) + c.aliasIds).map { it.lowercase() }.toSet()
+            val stillPresent = allIds.any { it in seenIds }
+            if (!stillPresent && c.review != CandidateReviewState.STALE) {
                 candidates[i] = c.copy(reviewState = CandidateReviewState.STALE.wireName)
                 markedStale++
             }
@@ -172,6 +188,7 @@ class CommunityCatalogDiscovery(
             sameIdUpdated = sameIdUpdated,
             duplicateUrlsMerged = merged,
             markedStale = markedStale,
+            revivedFromStale = revivedFromStale,
             parseError = null,
             fetchErrors = errors,
         )
@@ -181,13 +198,34 @@ class CommunityCatalogDiscovery(
      * 把**已下载到隔离区**的脚本文本做静态扫描，只更新候选元数据与风险，
      * 不执行、不安装、不扩白名单、不改审核状态为 APPROVED。
      *
+     * SHA256 由框架内部按 [scriptText] 实际字节计算并核验：与 [expectedSha256] 不一致时
+     * 拒绝更新扫描结果，避免把错误哈希写进审查证据。更新时一并记录版本、来源 URL、
+     * 扫描时间与实际哈希，保证证据可追溯。
+     *
      * @param scriptText 隔离区脚本原文（由调用方通过受控下载通道取得，本框架不下载）。
+     * @param expectedSha256 下载记录/调用方声明的期望 SHA256（hex）。
      */
-    suspend fun scanQuarantined(candidateId: String, scriptText: String, sha256: String): ScanOutcome {
+    suspend fun scanQuarantined(
+        candidateId: String,
+        scriptText: String,
+        expectedSha256: String,
+        version: String? = null,
+    ): ScanOutcome {
         val snapshot = loadStore()
         val index = snapshot.candidates.indexOfFirst { it.id.equals(candidateId, ignoreCase = true) }
         if (index < 0) return ScanOutcome.NotFound
         val candidate = snapshot.candidates[index]
+        val bytes = scriptText.encodeToByteArray()
+        val actualSha256 = Sha256.hex(bytes)
+        if (!actualSha256.equals(expectedSha256.trim(), ignoreCase = true)) {
+            // 哈希不符：整条扫描结果拒绝写入，候选保持原样（含原有 sha256/状态/等级）。
+            return ScanOutcome.Sha256Mismatch(
+                expected = expectedSha256,
+                actual = actualSha256,
+                candidate = candidate,
+            )
+        }
+        val scannedAt = clock()
         // 发现阶段没有「目录声明的 allowedHosts」，undeclared-host 规则在此不适用。
         // 用脚本自己提取的域名跑扫描，让 BLOCK 只反映真正的 BLOCK 规则（eval/SVIP/混淆/卡密等）。
         // 这不等于扩大白名单：提取到的域名只写进候选元数据供人工审核参考，
@@ -211,8 +249,10 @@ class CommunityCatalogDiscovery(
             candidate.reviewState
         }
         val updated = candidate.copy(
-            sha256 = sha256,
-            sizeBytes = scriptText.encodeToByteArray().size.toLong(),
+            sha256 = actualSha256,
+            sizeBytes = bytes.size.toLong(),
+            version = version ?: candidate.version,
+            scannedAtMillis = scannedAt,
             discoveredDomains = (candidate.discoveredDomains + SourceStaticPolicy.extractHosts(scriptText))
                 .distinct().sorted(),
             staticVerdict = verdict,
@@ -222,12 +262,18 @@ class CommunityCatalogDiscovery(
             verificationLevel = VerificationLevel.STATIC_REVIEW.name,
         )
         val updatedList = snapshot.candidates.toMutableList().also { it[index] = updated }
-        saveStore(snapshot.copy(updatedAtMillis = clock(), candidates = updatedList))
+        saveStore(snapshot.copy(updatedAtMillis = scannedAt, candidates = updatedList))
         return ScanOutcome.Scanned(updated, report)
     }
 
     sealed interface ScanOutcome {
         data object NotFound : ScanOutcome
+        /** 传入哈希与实际脚本文节哈希不符，扫描结果被拒绝写入。 */
+        data class Sha256Mismatch(
+            val expected: String,
+            val actual: String,
+            val candidate: DiscoveredCandidate,
+        ) : ScanOutcome
         data class Scanned(val candidate: DiscoveredCandidate, val report: StaticScanReport) : ScanOutcome
     }
 }

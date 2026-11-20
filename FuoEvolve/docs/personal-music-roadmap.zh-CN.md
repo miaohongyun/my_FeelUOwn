@@ -958,8 +958,10 @@ cleartext 放行）、iOS（AVPlayer，NSAllowsArbitraryLoads=true）、Desktop�
   **隔离红线**：状态只会写 DISCOVERED/QUARANTINED，绝不写 APPROVED；不执行脚本、不安装、
   不扩白名单（提取域名只进候选元数据供人工审）、不覆盖受控目录 source-catalog.json；
   清单读取失败/结构非法/空 sources 一律保留现有候选不清空。
-- `CommunityCatalogDiscoveryTest.kt`（7 项）：镜像回退、三类去重、缓存回退不清空、STALE 不删除、
-  BLOCK 自动隔离且不批准、干净扫描不改状态、解析器拒绝非法清单。
+- `CommunityCatalogDiscoveryTest.kt`（12 项）：镜像回退、三类去重、缓存回退不清空、STALE 不删除、
+  BLOCK 自动隔离且不批准、干净扫描不改状态、解析器拒绝非法清单；以及四项审查意见回归：
+  镜像别名仍在清单不误标 STALE、STALE 仅恢复到 DISCOVERED 不碰人工结论、
+  不同仓库相同末尾路径不误合并、URL 只规范化协议/主机而保留路径大小写、扫描核验 SHA256 不符整条拒绝。
 
 **file:line 数据链路（现有能力，未重写）**：
 - LX 加载 `provider/lxruntime/.../LxScriptRuntime.kt:127`（load）、`:166-207`（inited 必需）；
@@ -971,6 +973,27 @@ cleartext 放行）、iOS（AVPlayer，NSAllowsArbitraryLoads=true）、Desktop�
 - 验证十级定义在 candidates.json:testLevelDefinitions；真实 Range 验证 `RealInterfaceVerificationTest.kt`
   （opt-in FUOE_REAL_VERIFY=1，只读 16B，不下载完整商业曲目）。
 
+**交付边界澄清（重要，避免夸大）**：本轮完成的是「发现框架」，**不是**「完整自动发现产品功能」。
+- 框架完成 = 可读取社区清单、主地址→镜像回退、解析校验、去重登记候选、静态扫描隔离区脚本、
+  状态流转与 STALE 判定，全部可离线测试。
+- 产品接入完成 = 应用启动时自动触发发现、定时任务周期执行、UI 展示候选并提示人工审核、
+  持久化审核记录并回流。**这些均未接入**——`CommunityCatalogDiscovery` 目前没有任何生产调用点，
+  既未挂到 App 启动流程，也没有定时器或界面入口；候选区 store 只在测试中读写。
+- 因此不得宣称「App 已能自动发现/自动更新音源」。下一步若要产品化，需在宿主容器
+  （AndroidAppContainer/DesktopAppHost/IosAppHost）注入并调度该框架，另列任务实施。
+
+**审查意见四项修复（2026-11-20）**：
+1. 镜像去重与 STALE 一致性：`DiscoveredCandidate.aliasIds` 保存被归并的别名 id；STALE 判定把主 id
+   与别名一起计算（别名仍在清单即不算消失）；重新出现仅 STALE→DISCOVERED，QUARANTINED/REJECTED/
+   APPROVED/NEEDS_REVIEW 等人工结论一律不自动改写。
+2. 去重防误合并：`repoPath()` 升级为完整 `<owner>/<repo>/<path>`（保留大小写），非 GitHub raw 地址
+   返回空串且不参与路径去重——不同仓库相同末尾路径不再误合并；`normalizeUrl()` 只小写协议与主机，
+   路径大小写原样保留（区分大小写的服务器不再被误判为同一 URL）。
+3. 扫描哈希核验：`scanQuarantined()` 内部按脚本文节计算实际 SHA256，与传入期望值不符则整条拒绝写入
+   （返回 Sha256Mismatch，候选保持原样）；写入时一并记录 version、rawUrl、scannedAtMillis 与实际哈希。
+4. 边界澄清：见上，明确区分框架完成与产品接入完成。
+
 **未做（需项目所有者/私钥，非遗漏）**：正式目录签发（私钥不在可访问位置，缺 FUOEVOLVE_CATALOG_KEY）；
 Fish/Flower 离线解混淆；非常刀/玉宁熙域名逆向与授权确认；真机搜索/播放/下载验收；
-断点续传/离线播放/跨源匹配。全部门禁与验签保持原样，未关闭、未降配、未改公钥。
+断点续传/离线播放/跨源匹配；发现框架的产品化接入（启动调度/UI/审核记录回流）。
+全部门禁与验签保持原样，未关闭、未降配、未改公钥。
