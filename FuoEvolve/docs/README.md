@@ -59,6 +59,7 @@
 | [lx-action-protocol-audit.zh-CN.md](lx-action-protocol-audit.zh-CN.md) | LX Runtime action 协议与搜索调用链审计（G0：协议无 search / 桥层兼容但产品无调用链 / 能力矩阵） |
 | [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 追加 G1 合规候选（§13）/ G2 MusicFree 来源发现与受控适配层（§14） |
 | [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 阶段 I CommonJS 兼容性/Node 子集/沙箱边界/真实插件验证（§22），含封送与 maxStackSize 旧结论修正 |
+| [community-source-audit.zh-CN.md](community-source-audit.zh-CN.md) | 阶段 J0 Gateway 网络出口整改（§23）：重定向/流式限额/axios 编码/SHA 绑定/DNS 审查 |
 
 ## 阅读顺序建议
 

@@ -70,17 +70,22 @@ class PhaseI4SandboxBoundaryTest {
         setup()
         val s = MusicFreeSandboxSession("fscap")
         try {
-            for (expr in listOf(
-                "typeof process", "typeof require('fs')", "typeof fetch", "typeof XMLHttpRequest",
-                "typeof WebSocket", "typeof eval", "typeof Function",
-            )) {
-                val r = s.execute("typeof process !== 'undefined' ? 'HAS_PROCESS' : 'ok'")
-                assertTrue(r is ExecResult.Ok, "探测应完成：$expr $r")
+            // J7 修正：真正逐条执行每个探测表达式并断言预期值，不再用固定表达式空转。
+            for (name in listOf("process", "fetch", "XMLHttpRequest", "WebSocket")) {
+                val r = s.execute("typeof globalThis['$name']")
+                assertTrue(r is ExecResult.Ok && r.value.orEmpty() == "undefined", "$name 必须不存在：$r")
             }
-            val proc = s.execute("typeof process")
-            assertTrue(proc is ExecResult.Ok && proc.value.orEmpty() == "undefined", "process 必须不存在：$proc")
-            val fetch = s.execute("typeof fetch")
-            assertTrue(fetch is ExecResult.Ok && fetch.value.orEmpty() == "undefined", "fetch 必须不存在：$fetch")
+            // 诚实边界：QuickJS 引擎内置 eval/Function 是 JS 语言本身能力，沙箱未主动暴露
+            // 任何 eval 包装，但无法从全局移除。验证 eval 执行的代码仍无宿主能力（require/网络）。
+            val evalType = s.execute("typeof globalThis['eval']")
+            assertTrue(evalType is ExecResult.Ok && evalType.value.orEmpty() == "function", "eval 为引擎内置，应如实记录为存在：$evalType")
+            val evalProbe = s.execute("eval('typeof globalThis[\\\"process\\\"]')")
+            assertTrue(evalProbe is ExecResult.Ok && evalProbe.value.orEmpty() == "undefined", "eval 内亦无 process 宿主能力：$evalProbe")
+            val fnType = s.execute("typeof globalThis['Function']")
+            assertTrue(fnType is ExecResult.Ok && fnType.value.orEmpty() == "function", "Function 为引擎内置：$fnType")
+            // require('fs') 由 allowlist 预检 fail-closed 拒绝（fs 不可用）。
+            val fs = s.execute("require('fs')")
+            assertTrue(fs is ExecResult.Failed, "fs require 必须被拒：$fs")
         } finally { s.close() }
     }
 

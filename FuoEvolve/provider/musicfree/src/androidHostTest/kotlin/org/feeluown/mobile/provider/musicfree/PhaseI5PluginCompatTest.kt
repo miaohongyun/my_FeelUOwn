@@ -9,6 +9,7 @@ import org.feeluown.mobile.provider.musicfree.ProviderNetworkGateway.GatewayResu
 import org.feeluown.mobile.provider.musicfree.ProviderNetworkGateway.Request
 import java.io.File
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
@@ -72,10 +73,13 @@ class PhaseI5PluginCompatTest {
         val src = plugin("geciwang")
         val attempts = mutableListOf<Request>()   // bridge 记录的尝试（含被拒）
         val executorCalls = mutableListOf<Request>() // 真正触达 executor 的请求（应为 0）
-        val gateway = ProviderNetworkGateway(recordingExecutor(executorCalls))
-        val sha = "b953571441c4d2ef3216d505fdaac2577dad1695e7009382bd4b83f1dd09c4f2"
+        val gateway = ProviderNetworkGateway.fromStringExecutor(recordingExecutor(executorCalls))
+        // J0：SHA 从实际加载的脚本字节现场计算，禁止硬编码常量冒充当前脚本。
+        val scriptBytes = src.encodeToByteArray()
+        val sha = MusicFreePluginCompatVerification.shaOfScriptBytes(scriptBytes)
+        assertEquals("b953571441c4d2ef3216d505fdaac2577dad1695e7009382bd4b83f1dd09c4f2", sha)
         val permission = MusicFreePluginCompatVerification.denyAllPermission("mf-geciwang", sha)
-        val bridge = MusicFreePluginCompatVerification.gatewayBridge(gateway, permission, sha, attempts)
+        val bridge = MusicFreePluginCompatVerification.gatewayBridge(gateway, permission, scriptBytes, attempts)
 
         val session = MusicFreeSandboxSession("mf-geciwang-net", networkBridge = bridge)
         try {

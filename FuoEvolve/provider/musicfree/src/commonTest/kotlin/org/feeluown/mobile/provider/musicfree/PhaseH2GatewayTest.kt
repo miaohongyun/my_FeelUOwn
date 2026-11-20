@@ -38,7 +38,7 @@ class PhaseH2GatewayTest {
     private fun gateway(
         calls: MutableList<Request>,
         exec: suspend (Request) -> ProviderNetworkGateway.Response,
-    ) = ProviderNetworkGateway(exec)
+    ) = ProviderNetworkGateway.fromStringExecutor(exec)
 
     @Test
     fun h2_authorizedRequestPasses(): Unit = runTest {
@@ -97,17 +97,32 @@ class PhaseH2GatewayTest {
 
     @Test
     fun h2_redirectDenyAllAndRevalidate(): Unit = runTest {
-        val denyAll = gateway().enforceRedirect(permission, sha, "https://evil.example.com/x")
-        assertTrue(denyAll is GatewayResult.Denied)
-        val revalidate = ProviderNetworkPermission(
-            providerId = "mf-audiomack", providerVersion = "1.0", scriptSha256 = sha,
-            candidatePolicy = policy, redirectPolicy = ProviderNetworkGateway.RedirectPolicy.REVALIDATE_EACH_HOP,
-            authorizationBasis = "t",
+        // J0：重定向控制内聚到 get()，底层 executor 返回 3xx 原样上交（不跟随）。
+        val calls = mutableListOf<Request>()
+        val denyAllG = gateway(calls) { req ->
+            calls += req
+            ProviderNetworkGateway.Response(302, "", mapOf("Location" to "https://evil.example.com/x"))
+        }
+        val denyAll = denyAllG.get(permission, Request("https://api.audiomack.com/start"), sha)
+        assertTrue(denyAll is GatewayResult.Denied, "DENY_ALL 应拒绝 3xx：$denyAll")
+        assertTrue(denyAll.reason.contains("DENY_ALL"))
+        assertEquals(1, calls.size, "只请求首跳，绝不跟随到 evil 域名")
+
+        val revalidate = permission.copy(
+            redirectPolicy = ProviderNetworkGateway.RedirectPolicy.REVALIDATE_EACH_HOP,
+            maxRedirects = 2,
         )
-        val g = gateway()
-        assertTrue(g.enforceRedirect(revalidate, sha, "https://api.audiomack.com/next") is GatewayResult.Ok)
-        assertTrue(g.enforceRedirect(revalidate, sha, "https://evil.example.com/next") is GatewayResult.Denied)
-        assertTrue(g.enforceRedirect(revalidate, sha, "http://api.audiomack.com/next") is GatewayResult.Denied)
+        // 同域跳转：逐跳校验后跟随，第二跳返回 200。
+        val hostCalls = mutableListOf<Request>()
+        val followG = gateway(hostCalls) { req ->
+            hostCalls += req
+            if (req.url.endsWith("/start")) ProviderNetworkGateway.Response(302, "", mapOf("Location" to "/next"))
+            else ProviderNetworkGateway.Response(200, """{"ok":true}""")
+        }
+        val followed = followG.get(revalidate, Request("https://api.audiomack.com/start"), sha)
+        assertTrue(followed is GatewayResult.Ok, "同域逐跳跟随应成功：$followed")
+        assertEquals(2, hostCalls.size)
+        assertTrue(hostCalls[1].url == "https://api.audiomack.com/next")
     }
 
     @Test
@@ -117,7 +132,7 @@ class PhaseH2GatewayTest {
             maxResponseBytes = 4, authorizationBasis = "t",
         )
         val perm = permission.copy(candidatePolicy = small)
-        val g = ProviderNetworkGateway { ProviderNetworkGateway.Response(200, "x".repeat(100)) }
+        val g = ProviderNetworkGateway.fromStringExecutor { ProviderNetworkGateway.Response(200, "x".repeat(100)) }
         val r = g.get(perm, Request("https://api.audiomack.com/x"), sha)
         assertTrue(r is GatewayResult.Denied)
         assertTrue(r.reason.contains("响应体"))
@@ -125,7 +140,7 @@ class PhaseH2GatewayTest {
 
     @Test
     fun h2_cancellationPropagates(): Unit = runTest {
-        val g = ProviderNetworkGateway { throw CancellationException("cancelled") }
+        val g = ProviderNetworkGateway.fromStringExecutor { throw CancellationException("cancelled") }
         try {
             g.get(permission, Request("https://api.audiomack.com/x"), sha)
             assertTrue(false, "取消应上抛")

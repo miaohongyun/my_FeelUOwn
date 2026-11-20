@@ -1,27 +1,41 @@
 package org.feeluown.mobile.provider.musicfree
 
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import org.feeluown.mobile.provider.lx.CandidateNetworkPolicy
+import org.feeluown.mobile.provider.musicfree.mfJson
 import org.feeluown.mobile.provider.musicfree.ProviderNetworkGateway.GatewayResult
 import org.feeluown.mobile.provider.musicfree.ProviderNetworkGateway.ProviderNetworkPermission
 import org.feeluown.mobile.provider.musicfree.ProviderNetworkGateway.Request
+import org.feeluown.mobile.sourceupdate.crypto.Sha256
 
 /**
- * 阶段 I5：真实插件兼容性验证台账与受控网络桥接。
+ * 阶段 I5 / J0：真实插件兼容性验证台账与受控网络桥接。
  *
  * 诚实分级（不把模拟/静态当真实）：
- * - STATIC_REVIEW：插件正文取回 + SHA 核对 + require 清单扫描 + 红线扫描（已完成，见 NodeCompatModules）。
- * - COMMONJS_REQUIRE_PASSED：沙箱内真实 require + 初始化 + 读 module.exports（本阶段验证）。
- * - REAL_SEARCH / REAL_URL_RESOLVE：需真实网络且经 Gateway 授权；未授权域名一律 DENIED，不伪造。
+ * - STATIC_REVIEW：插件正文取回 + SHA 核对 + require 清单扫描 + 红线扫描。
+ * - COMMONJS_REQUIRE_PASSED：沙箱内真实 require + 初始化 + 读 module.exports。
+ * - REAL_SEARCH / REAL_URL_RESOLVE：需真实网络且经 Gateway 授权；未授权一律 DENIED，不伪造。
+ *
+ * J0 整改（对应任务书 2.3 / 2.4）：
+ * - params/headers 改用 kotlinx.serialization 解析（不再手写字符扫描）；
+ * - query 使用 application/x-www-form-urlencoded 的 UTF-8 编码（中文/空格/&/+/%/引号/emoji 正确）；
+ * - SHA-256 从**实际加载的原始脚本字节**现场计算（[shaOfScriptBytes]），禁止固定字符串冒充；
+ * - 异常一律抛出，绝不转换成伪成功响应。
  */
 object MusicFreePluginCompatVerification {
 
-    /** 七级验证等级（与任务书一致，严格顺序）。 */
     enum class Level {
         STATIC_REVIEW, LX_RUNTIME_LOAD, COMMONJS_REQUIRE_PASSED,
         REAL_SEARCH, REAL_URL_RESOLVE, REAL_AUDIO_RESPONSE, REAL_PLAYBACK,
     }
 
-    /** 插件兼容测试记录：每个能力给等级与拒绝原因，失败也如实记。 */
     data class PluginCheck(
         val pluginId: String,
         val sha256: String,
@@ -33,101 +47,126 @@ object MusicFreePluginCompatVerification {
         val resourceReleased: Boolean,
     )
 
+    /** 响应序列化 Json：不对 JS 侧 data 做任何隐式改写。 */
+    private val responseJson = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+
     /**
-     * 构造一个把插件 axios 请求接到 ProviderNetworkGateway 的网络桥接。
-     * [permission] 绑定插件 ID/版本/SHA/授权域名；未授权域名经 Gateway 默认拒绝，零网络。
-     * 这里只做 GET（与 shim 对齐），params 拼到 URL query；headers 透传但禁止凭据（Gateway 会再过滤）。
+     * 从实际加载的原始脚本字节计算 SHA-256（J0 2.4）。
+     * 调用方必须把"交给沙箱执行的同一份字节"传进来，禁止传固定常量。
+     */
+    fun shaOfScriptBytes(scriptBytes: ByteArray): String = Sha256.hex(scriptBytes)
+
+    /**
+     * 把插件 axios GET 请求接到 ProviderNetworkGateway 的桥接。
+     * [scriptBytes] 是当前实际加载的插件原始字节：每次请求现场计算 SHA 传给 Gateway，
+     * 与权限登记值不符即被拒绝——不存在"调用方随手传个固定 SHA 冒充当前脚本"的路径。
      */
     fun gatewayBridge(
         gateway: ProviderNetworkGateway,
         permission: ProviderNetworkPermission,
-        currentSha: String,
+        scriptBytes: ByteArray,
         calls: MutableList<Request> = mutableListOf(),
-    ): suspend (url: String, paramsJson: String, headersJson: String) -> String = { url, paramsJson, headersJson ->
-        val query = parseSimpleParams(paramsJson)
-        val finalUrl = if (query.isEmpty()) url else url + (if ("?" in url) "&" else "?") + query
-        val headers = parseHeaderMap(headersJson)
-        val result = gateway.get(permission, Request(finalUrl, "GET", headers), currentSha)
-        when (result) {
-            is GatewayResult.Ok -> {
-                calls += Request(finalUrl, "GET", headers)
-                """{"status":${result.response.statusCode},"data":${jsonQuote(result.response.body)},"headers":{}}"""
+    ): suspend (url: String, paramsJson: String, headersJson: String) -> String {
+        val expectedSha = shaOfScriptBytes(scriptBytes)
+        return { url, paramsJson, headersJson ->
+            val finalUrl = appendQuery(url, encodeQuery(paramsJson))
+            val headers = decodeStringMap(headersJson)
+            val result = gateway.get(permission, Request(finalUrl, "GET", headers), expectedSha)
+            when (result) {
+                is GatewayResult.Ok -> {
+                    calls += Request(finalUrl, "GET", headers)
+                    val body = buildJsonObject {
+                        put("status", result.response.statusCode)
+                        put("data", result.response.body)
+                        put("contentType", result.response.contentType.orEmpty())
+                        put("headers", JsonObject(emptyMap()))
+                    }
+                    responseJson.encodeToString(JsonElement.serializer(), body)
+                }
+                is GatewayResult.Denied -> {
+                    calls += Request(finalUrl, "GET", headers) // 记录尝试（Gateway 未触达 executor）
+                    throw IllegalStateException("网络被 Gateway 拒绝：${result.reason}")
+                }
+                is GatewayResult.Failed -> throw IllegalStateException("网络失败：${result.reason}")
             }
-            is GatewayResult.Denied -> {
-                calls += Request(finalUrl, "GET", headers) // 记录尝试，但 Gateway 未触达 executor
-                throw IllegalStateException("网络被 Gateway 拒绝：${result.reason}")
-            }
-            is GatewayResult.Failed -> throw IllegalStateException("网络失败：${result.reason}")
         }
     }
 
-    /** 极简 JSON 扁平对象 -> Map（headers）。 */
-    private fun parseHeaderMap(json: String): Map<String, String> {
+    /** 解析扁平 JSON 对象为 Map<String,String>；非字符串值用其 JSON 文本，异常向上传播。 */
+    private fun decodeStringMap(json: String): Map<String, String> {
         if (json.isBlank() || json == "{}") return emptyMap()
-        val out = mutableMapOf<String, String>()
-        val kv = Regex("\"([^\"]+)\"\\s*:\\s*\"([^\"]*)\"")
-        kv.findAll(json).forEach { out[it.groupValues[1]] = it.groupValues[2] }
-        return out
-    }
-
-    /** 极简 JSON 字符串 kv 解析（params/headers 来自 JS JSON.stringify 的扁平对象）。 */
-    private fun parseSimpleParams(json: String): String {
-        if (json.isBlank() || json == "{}") return ""
-        val pairs = mutableListOf<String>()
-        var i = 0
-        while (i < json.length) {
-            val k1 = json.indexOf('"', i); if (k1 < 0) break
-            val k2 = json.indexOf('"', k1 + 1); if (k2 < 0) break
-            val key = json.substring(k1 + 1, k2)
-            val colon = json.indexOf(':', k2); if (colon < 0) break
-            i = colon + 1
-            while (i < json.length && json[i] == ' ') i++
-            val value = when {
-                i < json.length && json[i] == '"' -> {
-                    val v2 = json.indexOf('"', i + 1)
-                    if (v2 < 0) break
-                    val v = json.substring(i + 1, v2); i = v2 + 1; v
-                }
-                else -> {
-                    val start = i
-                    while (i < json.length && json[i] != ',' && json[i] != '}') i++
-                    json.substring(start, i).trim()
-                }
-            }
-            pairs += "$key=$value"
-            while (i < json.length && json[i] != ',') i++
-            i++
-        }
-        return pairs.joinToString("&")
-    }
-
-    private fun jsonQuote(value: String): String {
-        val sb = StringBuilder(value.length + 2).append('"')
-        value.forEach { c ->
-            when (c) {
-                '\\' -> sb.append("\\\\")
-                '"' -> sb.append("\\\"")
-                '\n' -> sb.append("\\n")
-                '\r' -> sb.append("\\r")
-                '\t' -> sb.append("\\t")
-                else -> if (c.code < 0x20) sb.append("\\u").append(c.code.toString(16).padStart(4, '0')) else sb.append(c)
+        val element = mfJson.parseToJsonElement(json)
+        require(element is JsonObject) { "params/headers 必须是 JSON 对象：$json" }
+        return element.entries.associate { (key, value) ->
+            key to when (value) {
+                is JsonPrimitive -> value.content
+                else -> mfJson.encodeToString(JsonElement.serializer(), value)
             }
         }
-        return sb.append('"').toString()
     }
 
-    /** 为插件构造一个" deny-all"权限（无授权域名，全部网络请求被 Gateway 拒绝）。 */
-    fun denyAllPermission(pluginId: String, sha: String) = ProviderNetworkPermission(
-        providerId = pluginId,
-        providerVersion = "0.0.0",
-        scriptSha256 = sha,
-        candidatePolicy = CandidateNetworkPolicy(
-            candidateId = pluginId,
-            boundSha256 = sha,
-            allowedHosts = emptySet(),
-            authorizationBasis = "I5：插件正文已静态审查但未授予任何域名，默认拒绝全部网络",
-            denialReason = "插件 $pluginId 尚无具名域名人工授权，网络默认拒绝（不放宽白名单）",
-        ),
-        authorizationBasis = "I5 deny-all 验证",
-    )
+    /** 用 UTF-8 form 编码把 params JSON 编成 query；null/空对象返回空串。 */
+    private fun encodeQuery(paramsJson: String): String {
+        if (paramsJson.isBlank() || paramsJson == "{}" || paramsJson == "null") return ""
+        val element = mfJson.parseToJsonElement(paramsJson)
+        require(element is JsonObject) { "params 必须是 JSON 对象：$paramsJson" }
+        return element.entries
+            .filter { (_, v) -> v !is JsonPrimitive || !v.isString || v.content.isNotEmpty() }
+            .joinToString("&") { (key, value) ->
+                val raw = when (value) {
+                    is JsonPrimitive -> value.content
+                    else -> mfJson.encodeToString(JsonElement.serializer(), value)
+                }
+                "${formEncode(key)}=${formEncode(raw)}"
+            }
+    }
+
+    /**
+     * application/x-www-form-urlencoded UTF-8 编码：
+     * 未保留字符（A-Za-z0-9-_.~）原样，空格 -> '+'，其余字节 -> %HH（大写十六进制）。
+     * 中文/emoji 先 UTF-8 编码再逐字节转义，& = + % " 等危险字符全部转义。
+     */
+    internal fun formEncode(value: String): String {
+        val bytes = value.encodeToByteArray()
+        val sb = StringBuilder(bytes.size)
+        for (b in bytes) {
+            val u = b.toInt() and 0xFF
+            when {
+                u in 0x41..0x5A || u in 0x61..0x7A || u in 0x30..0x39 ||
+                    u == 0x2D || u == 0x5F || u == 0x2E || u == 0x7E -> sb.append(u.toChar())
+                u == 0x20 -> sb.append('+')
+                else -> sb.append('%').append(
+                    u.toString(16).uppercase().padStart(2, '0'),
+                )
+            }
+        }
+        return sb.toString()
+    }
+
+    /** 把 query 追加到 URL，正确处理已有 ?（含末尾 ? 与 &）。 */
+    internal fun appendQuery(url: String, query: String): String {
+        if (query.isEmpty()) return url
+        return when {
+            '?' !in url -> "$url?$query"
+            url.endsWith("?") || url.endsWith("&") -> "$url$query"
+            else -> "$url&$query"
+        }
+    }
+
+    /** 为插件构造 deny-all 权限（无授权域名，全部网络请求被 Gateway 拒绝）。 */
+    fun denyAllPermission(pluginId: String, sha: String, version: String = "0.0.0") =
+        ProviderNetworkPermission(
+            providerId = pluginId,
+            providerVersion = version,
+            scriptSha256 = sha,
+            candidatePolicy = CandidateNetworkPolicy(
+                candidateId = pluginId,
+                boundSha256 = sha,
+                boundVersion = version,
+                allowedHosts = emptySet(),
+                authorizationBasis = "I5/J0：插件正文已静态审查但未授予任何域名，默认拒绝全部网络",
+                denialReason = "插件 $pluginId 尚无具名域名人工授权，网络默认拒绝（不放宽白名单）",
+            ),
+            authorizationBasis = "I5/J0 deny-all 验证",
+        )
 }

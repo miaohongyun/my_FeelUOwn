@@ -1256,3 +1256,12 @@ I0 封送：PhaseI0MarshallingTest 13×2 全绿，实测字符串实参为真实
 
 **结论：CommonJS 基本能力/隔离/真实插件初始化已达要求，但真实搜索/URL/音频/播放四关因域名未授权仍 NOT_RUN，跨求值 timer/DNS rebinding/iOS 运行测试三项限制未解决，不建议进入统一 Provider 调度阶段。真实播放 NOT_RUN 不变、不设默认、不自动安装、不推送。** 详见 audit §22。
 
+
+
+## §28 阶段 J0：Gateway 网络出口整改（2026-11-20）
+
+基线 3f0d758（I 最终，本地=远端），master fc05530，工作区干净、远端无新提交；只改工作分支、只本地提交不推送。
+整改：executor 契约改为 RawResponse(status/headers/BodyStream) + 关闭自动重定向的 Ktor 适配器(asProviderNetworkExecutor)；重定向控制内聚到 get()（DENY_ALL 拒、逐跳每跳完整校验+上限，3xx 先 cancel body）；Content-Length 预检+流式累计超限立即 cancel；请求级 withTimeout + 取消原样上抛；axios 参数改 kotlinx.serialization + UTF-8 form 编码(中文/emoji/&/+/%/引号正确, 已有 query 正确)；SHA 从实际加载字节现场 Sha256.hex 计算，权限绑定 providerId/版本/SHA/域名/方法/端口/体积/超时/重定向策略。
+DNS 审查：三端 client(OkHttp/Darwin)有 HttpTimeout，但 DNS→连接 IP 绑定未实现，DNS rebinding 如实列未解决（字符串层 3xx 域名切换已封堵，但连接层正交风险仍留）。
+测试：PhaseJ0GatewayTest 14 项（重定向/流式/编码/权限绑定）+ I4 探测表达式修复（如实记录内置 eval 存在但无宿主能力）；desktopTest 115 项 0 失败、testAndroidHostTest 115 项 0 失败；iOS 交叉编译+测试源码编译 --rerun-tasks 通过、iosSimulatorArm64Test NOT_RUN(无 Xcode)。未接真实网络/未冒充搜索播放/未推送。详见 audit §23。
+

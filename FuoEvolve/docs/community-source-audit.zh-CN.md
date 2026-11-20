@@ -1036,3 +1036,48 @@ iOS Simulator / Metadata / Android 编译通过（`--rerun-tasks`）。
 
 **不建议（按任务书门槛）**。CommonJS 基本能力（I0-I2）、隔离（I4）、真实插件初始化/require（I5）已达到要求，但"真实插件测试"的搜索/URL/音频/播放四关因域名未授权仍为 NOT_RUN（I5 Gateway 拒绝实证），且跨求值 timer / DNS rebinding / iOS 运行测试三项限制未解决。建议下一步先取得"固定具名域名 + 明确条款 + SHA 绑定"的播放授权，并在有 Xcode 的环境补 iOS 运行测试，再评估统一调度。**不为完成阶段而放行域名、不设默认、不自动安装、不推送。**
 
+
+
+---
+
+## §23 阶段 J0：ProviderNetworkGateway 网络出口整改（2026-11-20）
+
+基线：本地与远端 work 分支均 `3f0d758`（I 最终），master=`fc05530`；ls-remote 确认远端未前进，工作区干净。按任务书只改工作分支、不碰 master、不 reset/强推、本阶段只本地提交。
+
+### 23.1 整改前后差异（Gateway）
+
+| 项 | 整改前（H2/I5） | 整改后（J0） |
+| --- | --- | --- |
+| executor 契约 | `suspend (Request)->Response`，body 是整块 String | `NetworkExecutor` 返回 `RawResponse`（status/headers/**BodyStream**），3xx 原样上交 |
+| 重定向 | `enforceRedirect()` 只返回策略判定、发哨兵 `Response(0,"")`，**不真正发下一跳**；底层 client 默认自动跟随 | 重定向控制内聚到 `get()`：底层 `asProviderNetworkExecutor()` 用 `config{followRedirects=false}` 关闭自动跟随；3xx 先 cancel body，DENY_ALL 直接拒，逐跳模式每跳重新执行协议/域名/端口/方法/凭据/策略/SHA 完整校验 + 次数上限(0..8) |
+| 响应限额 | executor 返回后 `encodeToByteArray().size` 事后检查（整块已在内存） | Content-Length 预检（超限 0 读取即拒）+ BodyStream 流式累计，超限立即 `cancel()` 释放；不无限缓存 |
+| 超时/取消 | 无请求级超时；取消靠 executor | `withTimeout(requestTimeoutMs)` → TimeoutCancellationException 转 Failed；CancellationException 原样上抛不吞 |
+| SHA 绑定 | `gatewayBridge(currentSha:String)` 由调用方传固定字符串，可与真实脚本脱钩 | `gatewayBridge(scriptBytes:ByteArray)` 每次现场 `Sha256.hex(实际字节)`；权限同时绑定 providerId/版本/SHA/域名/方法/端口/体积/超时/重定向策略，传固定常量冒充即拒 |
+| axios 参数 | 手写字符游标扫 params、正则抽 headers、手写 JSON 拼接 | kotlinx.serialization `parseToJsonElement` 解析；UTF-8 form 编码（未保留字符原样/空格→+/其余 %HH）；正确处理已有 query（? / & / 空）、headers、contentType 语义；异常一律抛出 |
+
+### 23.2 DNS 与连接安全审查（J0 2.5，如实）
+
+- Android：`HttpClient(OkHttp)` + 显式 Dispatcher/ConnectionPool；Desktop 同为 OkHttp；iOS 为 Darwin。三者都在 `installProviderClientDefaults()` 装 HttpTimeout（connect 10s / request 30s / socket 30s）。
+- **DNS 解析结果与实际连接目标的一致性校验/绑定：三端均未实现**。commonMain 的 URL 层策略（域名白名单、裸 IP/私网/元数据拒绝、userinfo/编码 host 拒绝）只在**字符串层**生效；连接层由引擎做 DNS，无法保证解析结果不被 DNS rebinding 替换。
+- Android OkHttp 可通过 `Dns` + 自定义 `ConnectionSpec`/`SSLSocketFactory` 做 IP 固定，Desktop 同理，iOS Darwin 需 `NSURLSession` 层 hook——均需平台专属实现，**本阶段未实现，明确记为未解决风险**，不标为通过。
+- 重定向层面已消除"通过 3xx 切到未登记域名"的字符串层风险（J0 23.1），但 DNS rebinding 属连接层，与其正交、仍保留。
+
+### 23.3 J0 测试与证据
+
+新增 `PhaseJ0GatewayTest`（14 项，desktop/androidHost 各全绿）：
+- 重定向：DENY_ALL 跨域只请求首跳（证明 executor 未先行跟随）、逐跳拒跨域/私网/裸 IP、循环重定向被上限拦截（首跳+2 跟随=3 次后停）、同域逐跳跟随成功。
+- 流式限额：Content-Length 预检 0 读取即 cancel、流式累计超限立即 cancel、正常与截断响应语义。
+- 超时/取消：executor 不返回→Failed(超时)、CancellationException 原样上抛。
+- 编码：中文/空格/&/+/%/引号/emoji 的 UTF-8 form 向量、已有 query 追加、桥接保留 status/data/contentType 且 URL 编码正确。
+- 权限绑定：现场字节 SHA 一致放行、固定 SHA 冒充被拒、未授权方法/凭据头被拒。
+
+修复 I4 遗留测试问题（任务书 J7 要求）：`i4_noFileSystemOrProcessCapabilities` 原循环未真正执行探测表达式，现逐条执行并断言；如实记录 QuickJS 内置 `eval/Function` 为引擎语言能力（沙箱未主动暴露包装，但无法从全局移除），并验证 eval 内仍无 process 等宿主能力。
+
+H2 测试适配新契约（保留全部原断言语义，重定向用例改为经 get() 真实验证 3xx）；I5 测试 executor 构造改 `fromStringExecutor`，SHA 改现场字节计算（不再硬编码常量）。
+
+验证：desktopTest **115 项 0 失败**（101 旧 + 14 J0）、testAndroidHostTest **115 项 0 失败**；iOS `compileKotlinIosSimulatorArm64` + `compileTestKotlinIosSimulatorArm64` 以 `--rerun-tasks` 通过，`iosSimulatorArm64Test` 未执行（Windows 无 Xcode/模拟器，NOT_RUN）。
+
+### 23.4 结论
+
+J0 五项整改（重定向/流式限额/axios 参数/SHA 绑定/DNS 审查）中前四项已实现并有真实测试证据；DNS→连接的 IP 绑定三端未实现，如实列为未解决风险。本阶段未接入真实 Ktor client 到生产 Provider（那是 J1），未做真实网络请求，不把 HTTP 206/初始化冒充搜索或播放。未推送。
+
