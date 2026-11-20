@@ -409,3 +409,68 @@ UI 明确显示"主备调度器未启用（真实搜索通过 <2）"。`SourceFa
 | 无未经批准安装 | ✅ 无安装按钮，主备选择仅写入 UI state，不启用/安装 |
 | 测试与编译真实可复核 | ✅ sourceupdate 153 / lxruntime 93 / shared 385 desktopTest 全绿；Android/iOS Sim/Metadata 编译通过 |
 | DNS rebinding 遗留风险 | ✅ 如实声明未彻底解决，限制真实验证范围 |
+
+
+---
+
+## 13. 阶段 G1：寻找真正实现 LX search 的合规候选（2026-11-20）
+
+> 基线：`19fe2cf`（阶段 G0）　分支：`work/android-community-discovery`　未碰 master。
+> 先做 G1-0：以 LX 官方桌面/移动文档核对 G0 结论——**两版协议均无 search action**：
+> - 桌面文档原文："`sources[...].actions`：支持的 actions 数组，`local` 源可用值为 `musicUrl`、`lyric`、`pic`，**其他源只支持 `musicUrl`**"；"`action` 请求操作类型……当为 `musicUrl`…`lyric`…`pic`…"（无 search）；
+> - 移动文档原文："`action` 请求操作类型，**目前只有 `musicUrl`**，即获取音乐 URL 链接"。
+> 因此 G0"协议无 search、产品无调用链"的结论由上游规范**双重确认**，不是本仓实现缺失。
+
+### 13.1 找到了什么：确实有脚本在脚本内实现 search（非仅上游 API）
+
+GitHub Code Search（`actions: ['musicUrl', 'search']`）命中 215 个结果，绝大多数是 pdone/guoyue 同一批脚本的镜像。
+去重后对 4 个候选取真实文件、计 SHA、静态审查、隔离加载（空 allowedHosts + MockEngine，零真实网络）：
+
+| 候选 | 版本 | SHA256(前12) | 来源仓库 | 许可 | DECLARED | LOADED（隔离） | 脚本内 search 实现 | 合规判定 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 溯音 suyin | v1 | d10c9c28823b | pdone/lx-music-source | **无 LICENSE** | `['musicUrl','search']` | ✅ tx/wy/kw/mg | `case 'search'→handleSearch`（kw/mg），走 oiapi.net/api.xcvts.cn | 不合规 |
+| 幻音 huanyin | v3 | 4a81129240ec | pdone/lx-music-source | **无 LICENSE** | `['musicUrl','search']` | ✅ tx/kw/wy/mg | `action==='search' && mg→searchMiguMusic`，走 api.xcvts.cn | 不合规 |
+| Ciallo~ | 0721 opt | fd16333bcf6 | guoyue2010/lxmusic- | **Apache-2.0** | `['musicUrl','search']` | ✅ wy | `case 'search'→searchMusic`，走 api.s0o1.com | 有许可但有 bug（见下） |
+| 非常刀 feichangdao | v5 | 49486cab064e | pdone/lx-music-source | 无 LICENSE | `['musicUrl','search','lyric']` | ❌ QUARANTINE，禁止执行 | 有 handleSearch，但含裸IP 175.27.166.236 + t.me + 多第三方 API | 阻断保持 |
+
+**"脚本内实现"判定方法**：不仅看 `inited.actions` 声明，还逐个核对 request 处理器里是否真有
+`case 'search'` / `action==='search'` 分支，并追踪它调用的 URL——这三者确实自己解析关键词并返回歌曲结构，
+不是把"上游 API 有 search"误当成脚本 search（区别于阶段 F 的 gdstudio）。
+
+### 13.2 但"真正实现"≠"合规"更≠"可用"——四道硬门槛全部未过
+
+1. **协议层不成立**：LX 官方桌面/移动协议都没有 search action。这些脚本的 search 是**社区非标准扩展**，
+   LX Music 客户端与本项目 Runtime 都不会派发它（G0 已证产品调用链只到 `musicUrl`）。写了 search 也无人调用。
+2. **来源/许可门槛**：suyin/huanyin/feichangdao 来自 pdone——**仓库无 LICENSE**（实测 LICENSE 返回 404），
+   仅"内容源于网络"，不满足 G1"明确许可说明"。只有 Ciallo 的 guoyue2010 仓库是 Apache-2.0。
+3. **数据链路不可信**：suyin/huanyin 依赖 `oiapi.net`/`api.xcvts.cn`，Ciallo 依赖 `api.s0o1.com`——
+   均为第三方聚合 API，服务条款/授权/稳定性未经确认，且把账号/请求交给未知后端。
+4. **真实结构对不上（实证）**：
+   - Ciallo：`api.s0o1.com/API/wyy_music?msg=晴天&sm=10` 实测 HTTP 200、`data` 是**数组**；
+     脚本却只解析 `data.data.id`（单对象）→ search 实际返回空列表。脚本自身 bug，非网络问题。
+   - suyin：`oiapi.net/api/Kuwo` 实测 200，但返回体是 `message` 文本 + `data` 混合结构，脚本靠
+     `parseKwFromMessage` 兜底解析，脆弱且易随上游改版失效。未做真实 search 调用验证（属 G3）。
+
+**未升级任何状态**：四个候选都未标 `REAL_SEARCH_PASSED`、未标 `ELIGIBLE_FOR_CONTROLLED_TEST`；
+suyin/huanyin/ciallo 只到 `LX_RUNTIME_LOAD_PASSED`（隔离加载级），feichangdao 保持 QUARANTINE。
+未执行 QUARANTINE 脚本、未发真实 search 请求、未放宽 SSRF、未接入任何脚本。
+
+### 13.3 G1 结论（明确回答任务）
+
+- **是否存在"真正实现 LX search 的合规候选"？** —— **没有。**
+  有 3 个脚本在脚本内真实现了 search 且能隔离加载，但：(a) LX 协议无 search action、产品无调用链，
+  实现也无处可用；(b) 两个无 LICENSE、一个第三方 API 依赖；(c) 唯一有 Apache-2.0 的 Ciallo 实测有解析 bug。
+  没有任何一个同时满足"协议内 + 来源清晰 + 有许可 + 真实可用"。
+- **不把 MusicFree 插件当 LX 音源**：本阶段未引入任何 MusicFree 插件（协议不同，见阶段 E §9.2）。
+- **不因 init.conf 已授权就放行 juhe 动态 URL**（阶段 F 红线保持）；**不设 gdstudio 为默认**（无 search action）。
+- **对 G2/G3 的建议**：若目标是"脚本提供搜索"，这是 G2 的**新协议 + 新调用链 + 新结果模型**工程
+  （定义 LX 扩展 search action、宿主派发、结果校验、候选级授权），不是换音源能解决的；
+  若目标是"当前架构下可用的搜索"，应继续走宿主侧 `LxSongSearcher` 注册表（默认 kw+kg），
+  并为有价值的 musicUrl 解析脚本补 G3 真实 URL/音频/播放验证。G1 不启动自动主备调度。
+
+### 13.4 测试与登记
+
+- 新增候选登记：suyin/ciallo（新），huanyin（从 UNVERIFIABLE 按真实取证升级）；`license` 字段入台账。
+- 新增测试：`PhaseG1SearchCandidateTest`（隔离加载 3 项，QUARANTINE 不执行）、`PhaseG1RegistryTest`（4 项台账不变量）；lxruntime 101 / sourceupdate 157 全绿，iOS Sim/Metadata/Android 编译通过。
+- `build/phase-g1-isolated-load.txt` 记录三候选 DECLARED/LOADED 实况。
+- 未改协议、未加产品 search API、未做真实 search 调用、未接任何脚本、未碰 master。

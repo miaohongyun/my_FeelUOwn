@@ -69,6 +69,8 @@ data class CommunityCandidateRecord(
     val downloadUrl: String? = null,
     val version: String? = null,
     val sha256: String? = null,
+    /** 许可信息（G1 要求可追溯）。null/空 = 来源仓库无 LICENSE 或未确认。 */
+    val license: String? = null,
     val fileSize: Long? = null,
     val discoveredAt: String = "2026-11-20",
     val sourceType: CommunitySourceType,
@@ -279,11 +281,20 @@ object CommunitySourceRegistry {
             evidence = "仅在第三方博客/镜像描述中出现（HUIBQ/忆音 320k 组合），未定位到原作者仓库与可验证原始文件。" +
                 "不把转载描述当原作者声明，不伪造 SHA。",
         ))
+        // G1：幻音已从 pdone 官方 latest.js 取到真实文件（E 阶段为 UNVERIFIABLE，此处按证据升级）。
         add(CommunityCandidateRecord(
-            candidateId = "huanyin", name = "幻音",
-            sourceType = CommunitySourceType.STANDALONE, status = CommunityAuditStatus.UNVERIFIABLE,
-            evidence = "Web 检索未定位到可验证的「幻音」LX 脚本官方仓库/发布页/版本记录；" +
-                "同名音乐 App 众多，无法确认目标音源身份。不伪造来源。",
+            candidateId = "huanyin", name = "幻音音源 v3", aliases = listOf("幻音"),
+            repositoryUrl = PDONE_BASE, downloadUrl = "$PDONE_BASE/huanyin/latest.js",
+            version = "v3", sha256 = "4a81129240ecae3ebf6b42f28c73e2d37bbcb6fccac9a73a401d90cdd36bee5f",
+            fileSize = 7316, license = null, sourceType = CommunitySourceType.STANDALONE,
+            status = CommunityAuditStatus.LX_RUNTIME_LOAD_PASSED,
+            lxSimulatedPlatforms = listOf("mg"),
+            declaredHosts = listOf("api.xcvts.cn", "music-dl.sayqz.com"),
+            evidence = "G1：pdone 官方 huanyin/latest.js（7316B，作者竹佀）。inited 声明 ['musicUrl','search']，" +
+                "脚本内 action==='search' && source==='mg' → searchMiguMusic 真实实现（非仅上游 API）。" +
+                "隔离 QuickJS load+initialize 通过（空 allowedHosts，LOADED）；未做真实 search 调用（属 G3）。" +
+                "合规缺口：pdone 仓库无 LICENSE；search 依赖第三方 api.xcvts.cn；声明四平台但 search 仅 mg。" +
+                "注意：LX 官方协议无 search action，此为社区非标准扩展，产品无调用链。未接入。",
         ))
         add(CommunityCandidateRecord(
             candidateId = "kulao", name = "裤佬SVIP音源(二改整合版)",
@@ -365,6 +376,36 @@ object CommunitySourceRegistry {
             evidence = "F1 登记：pdone 动漫音源脚本（4134B）。UPDATE_ENABLE=true，初始化触发 checkUpdate，" +
                 "空 allowedHosts 下被拒（门禁生效）。仅声明 musicUrl。真实探测端点返回 code=500「不支持的平台」，" +
                 "响应约 9.8s；不升级验证等级，暂不接入。",
+        ))
+        // G1：另两个声称实现 search 的候选（来源/许可见 evidence；产品无 search 调用链，均未接入）。
+        add(CommunityCandidateRecord(
+            candidateId = "suyin", name = "溯音音源 v1", aliases = listOf("溯音"),
+            repositoryUrl = PDONE_BASE, downloadUrl = "$PDONE_BASE/suyin/latest.js",
+            version = "v1", sha256 = "d10c9c28823b5c2ce4e3fef3b25b8ff16d2d165bd0883e2b866900ef7c0dc0ee",
+            fileSize = 17656, license = null, sourceType = CommunitySourceType.STANDALONE,
+            status = CommunityAuditStatus.LX_RUNTIME_LOAD_PASSED,
+            lxSimulatedPlatforms = listOf("tx", "wy", "kw", "mg"),
+            declaredHosts = listOf("oiapi.net", "api.xcvts.cn"),
+            evidence = "G1：pdone 官方 suyin/latest.js（17656B，作者竹佀，QQ群 1078955749）。" +
+                "inited 声明 ['musicUrl','search']；脚本 case 'search'→handleSearch 真实实现（kw/mg），" +
+                "经 oiapi.net/api.xcvts.cn 第三方聚合接口。隔离 load+initialize 通过（空 allowedHosts，LOADED）；" +
+                "未做真实 search 调用。合规缺口：pdone 无 LICENSE；第三方 API 授权不明；" +
+                "LX 协议无 search action、产品无调用链。未接入。",
+        ))
+        add(CommunityCandidateRecord(
+            candidateId = "ciallo", name = "Ciallo 网易解析", aliases = listOf("Ciallo~"),
+            repositoryUrl = "https://github.com/guoyue2010/lxmusic-",
+            downloadUrl = "https://raw.githubusercontent.com/guoyue2010/lxmusic-/main/V2603/" +
+                "%E4%B8%80%E8%88%AC-%E6%94%AF%E6%8C%81%E5%8D%95%E5%B9%B3%E5%8F%B0FLAC%E6%88%96%E5%A4%9A%E5%B9%B3%E5%8F%B0320k/Ciallo~.js",
+            version = "0721 opt", sha256 = "fd16333bcf630f2fe92142e2cb6c8d7480331180ea5c4249a3e4080f5b95ac83",
+            fileSize = 5141, license = "Apache-2.0", sourceType = CommunitySourceType.STANDALONE,
+            status = CommunityAuditStatus.LX_RUNTIME_LOAD_PASSED,
+            lxSimulatedPlatforms = listOf("wy"), declaredHosts = listOf("api.s0o1.com"),
+            evidence = "G1：guoyue2010/lxmusic-（Apache-2.0）Ciallo~.js（5141B，作者玥然OvO）。" +
+                "inited 声明 ['musicUrl','search']；case 'search'→searchMusic 走 api.s0o1.com。" +
+                "隔离 load+initialize 通过（LOADED）。真实探测：API msg 参数可用、返回 data 数组，" +
+                "但脚本只解析 data.data.id（单对象）→ search 真实返回空列表（脚本自身 bug）。" +
+                "另声明 hires/atmos/master 非标准音质标签。未接入。",
         ))
         add(CommunityCandidateRecord(
             candidateId = "mygo", name = "MyGO 音源",

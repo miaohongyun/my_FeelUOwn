@@ -1159,3 +1159,20 @@ JS 桥 `__lxDispatch`（`LxBridge.kt:182-190`）action 无关——G0 用自写�
 
 **对 G1 的约束**：承认协议无 search；改找"合规公开搜索接口 + musicUrl 解析脚本"组合，或启动 G2 定义脚本 search 协议/调用链/结果模型；
 不把声明 search 的 QUARANTINE 脚本当突破口，不把 MusicFree 插件直接当 LX 音源，不放宽 SSRF/会员。
+
+
+## §18 阶段 G1：寻找真正实现 LX search 的合规候选（2026-11-20）
+
+基线 `19fe2cf`（G0），分支 `work/android-community-discovery`，未碰 master。
+
+**G1-0 先核对官方规范**：LX 桌面/移动文档均确认协议无 search action（桌面："其他源只支持 musicUrl"，local 才 musicUrl/lyric/pic；移动："action 目前只有 musicUrl"）。G0 结论获上游规范双重确认。
+
+**找到的候选**（GitHub Code Search 去重后 4 个，取真实文件/计 SHA/静态审查/隔离加载）：
+溯音 suyin（d10c9c28…，pdone 无 LICENSE，脚本内 handleSearch kw/mg，隔离 LOADED）、
+幻音 huanyin（4a811292…，pdone 无 LICENSE，searchMiguMusic，LOADED）、
+Ciallo~（fd16333b…，guoyue2010 **Apache-2.0**，searchMusic 走 api.s0o1.com，LOADED）、
+非常刀 feichangdao（QUARANTINE 保持，禁止执行）。三者确实在**脚本内**实现 search（非仅上游 API）。
+
+**结论：没有"真正实现 LX search 的合规候选"。** 四道门槛全未过：①LX 协议无 search action、产品无调用链，实现也无处可用；②suyin/huanyin 无 LICENSE，仅 Ciallo 有 Apache-2.0；③依赖 oiapi.net/api.xcvts.cn/api.s0o1.com 第三方聚合 API 授权不明；④实证 Ciallo 脚本解析 `data.data.id`（对象）但真实 API 返回数组 → search 实返空（脚本 bug），suyin 靠 message 文本兜底脆弱。未升级任何候选为 REAL_SEARCH_PASSED/ELIGIBLE；未执行 QUARANTINE、未做真实 search、未放宽 SSRF、未接入。
+
+**对 G2/G3**：脚本 search 是新协议+新调用链+新结果模型工程（G2），不是换音源可解；当前架构下可用搜索仍走宿主 LxSongSearcher 注册表（kw+kg）。新增 license 字段与 PhaseG1 台账/隔离加载测试。不把 MusicFree 插件当 LX 音源、不设 gdstudio 默认、不放行 juhe 动态 URL、不启动自动主备。
