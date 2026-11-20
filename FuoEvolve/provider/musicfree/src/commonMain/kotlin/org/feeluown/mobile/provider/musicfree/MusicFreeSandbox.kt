@@ -93,9 +93,17 @@ object MusicFreeSandbox {
         fun all(): List<RegisteredModule> = modules.values.toList()
     }
 
+    /**
+     * 沙箱内建注入模块（I5）：由沙箱在受控 context 内直接构造，不经 ModuleRegistry/JSON。
+     * axios 唯一出网路径绑定宿主网络桥接（必须走 ProviderNetworkGateway），因此是安全的
+     * 内建能力，而非 allowlist 绕过。预载循环跳过它们，避免覆盖注入对象。
+     */
+    val injectedModules: Set<String> = setOf("axios")
+
     /** 拒绝原因：require 不在 allowlist / 内容超限 / 非法命名。 */
     fun requireRejection(name: String, limits: Limits): String? {
         if (name.isBlank()) return "require 模块名为空"
+        if (name in injectedModules) return null // 内建注入模块（受沙箱控制，见 injectedModules 注释）
         if (!ModuleRegistry.isSafeModuleName(name)) return "require 禁止非法路径穿越：$name"
         val m = ModuleRegistry.lookup(name) ?: return "require 模块未登记在 allowlist：$name（fail-closed）"
         if (m.source.encodeToByteArray().size > limits.maxModuleBytes) return "模块 $name 超过大小上限"

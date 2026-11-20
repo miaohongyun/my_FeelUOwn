@@ -47,6 +47,14 @@ import kotlin.coroutines.cancellation.CancellationException as StdCancellation
 class MusicFreeSandboxSession(
     val providerId: String,
     val limits: Limits = Limits(),
+    /**
+     * 阶段 I5：唯一网络桥接。JS 侧 axios.get 经此 lambda 出网；宿主实现必须走
+     * [ProviderNetworkGateway]（域名/SHA/版本绑定 + fail-closed）。默认 deny-all，
+     * 不接任何原生网络。返回响应 body 字符串；抛异常表示网络被拒/失败，JS 侧收到 rejected Promise。
+     */
+    private val networkBridge: suspend (url: String, paramsJson: String, headersJson: String) -> String = { _, _, _ ->
+        throw IllegalStateException("未提供网络桥接：axios 请求被拒绝（fail-closed）")
+    },
 ) {
     private val quickJs: QuickJs = QuickJs.create(Dispatchers.Default)
     private val lifecycleMutex = Mutex()
@@ -58,6 +66,7 @@ class MusicFreeSandboxSession(
     private val REQUIRE_BINDING get() = requireBindingName
     private val delayBindingName = "__mfDelay_${providerId.replace(Regex("[^A-Za-z0-9_]"), "_")}_${hashCode().toString(16)}"
     private val cancelTimerBindingName = "__mfCancelTimer_${providerId.replace(Regex("[^A-Za-z0-9_]"), "_")}_${hashCode().toString(16)}"
+    private val axiosGetBindingName = "__mfAxiosGet_${providerId.replace(Regex("[^A-Za-z0-9_]"), "_")}_${hashCode().toString(16)}"
     private var closed = false
     private var initialized = false
 
@@ -105,7 +114,8 @@ class MusicFreeSandboxSession(
                 quickJs.evaluate<Any?>(
                     SHIM.replace("__MF_NATIVE_REQUIRE__", REQUIRE_BINDING)
                         .replace("__MF_DELAY__", delayBindingName)
-                        .replace("__MF_CANCEL_TIMER__", cancelTimerBindingName),
+                        .replace("__MF_CANCEL_TIMER__", cancelTimerBindingName)
+                        .replace("__MF_AXIOS_GET__", axiosGetBindingName),
                     "mf_sandbox_shim.js",
                 )
                 // 预载期把 require 临时换成"返回空对象"的桩：模块 A 求 exports 时若调用
@@ -123,9 +133,28 @@ class MusicFreeSandboxSession(
                 // 结果写回 globalThis 后再以普通 evaluate 读取。
                 // __mfModules 保存"函数导出模块"的真实 JS 对象（不经 JSON）；其余模块走 JSON 缓存。
                 quickJs.evaluate<Any?>("globalThis.__mfModules = {};", "mf_modules_table.js")
+                // 阶段 I5：axios 受控模块。get() 唯一出网路径是宿主 binding（内部必须走 Gateway）。
+                // 宿主返回 {status,data,headers} 的 JSON 字符串；不提供 post/put/delete/interceptors/proxy。
+                quickJs.evaluate<Any?>(
+                    "globalThis.__mfModules['axios'] = { get: function(url, config){" +
+                        "config = config || {};" +
+                        "var params = config.params ? JSON.stringify(config.params) : '';" +
+                        "var headers = config.headers ? JSON.stringify(config.headers) : '';" +
+                        "return " + axiosGetBindingName + "(String(url), params, headers).then(function(raw){" +
+                        "var resp; try { resp = JSON.parse(raw); } catch(e) { resp = {status:0,data:raw,headers:{}}; }" +
+                        "var data = resp.data; if (typeof data === 'string') { try { data = JSON.parse(data); } catch(e){} }" +
+                        "return {status: resp.status, data: data, headers: resp.headers || {}};" +
+                        "}); } };" +
+                        // TS esModuleInterop：require('axios').default.get(...) 需要 default 上有 get。
+                        // 用独立对象共享 get（不自引用，避免 JSON.stringify 循环引用）。
+                        "globalThis.__mfModules['axios'].default = { get: globalThis.__mfModules['axios'].get };",
+                    "mf_axios_module.js",
+                )
                 val cache = LinkedHashMap<String, String>()
                 val byName = LinkedHashMap<String, String>()
                 MusicFreeSandbox.ModuleRegistry.all().forEach { module ->
+                    // 内建注入模块（axios）由沙箱直接构造，跳过预载以免覆盖注入对象。
+                    if (module.name in MusicFreeSandbox.injectedModules) return@forEach
                     if (module.source.encodeToByteArray().size > limits.maxModuleBytes) return@forEach
                     if (module.allowFunctionExports) {
                         // 真实对象通道：module.exports 含函数，直接挂到 JS 侧模块表。
@@ -222,6 +251,13 @@ class MusicFreeSandboxSession(
             val signal = timerMutex.withLock { timerSignals.remove(id) }
             signal?.cancel()
             if (signal != null) "cancelled" else "none"
+        }
+        // I5：axios 唯一出网 binding，宿主实现必须走 ProviderNetworkGateway。
+        quickJs.asyncFunction<String>(axiosGetBindingName) { args ->
+            val url = args.getOrNull(0)?.toString().orEmpty()
+            val paramsJson = args.getOrNull(1)?.toString().orEmpty()
+            val headersJson = args.getOrNull(2)?.toString().orEmpty()
+            networkBridge(url, paramsJson, headersJson)
         }
     }
 
