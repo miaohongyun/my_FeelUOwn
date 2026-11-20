@@ -814,3 +814,44 @@ musicfree 35（26+9）全绿 0 失败；iOS Simulator / commonMain Metadata / An
 `PhaseH3DomainAuditTest`（5 项）：解析域名≠授权域名、决策 DENIED 含条款/DNS 理由、播放域名不放行、
 播放 URL 默认拒绝不放宽白名单、DNS 证据记录 Meta IP 段。musicfree 40（35+5）全绿；
 iOS Simulator / Metadata / Android 编译通过（`--rerun-tasks`）。
+
+
+---
+
+## 20. 阶段 H4：真实播放闭环验证台账（2026-11-20）
+
+> 基线：`26938e4`（H3）　分支：`work/android-community-discovery`　未碰 master、未推送。
+
+### 20.1 实现与五级分栏
+
+新增 `MusicFreePlaybackVerification.kt`：8 步状态机（搜索→身份匹配→URL解析→网络权限/域名授权→音频响应→播放器读取→解码输出→暂停/继续/Seek/切歌/取消），
+五级严格分栏 `REAL_SEARCH / REAL_TRACK_IDENTITY_VERIFIED / REAL_URL_RESOLVE / REAL_AUDIO_RESPONSE / REAL_PLAYBACK`；
+任一步失败即停，后续 NOT_RUN 并记录原因；`PlaybackVerificationReport.realPlaybackAchieved/haltedAtIndex` 供 UI/报告读取。
+
+### 20.2 当前 Audiomack 闭环结论：第 4 步即停
+
+| 步骤 | 状态 | 依据 |
+| --- | --- | --- |
+| 1 真实搜索 | PASSED | G3 真实 OAuth 搜索 n=8 |
+| 2 身份匹配 | PASSED | G3 搜索首条 id=10921920 == 解析 id，MATCH |
+| 3 URL 解析 | PASSED | G3 music/play/10921920 → signedUrl(https) |
+| 4 网络权限/域名授权 | **FAILED** | H3 拒绝 music.audiomack.com（证据不足/条款未明确），不放宽白名单 |
+| 5 音频响应（经授权闭环） | NOT_RUN | 第4步未通过（G3 的 206 是独立只读探测，不构成经授权闭环的音频响应） |
+| 6 播放器读取 | NOT_RUN | 未到播放阶段 |
+| 7 实际解码输出（REAL_PLAYBACK） | **NOT_RUN** | 需用户明确操作 + 有权内容 + 域名授权；HTTP206/Mock 解码不冒充 |
+| 8 播放控制 | NOT_RUN | 播放未启动 |
+
+达成等级：REAL_SEARCH / REAL_TRACK_IDENTITY_VERIFIED / REAL_URL_RESOLVE；
+未达成：REAL_AUDIO_RESPONSE、REAL_PLAYBACK。`realPlaybackAchieved=false`，`haltedAtIndex=4`。
+
+### 20.3 诚实边界
+
+- 本阶段**没有真实播放器、没有解码输出、没有声音**，不把 G3 的 HTTP 206 或任何 Mock 解码写成真实播放。
+- 即使未来播放域名获授权，`buildReport` 在 `realPlaybackDone=false` 时仍停在播放步、REAL_PLAYBACK 不达成——需用户明确控制下的真实播放验证。
+- 状态机是验证台账/门禁，不是播放器实现；真正的跨平台播放器属应用主链路，此处不触碰。
+
+### 20.4 测试与回归
+
+`PhaseH4PlaybackVerificationTest`（7 项）：8 步记录、第4步停、后续 NOT_RUN、206 不冒充真实播放、
+五级区分、域名授权后仍须用户操作、早失败停链。musicfree 47（40+7）全绿 0 失败；
+iOS Simulator / Metadata / Android 编译通过（`--rerun-tasks`）。

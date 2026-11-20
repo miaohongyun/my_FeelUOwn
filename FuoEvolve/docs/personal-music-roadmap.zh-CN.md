@@ -1229,3 +1229,8 @@ H0 审计结论（详见 `docs/community-source-audit.zh-CN.md` §16，全部带
 ## §24 阶段 H3：Audiomack 播放域名审查（2026-11-20）
 
 基线 `6714475`（H2），未碰 master、未推送。取证：G3实测 signedUrl=music.audiomack.com(206 audio/mp4)/API host=api.audiomack.com(200)；DNS两域名均落Meta/Facebook IP段(2a03:2880::/32等)但主机名不同；服务条款禁止修改服务/非搜索抓取/分发未授权副本，API文档未授权匿名签名URL供第三方App消费；**本轮本地代理失效无法新增每跳重定向/URL有效期取证，如实记未复核**。决策：playbackHostDecision=DENIED(music.audiomack.com)，mayAllowPlaybackHost恒false，网关层拒绝该域名；不放宽白名单。后续需官方书面授权+代理恢复复核重定向/有效期+地区确认+人工审核精确域名+SHA绑定。PhaseH3DomainAuditTest 5项；musicfree40全绿；三端编译通过。详见 audit §19。
+
+
+## §25 阶段 H4：真实播放闭环验证台账（2026-11-20）
+
+基线 `26938e4`（H3），未碰 master、未推送。新增 MusicFreePlaybackVerification.kt：8步状态机+五级分栏(REAL_SEARCH/TRACK_IDENTITY_VERIFIED/URL_RESOLVE/AUDIO_RESPONSE/PLAYBACK),任一步失败即停后续NOT_RUN。当前Audiomack闭环: 第4步(网络权限/域名授权)因H3拒绝music.audiomack.com而FAILED, 音频响应/播放器读取/真实解码输出/播放控制全NOT_RUN; realPlaybackAchieved=false; G3的206为独立只读探测不构成经授权闭环音频响应。HTTP206/Mock解码不冒充真实播放; 即使域名未来授权仍需用户明确操作。PhaseH4PlaybackVerificationTest 7项; musicfree47全绿; 三端编译通过。详见 audit §20。

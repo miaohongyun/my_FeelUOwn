@@ -89,7 +89,7 @@ class MusicFreeSandboxSession(
                         asModule = true,
                     )
                     cache[module.sha256] = exportsJson
-                    byName[module.name.toString()] = exportsJson
+                    byName[module.name] = exportsJson
                 }
                 moduleCache = cache
                 modulesByName = byName
