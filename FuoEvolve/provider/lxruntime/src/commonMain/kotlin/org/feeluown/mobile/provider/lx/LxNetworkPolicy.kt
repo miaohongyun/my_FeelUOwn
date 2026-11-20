@@ -25,9 +25,27 @@ internal object LxNetworkPolicy {
         if (allowedHosts.isEmpty()) {
             return "脚本未声明 allowedHosts，拒绝全部网络请求"
         }
-        val url = rawUrl.trim()
-        val lower = url.lowercase()
-        if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
+        val dangerous = dangerousTargetReason(rawUrl, httpsOnly = false)
+        if (dangerous != null) return dangerous
+        val lower = rawUrl.trim().lowercase()
+        val host = extractHost(lower)!!
+        val normalized = normalizeIpv4(host)
+        if (!hostAllowed(host, normalized, allowedHosts)) {
+            return "域名未在目录声明：$host"
+        }
+        return null
+    }
+
+    /**
+     * 纯 SSRF 危险目标检测（不涉及白名单），供受控下载器等场景复用。
+     * [httpsOnly] 为 true 时连明文 http 一起拒绝——社区脚本下载默认只走 HTTPS。
+     * 返回 null 表示目标地址安全；非 null 为拒绝原因。
+     */
+    fun dangerousTargetReason(rawUrl: String, httpsOnly: Boolean): String? {
+        val lower = rawUrl.trim().lowercase()
+        if (httpsOnly) {
+            if (!lower.startsWith("https://")) return "仅允许 HTTPS 协议"
+        } else if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
             return "仅允许 http/https 协议"
         }
         val host = extractHost(lower) ?: return "URL 缺少主机名"
@@ -39,9 +57,6 @@ internal object LxNetworkPolicy {
         // 必须先归一化再判私网，否则浏览器/内核会解析成回环地址而绕过这里的字符串比较。
         val normalized = normalizeIpv4(host)
         if (normalized != null && isUnsafeIpv4(normalized)) return "禁止访问私网/回环/保留地址"
-        if (!hostAllowed(host, normalized, allowedHosts)) {
-            return "域名未在目录声明：$host"
-        }
         return null
     }
 
@@ -160,4 +175,13 @@ internal object LxNetworkPolicy {
             else -> false
         }
     }
+}
+
+/**
+ * [LxNetworkPolicy] 危险目标检测的公开门面，供受控下载器等同仓模块复用。
+ * 只暴露纯 SSRF 判定，不改变 LX 脚本运行时的白名单语义。
+ */
+object LxUrlSafety {
+    fun dangerousTargetReason(rawUrl: String, httpsOnly: Boolean): String? =
+        LxNetworkPolicy.dangerousTargetReason(rawUrl, httpsOnly = httpsOnly)
 }

@@ -93,6 +93,8 @@ data class DiscoveredCandidate(
      */
     val aliasIds: List<String> = emptyList(),
     val sha256: String? = null,
+    /** true = 隔离区脚本的哈希未经来源确认（候选无预期 SHA256 时下载，仅作参考不可信）。 */
+    val hashUnverified: Boolean = false,
     val sizeBytes: Long? = null,
     val version: String? = null,
     val discoveredAtMillis: Long = 0,

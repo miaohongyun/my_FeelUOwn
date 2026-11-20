@@ -52,6 +52,10 @@ class FuoEvolveApplication : Application() {
     internal val communityDiscoveryController: org.feeluown.mobile.feature.community.RealCommunityDiscoveryController
         get() = container().communityDiscoveryController
 
+    /** 后台发现 Worker 直接调用其 suspend refresh()，与 UI 共用同一实例。 */
+    internal val communityDiscoveryRepository: org.feeluown.mobile.sourceupdate.CommunityDiscoveryRepository
+        get() = container().communityDiscoveryRepository
+
     internal val appUiGraph: AppUiGraph
         get() = container().appUiGraph
 

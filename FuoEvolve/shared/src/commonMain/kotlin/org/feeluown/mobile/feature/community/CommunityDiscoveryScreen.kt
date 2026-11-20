@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
@@ -82,6 +84,15 @@ fun CommunityDiscoveryScreen(
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
+            // 错误分类用显式提示条展示，避免 Snackbar 一闪而过看不清原因。
+            state.errorKind?.let { kind ->
+                Text(
+                    "⚠ ${CommunityDiscoveryPresentation.errorLabel(kind)}",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
             Text(
                 "以下为社区清单发现的候选，仅供审查；不会自动安装或播放。\n" +
                     "所有音质/可用性结论需真实验证后才成立。",
@@ -107,11 +118,16 @@ fun CommunityDiscoveryScreen(
         state.candidates.firstOrNull { it.id == id }?.let { selected ->
             CandidateDetailDialog(
                 candidate = selected,
+                isDownloading = state.isDownloading,
+                isBusy = state.isBusy,
+                deleteConfirmId = state.deleteConfirmId,
                 onDismiss = { controller.select(null) },
+                onDownload = { url -> controller.downloadToQuarantine(id, url) },
                 onQuarantine = { reason -> controller.quarantine(id, reason) },
                 onReject = { reason -> controller.reject(id, reason) },
                 onReopen = { controller.reopen(id) },
-                onDelete = { controller.delete(id) },
+                onRequestDelete = { controller.requestDelete(if (state.deleteConfirmId == id) null else id) },
+                onCancelDelete = { controller.requestDelete(null) },
             )
         }
     }
@@ -178,17 +194,26 @@ internal fun formatCandidateTime(millis: Long): String {
 @Composable
 fun CandidateDetailDialog(
     candidate: DiscoveredCandidate,
+    isDownloading: Boolean,
+    isBusy: Boolean,
+    deleteConfirmId: String?,
     onDismiss: () -> Unit,
+    onDownload: (String) -> Unit,
     onQuarantine: (String) -> Unit,
     onReject: (String) -> Unit,
     onReopen: () -> Unit,
-    onDelete: () -> Unit,
+    onRequestDelete: () -> Unit,
+    onCancelDelete: () -> Unit,
 ) {
+    val scroll = rememberScrollState()
+    val busy = isDownloading || isBusy
+    val deletePending = deleteConfirmId == candidate.id
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("候选详情：${candidate.name}") },
         text = {
-            Column(Modifier.fillMaxWidth()) {
+            // 详情内容可纵向滚动，窄屏下不会溢出/遮挡。
+            Column(Modifier.fillMaxWidth().verticalScroll(scroll)) {
                 DetailLine("ID", candidate.id)
                 DetailLine("审核状态", CommunityDiscoveryPresentation.reviewLabel(candidate))
                 DetailLine("验证等级", CommunityDiscoveryPresentation.verificationLabel(candidate))
@@ -197,6 +222,7 @@ fun CandidateDetailDialog(
                 DetailLine("版本", candidate.version ?: "未知")
                 DetailLine("来源仓库", candidate.sourceRepo.ifBlank { "未知" })
                 DetailLine("SHA256", candidate.sha256 ?: "未记录")
+                DetailLine("哈希来源", if (candidate.hashUnverified) "未经来源确认（不可信）" else "已按来源核验或未下载")
                 DetailLine("文件大小", candidate.sizeBytes?.let { "$it 字节" } ?: "未知")
                 DetailLine("发现时间", formatCandidateTime(candidate.discoveredAtMillis))
                 DetailLine("最近扫描", formatCandidateTime(candidate.scannedAtMillis))
@@ -216,19 +242,59 @@ fun CandidateDetailDialog(
                 Spacer(Modifier.height(8.dp))
                 Text("镜像 ID：${candidate.aliasIds.joinToString(", ").ifBlank { "无" }}",
                     style = MaterialTheme.typography.bodySmall)
+                // 隔离区下载：只用候选登记的地址，标记为手动导入候选，绝不自动安装/加载。
+                val urls = (listOf(candidate.rawUrl) + candidate.mirrorUrls).filter { it.isNotBlank() }.distinct()
+                if (urls.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text("下载脚本到隔离区（手动导入候选，仅 HTTPS；不自动安装/播放）：",
+                        style = MaterialTheme.typography.labelMedium)
+                    urls.forEach { url ->
+                        OutlinedButton(
+                            onClick = { onDownload(url) },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(if (isDownloading) "下载中…" else "下载：${url.toDisplayName()}",
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
         dismissButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                OutlinedButton(onClick = { onReopen() }) { Text("重新审核") }
-                OutlinedButton(onClick = { onQuarantine("人工隔离") }) { Text("隔离") }
-                OutlinedButton(onClick = { onReject("人工拒绝") }) { Text("拒绝") }
-                TextButton(onClick = onDelete) { Text("删除") }
+            // 审核操作纵向排列，窄屏不溢出；期间禁用防重复提交。
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                OutlinedButton(onClick = { onReopen() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text("重新审核")
+                }
+                OutlinedButton(onClick = { onQuarantine("人工隔离") }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text("标记隔离")
+                }
+                OutlinedButton(onClick = { onReject("人工拒绝") }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text("拒绝候选")
+                }
+                if (deletePending) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Button(onClick = onRequestDelete, enabled = !busy, modifier = Modifier.weight(1f)) {
+                            Text("确认删除")
+                        }
+                        OutlinedButton(onClick = onCancelDelete, modifier = Modifier.weight(1f)) {
+                            Text("取消")
+                        }
+                    }
+                } else {
+                    TextButton(onClick = onRequestDelete, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                        Text("删除候选")
+                    }
+                }
             }
         },
     )
 }
+
+/** 从 URL 取简短显示名（仅用于按钮文案，不影响实际下载地址）。 */
+private fun String.toDisplayName(): String = substringAfterLast('/').ifBlank { take(24) }
 
 @Composable
 private fun DetailLine(label: String, value: String) {

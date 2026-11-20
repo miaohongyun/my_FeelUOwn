@@ -70,11 +70,19 @@ internal class AndroidAppContainer(
         )
     }
 
-    /** 社区音源发现与审核中心（阶段 D）：与受控目录 sourceUpdateHost 严格分开。 */
+    /**
+     * 社区音源发现与审核中心（阶段 D）：与受控目录 sourceUpdateHost 严格分开。
+     * Repository 只构造一次，UI Controller 与后台 Worker 共用同一实例与同一持久化状态。
+     */
+    val communityDiscoveryRepository by lazy {
+        CommunityDiscoveryFactory.createRepository()
+    }
+
     val communityDiscoveryController: RealCommunityDiscoveryController by lazy {
         RealCommunityDiscoveryController(
-            repository = CommunityDiscoveryFactory.createRepository(),
+            repository = communityDiscoveryRepository,
             scope = appScope,
+            downloader = CommunityDiscoveryFactory.createDownloader(),
         )
     }
 

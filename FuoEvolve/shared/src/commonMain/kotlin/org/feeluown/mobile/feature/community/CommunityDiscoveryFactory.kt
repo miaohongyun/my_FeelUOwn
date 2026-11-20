@@ -31,4 +31,8 @@ object CommunityDiscoveryFactory {
         val discovery = CommunityCatalogDiscovery(fetcher, store)
         return CommunityDiscoveryRepository(discovery, store, COMMUNITY_LIST_URLS)
     }
+
+    /** 隔离区脚本下载器：同样禁重定向，HTTPS-only / SSRF / 大小上限由下载器自身保证。 */
+    fun createDownloader(httpClient: HttpClient = createSharedProviderHttpClient()): CommunityScriptDownloader =
+        CommunityScriptDownloader(httpClient.config { followRedirects = false })
 }

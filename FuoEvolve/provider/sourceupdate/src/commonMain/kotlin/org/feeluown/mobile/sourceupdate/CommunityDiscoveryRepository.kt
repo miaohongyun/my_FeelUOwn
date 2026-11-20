@@ -1,28 +1,39 @@
 package org.feeluown.mobile.sourceupdate
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.feeluown.mobile.sourceupdate.crypto.Sha256
 
 /**
- * 社区音源「发现 + 审核 + 隔离区管理」的应用层编排（阶段 D）。
+ * 社区音源「发现 + 审核 + 隔离区管理」的应用层编排（阶段 D / 修复版）。
  *
- * 这是 [CommunityCatalogDiscovery] 框架与 UI/后台调度之间的唯一入口：
- * - D2 发现刷新：调用 discovery.discover()，URL 只用 [communityListUrls] 里硬编码的可信地址；
- * - D3 候选查询与人工审核动作（隔离/拒绝/恢复），写回候选 store；
- * - D4 隔离区管理：受控下载脚本文本 → SHA256 核验 → scanQuarantined；哈希不符整条拒绝；
+ * 这是 [CommunityCatalogDiscovery] 框架与 UI/后台 Worker 之间的唯一入口：
+ * - 发现刷新：调用 discovery.discover()，URL 只用 [communityListUrls] 里硬编码的可信地址；
+ * - 人工审核（隔离/拒绝/重新审核，写 rejectReason）；
+ * - 隔离区：脚本正文由受控下载器在**锁外**取得，哈希核验后写隔离区并静态扫描；
  * - 删除候选只删 community/ 子树，绝不碰正式脚本目录。
  *
- * 安全边界（与框架一致，不可突破）：
- * - 绝不执行脚本、绝不安装、绝不自动批准、绝不扩大 SSRF 白名单、绝不覆盖受控目录；
- * - 审核动作只能由 UI 显式调用（人工），本类不会自行把任何候选改成 APPROVED；
- * - 隔离区脚本只写文本到 [CommunityCatalogDiscovery.QUARANTINE_PREFIX]，不交给 LX Runtime。
+ * 并发一致性（修复 P2-1）：所有候选库的「读-改-写」都经过同一个 [mutex]，避免后台发现、
+ * UI 手动刷新、人工审核、扫描、删除互相用旧快照覆盖。人工决定（REJECTED/QUARANTINED）
+ * 优先级高于普通发现结果——discover 的 SameId 分支本身保留 reviewState，且串行化后不会
+ * 再出现「人工审核写入后被并发的旧发现快照覆盖」。
+ *
+ * 安全边界（不可突破）：
+ * - 绝不执行脚本、绝不安装、绝不自动批准（[updateStateLocked] 有 check 断言）、
+ *   绝不扩大 SSRF 白名单、绝不覆盖受控目录；
+ * - 隔离区脚本只写文本到 [CommunityCatalogDiscovery.QUARANTINE_PREFIX]，不交给 LX Runtime；
+ * - 协程取消（[CancellationException]）不在任何锁内被吞掉。
  */
 class CommunityDiscoveryRepository(
     private val discovery: CommunityCatalogDiscovery,
     private val store: SourceFileStore,
-    /** 社区清单地址：必须硬编码为可信来源（raw.githubusercontent / 已知代理），不接受 UI/远端注入。 */
+    /** 社区清单地址：必须硬编码为可信来源，不接受 UI/远端注入。 */
     private val communityListUrls: List<String>,
 ) {
-    /** 一次刷新的结果摘要，供 UI 展示。 */
+    private val mutex = Mutex()
+
+    /** 一次刷新的结果摘要，供 UI 与 Worker 共用。 */
     data class RefreshResult(
         val ok: Boolean,
         val candidateCount: Int,
@@ -35,15 +46,38 @@ class CommunityDiscoveryRepository(
         val parseError: String?,
     )
 
-    suspend fun candidates(): List<DiscoveredCandidate> = discovery.loadStore().candidates
+    /** 判断刷新失败是否可重试（Worker 据此决定 retry / failure）。清单自身解析失败属配置/数据错误。 */
+    fun isRetryableRefreshFailure(result: RefreshResult): Boolean =
+        !result.ok && result.parseError == null
 
-    suspend fun candidate(id: String): DiscoveredCandidate? =
+    /** Worker 结果分类（纯函数，便于 commonTest 验证等待机制之外的结果判定）。 */
+    enum class RefreshDisposition { SUCCESS, RETRY, FAILURE }
+
+    fun workerDisposition(result: RefreshResult): RefreshDisposition = when {
+        result.ok -> RefreshDisposition.SUCCESS
+        isRetryableRefreshFailure(result) -> RefreshDisposition.RETRY
+        else -> RefreshDisposition.FAILURE
+    }
+
+    suspend fun candidates(): List<DiscoveredCandidate> = mutex.withLock {
+        discovery.loadStore().candidates
+    }
+
+    suspend fun candidate(id: String): DiscoveredCandidate? = mutex.withLock {
         discovery.loadStore().candidates.firstOrNull { it.id.equals(id, ignoreCase = true) }
+    }
 
-    /** 主动刷新 / 后台刷新都走这里；清单失败不清空候选（框架已保证）。 */
-    suspend fun refresh(): RefreshResult {
+    /**
+     * 真正的挂起刷新：Worker 与 UI 共用。
+     *
+     * 说明：清单的网络读取发生在 discovery.discover() 内部，而该方法把「读清单 → 合并 →
+     * 写 store」作为一个整体封装，无法在不动框架的前提下拆开。为保证合并结果与人工审核互斥，
+     * 这里把整个 discover 放进同一把锁——清单请求有 15s 超时上限，且刷新本身是低频操作（24h）；
+     * 真正的大 payload（脚本下载）仍在锁外执行（见 [downloadAndScan]）。
+     */
+    suspend fun refresh(): RefreshResult = mutex.withLock {
         val report = discovery.discover(communityListUrls)
-        return RefreshResult(
+        RefreshResult(
             ok = report.ok,
             candidateCount = discovery.loadStore().candidates.size,
             added = report.added,
@@ -56,76 +90,61 @@ class CommunityDiscoveryRepository(
         )
     }
 
-    /** 人工审核动作：隔离。绝不写 APPROVED。 */
-    suspend fun quarantine(id: String, reason: String): Boolean = updateState(id) { old ->
+    suspend fun quarantine(id: String, reason: String): Boolean = updateStateLocked(id) { old ->
         old.copy(
             reviewState = CandidateReviewState.QUARANTINED.wireName,
             rejectReason = reason.ifBlank { old.rejectReason },
         )
     }
 
-    /** 人工审核动作：标记拒绝。 */
-    suspend fun reject(id: String, reason: String): Boolean = updateState(id) { old ->
+    suspend fun reject(id: String, reason: String): Boolean = updateStateLocked(id) { old ->
         old.copy(
             reviewState = CandidateReviewState.REJECTED.wireName,
             rejectReason = reason.ifBlank { "人工标记拒绝" },
         )
     }
 
-    /**
-     * 人工审核动作：恢复到待审。
-     * 这是 UI 显式的人工操作，允许把 QUARANTINED/REJECTED/STALE 改回 DISCOVERED；
-     * 但本类任何路径都不会把候选改成 APPROVED——批准永远是受控目录签发流程的事。
-     */
-    suspend fun reopenForReview(id: String): Boolean = updateState(id) { old ->
+    /** UI 显式的人工重审；允许 STALE/QUARANTINED/REJECTED → DISCOVERED，绝不写 APPROVED。 */
+    suspend fun reopenForReview(id: String): Boolean = updateStateLocked(id) { old ->
         old.copy(reviewState = CandidateReviewState.DISCOVERED.wireName)
     }
 
-    private suspend fun updateState(
+    private suspend fun updateStateLocked(
         id: String,
         transform: (DiscoveredCandidate) -> DiscoveredCandidate,
-    ): Boolean {
+    ): Boolean = mutex.withLock {
         val snapshot = discovery.loadStore()
         val index = snapshot.candidates.indexOfFirst { it.id.equals(id, ignoreCase = true) }
-        if (index < 0) return false
+        if (index < 0) return@withLock false
         val updated = transform(snapshot.candidates[index])
         check(updated.review != CandidateReviewState.APPROVED) { "社区发现流程禁止写入 APPROVED" }
         val next = snapshot.candidates.toMutableList().also { it[index] = updated }
-        store.writeText(
-            CommunityCatalogDiscovery.CANDIDATE_STORE_PATH,
-            serializeStore(snapshot.copy(updatedAtMillis = sourceUpdateNowMillis(), candidates = next)),
-        )
-        return true
+        saveStoreLocked(snapshot, next)
+        true
     }
 
-    /**
-     * 删除候选及其隔离脚本。存储键强制在 community/ 子树内——
-     * 正式脚本位于 sources/ 等其它前缀，绝不会被这里的删除碰到。
-     */
-    suspend fun deleteCandidate(id: String): Boolean {
+    /** 删除候选及其隔离脚本；只触 community/ 子树，不碰正式目录。 */
+    suspend fun deleteCandidate(id: String): Boolean = mutex.withLock {
         val snapshot = discovery.loadStore()
-        val target = snapshot.candidates.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: return false
+        val target = snapshot.candidates.firstOrNull { it.id.equals(id, ignoreCase = true) }
+            ?: return@withLock false
         val next = snapshot.candidates.filterNot { it.id.equals(id, ignoreCase = true) }
-        store.writeText(
-            CommunityCatalogDiscovery.CANDIDATE_STORE_PATH,
-            serializeStore(snapshot.copy(updatedAtMillis = sourceUpdateNowMillis(), candidates = next)),
-        )
-        // 只删该候选的隔离脚本，路径前缀固定为 community/quarantine/。
+        saveStoreLocked(snapshot, next)
         val scriptPath = quarantinePath(target.id)
         if (store.exists(scriptPath)) store.delete(scriptPath)
-        return true
+        true
     }
 
-    suspend fun quarantinedScriptText(id: String): String? =
+    suspend fun quarantinedScriptText(id: String): String? = mutex.withLock {
         store.readText(quarantinePath(id))
+    }
 
-    /** 隔离脚本路径：固定 community/quarantine/<id>.js，不与正式脚本目录混用。 */
     fun quarantinePath(id: String): String {
         val safe = id.filter { it.isLetterOrDigit() || it == '-' || it == '_' }.take(120)
         return "${CommunityCatalogDiscovery.QUARANTINE_PREFIX}$safe.js"
     }
 
-    /** 受控下载结果。 */
+    /** 下载 + 隔离 + 扫描的结果。 */
     sealed interface QuarantineDownloadResult {
         data object NotFound : QuarantineDownloadResult
         data class Sha256Mismatch(val expected: String, val actual: String) : QuarantineDownloadResult
@@ -134,33 +153,112 @@ class CommunityDiscoveryRepository(
     }
 
     /**
-     * D4 核心：把已下载的脚本文本落进隔离区并核验哈希后扫描。
-     * 脚本正文由调用方（受控下载通道）提供，本类不发起任意 URL 下载、不执行脚本。
-     * 哈希不符时：不写隔离脚本、不更新候选（整条拒绝）。
+     * 完整下载流程（P1-2）：网络下载在锁外，拿到文本后调 [commitDownloadLocked]。
+     *
+     * @param downloader 受控下载器（HTTPS/SSRF/大小/超时/禁重定向由它保证）。
+     * @param url 必须是候选记录里已登记的 URL（rawUrl 或 mirrorUrls），由调用方约束；
+     *   本方法不信任任意 URL，会校验它确实属于该候选。
+     */
+    suspend fun downloadAndScan(
+        id: String,
+        url: String,
+        downloader: suspend (String) -> CommunityScriptDownloadOutcome,
+    ): QuarantineDownloadResult {
+        // 锁外先读取候选的登记 URL 与预期哈希（快照仅用于下载决策，提交时会重读）。
+        val snapshotCandidate = candidate(id) ?: return QuarantineDownloadResult.NotFound
+        val allowedUrls = (listOf(snapshotCandidate.rawUrl) + snapshotCandidate.mirrorUrls)
+            .map { it.trim().trimEnd('/') }.toSet()
+        if (url.trim().trimEnd('/') !in allowedUrls) {
+            return QuarantineDownloadResult.Failed("URL 不在候选登记的地址中，拒绝下载")
+        }
+        val outcome = try {
+            downloader(url)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return QuarantineDownloadResult.Failed("下载失败: ${e.message.orEmpty()}")
+        }
+        return when (outcome) {
+            is CommunityScriptDownloadOutcome.Failed -> QuarantineDownloadResult.Failed(outcome.reason)
+            is CommunityScriptDownloadOutcome.Downloaded ->
+                commitDownloadLocked(id, outcome.text, snapshotCandidate.sha256, outcome.version)
+        }
+    }
+
+    /**
+     * 已有脚本文本直接核验 + 扫描（供手动导入/测试）。锁内完成核验、写隔离区、扫描、回写，
+     * 全程使用最新候选快照，避免旧快照覆盖并发的人工审核结果。
      */
     suspend fun scanDownloadedScript(
         id: String,
         scriptText: String,
         expectedSha256: String,
         version: String? = null,
-    ): QuarantineDownloadResult {
-        val candidate = candidate(id) ?: return QuarantineDownloadResult.NotFound
+    ): QuarantineDownloadResult = commitDownloadLocked(id, scriptText, expectedSha256.takeIf { it.isNotBlank() }, version)
+
+    /** 锁内提交：重读最新状态 → 哈希核验 → 写隔离脚本 → 扫描 → 落回候选。 */
+    private suspend fun commitDownloadLocked(
+        id: String,
+        scriptText: String,
+        expectedSha256: String?,
+        version: String?,
+    ): QuarantineDownloadResult = mutex.withLock {
+        val snapshot = discovery.loadStore()
+        val index = snapshot.candidates.indexOfFirst { it.id.equals(id, ignoreCase = true) }
+        if (index < 0) return@withLock QuarantineDownloadResult.NotFound
+        val current = snapshot.candidates[index]
         val actual = Sha256.hex(scriptText.encodeToByteArray())
-        if (!actual.equals(expectedSha256.trim(), ignoreCase = true)) {
-            return QuarantineDownloadResult.Sha256Mismatch(expectedSha256, actual)
+        val hashOk = expectedSha256?.let { actual.equals(it.trim(), ignoreCase = true) }
+
+        if (hashOk == false) {
+            // 有预期值且不符：整条拒绝，不写隔离脚本、不改候选、不留半成品。
+            return@withLock QuarantineDownloadResult.Sha256Mismatch(expectedSha256!!, actual)
         }
-        // 先写隔离区（独立前缀），再扫描；扫描失败也不影响正式目录。
-        store.writeText(quarantinePath(id), scriptText)
-        return when (val outcome = discovery.scanQuarantined(id, scriptText, expectedSha256, version)) {
+        // 无预期值：允许写入但标记"哈希未经来源确认"。
+        val path = quarantinePath(id)
+        store.writeText(path, scriptText)
+        val outcome = discovery.scanQuarantined(
+            id, scriptText, expectedSha256 ?: actual, version ?: current.version,
+        )
+        when (outcome) {
             is CommunityCatalogDiscovery.ScanOutcome.NotFound -> QuarantineDownloadResult.NotFound
-            is CommunityCatalogDiscovery.ScanOutcome.Sha256Mismatch ->
-                QuarantineDownloadResult.Sha256Mismatch(outcome.expected, outcome.actual)
-            is CommunityCatalogDiscovery.ScanOutcome.Scanned -> QuarantineDownloadResult.Scanned(outcome.candidate)
+            is CommunityCatalogDiscovery.ScanOutcome.Sha256Mismatch -> QuarantineDownloadResult.Sha256Mismatch(
+                outcome.expected, outcome.actual,
+            )
+            is CommunityCatalogDiscovery.ScanOutcome.Scanned -> {
+                // scanQuarantined 内部又读了一次 store 并回写；这里在其结果上补 hashUnverified 标记，
+                // 基于最新 store 再写一次，避免丢标记。
+                val after = discovery.loadStore()
+                val idx2 = after.candidates.indexOfFirst { it.id.equals(id, ignoreCase = true) }
+                if (idx2 >= 0) {
+                    val marked = after.candidates[idx2].copy(
+                        sha256 = actual,
+                        hashUnverified = hashOk == null,
+                        sizeBytes = scriptText.encodeToByteArray().size.toLong(),
+                    )
+                    saveStoreLocked(after, after.candidates.toMutableList().also { it[idx2] = marked })
+                    QuarantineDownloadResult.Scanned(marked)
+                } else {
+                    QuarantineDownloadResult.Scanned(outcome.candidate)
+                }
+            }
         }
     }
 
-    private fun serializeStore(snapshot: CandidateStore): String =
-        CommunityDiscoverySerialization.encode(snapshot)
+    private suspend fun saveStoreLocked(snapshot: CandidateStore, next: List<DiscoveredCandidate>) {
+        store.writeText(
+            CommunityCatalogDiscovery.CANDIDATE_STORE_PATH,
+            CommunityDiscoverySerialization.encode(
+                snapshot.copy(updatedAtMillis = sourceUpdateNowMillis(), candidates = next),
+            ),
+        )
+    }
+}
+
+/** 下载器与 Repository 之间的中性结果类型（解耦 UI 层下载器实现）。 */
+sealed interface CommunityScriptDownloadOutcome {
+    data class Downloaded(val text: String, val version: String? = null) : CommunityScriptDownloadOutcome
+    data class Failed(val reason: String) : CommunityScriptDownloadOutcome
 }
 
 /** 候选 store 的 JSON 编解码（集中一处，避免 Repository 和框架各写一份配置不一致）。 */

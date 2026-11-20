@@ -1044,3 +1044,32 @@ Fish/Flower 离线解混淆；非常刀/玉宁熙域名逆向与授权确认；�
 `scanScript` API 已就绪但页面无下载入口，网络下载由后续任务按受控通道补齐；真机 Android 页面/Runtime
 加载需设备；人工审核记录持久化在候选 store（rejectReason），未做独立审计日志。
 不改 master、正式目录、公钥、验签；未自动批准/安装、未扩白名单、未绕付费、未把模拟写成真实。
+
+## §14 阶段 D 修复：后台等待 + 隔离下载闭环 + 并发保护（work/android-community-discovery）
+
+**P1-1 Worker 等待**：`AndroidCommunityDiscoveryWorker.doWork()` 直接 `await` 同一 Repository 实例的
+`suspend refresh()`，发现/解析/保存全部完成才返回；网络失败 `Result.retry()`、清单结构非法/空
+`Result.failure()`（不无限重试）、`CancellationException` 重抛。UI 手动刷新与 Worker 共用
+`AndroidAppContainer.communityDiscoveryRepository` 单一实例；24h/CONNECTED/KEEP 保留。
+结果分类抽成纯函数 `workerDisposition()` 便于 commonTest 验证。
+
+**P1-2 隔离下载闭环**：新增 `CommunityScriptDownloader`（shared/feature/community）——HTTPS-only、
+SSRF 危险目标检测（复用 `LxUrlSafety` 公开门面，私网/IPv6/metadata/裸IP 拒绝）、禁重定向（Factory
+配 `followRedirects=false`，3xx 一律拒）、`readBodyBounded` 1MiB 预判+流式双保险、15s 超时、
+异常分类。URL 只允许候选已登记的 rawUrl/mirrorUrls（不支持手动任意 URL，比任务书更严格），
+提交时校验 URL 归属。下载在锁外 → 实际 SHA256 核验（不符整条拒绝、不留半成品）→ 写
+`community/quarantine/` → 自动静态扫描 → 报告展示（实际哈希/大小/版本/扫描时间/命中规则/风险）。
+无预期哈希时标 `hashUnverified=true`（UI 提示"未经来源确认"）。绝不自动加载 LX/安装。
+
+**P2-1 并发保护**：Repository 用单一 `Mutex` 串行化所有候选库读改写（发现合并/审核/重审/扫描提交/
+删除）；网络下载在锁外，提交时重读最新候选再锁内写；人工 REJECTED/QUARANTINED 优先于并发发现；
+取消信号不被吞。5 项屏障竞态测试（CompletableDeferred，非随机延时）。
+
+**P2-2 窄屏 UI**：详情改 `verticalScroll` 可滚动；审核操作从单行 Row 改纵向 Column（下载/重新扫描/
+隔离/拒绝/删除各自整行，不溢出）；删除二次确认（点两次才删）；下载/审核/扫描期间按钮禁用防重复；
+错误按 NETWORK/HASH_MISMATCH/STATIC_BLOCK/STORAGE/SECURITY_REJECTED 分类提示。
+
+**验证**：sourceupdate 121 / lxruntime 80 / shared 373 项 0 失败；三端编译
+（Metadata/Android/iOS Simulator/Desktop）+ androidApp + desktopRuntime + lxruntime iOS 全绿。
+新增测试：并发 5、下载器 7、Worker 决策 1、UI 逻辑 3。无 Compose UI 测试依赖，未引入新依赖；
+窄屏布局由三端编译保证，UI 状态逻辑用 Controller 单测验证。master/正式目录/公钥/验签未改。

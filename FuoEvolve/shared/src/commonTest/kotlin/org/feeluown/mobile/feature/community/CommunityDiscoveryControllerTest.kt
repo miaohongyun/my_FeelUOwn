@@ -99,4 +99,51 @@ class CommunityDiscoveryControllerTest {
         assertTrue(CommunityDiscoveryPresentation.verificationLabel(candidate).contains("非真实"))
         assertEquals(VerificationLevel.STATIC_REVIEW.rank, 0)
     }
+
+    @Test
+    fun deleteRequiresSecondConfirmation() = runTest {
+        val (controller, _) = newController(this)
+        controller.refresh(); runCurrent()
+        controller.requestDelete("a"); runCurrent()
+        assertEquals("a", controller.uiState.value.deleteConfirmId, "第一次点击只进入确认态")
+        assertEquals(1, controller.uiState.value.candidates.size, "第一次点击不删除")
+        // 取消后不删除。
+        controller.requestDelete(null); runCurrent()
+        assertEquals(null, controller.uiState.value.deleteConfirmId)
+        assertEquals(1, controller.uiState.value.candidates.size)
+        // 两次点同一 id 才真正删除。
+        controller.requestDelete("a"); runCurrent()
+        controller.requestDelete("a"); runCurrent()
+        assertTrue(controller.uiState.value.candidates.isEmpty())
+        assertEquals(null, controller.uiState.value.deleteConfirmId)
+    }
+
+    @Test
+    fun errorClassificationDistinguishesCauses() {
+        assertEquals(
+            CommunityOperationError.HASH_MISMATCH,
+            CommunityDiscoveryPresentation.classifyError("SHA256 不匹配"),
+        )
+        assertEquals(
+            CommunityOperationError.STATIC_BLOCK,
+            CommunityDiscoveryPresentation.classifyError("命中 BLOCK 规则，已隔离"),
+        )
+        assertEquals(
+            CommunityOperationError.SECURITY_REJECTED,
+            CommunityDiscoveryPresentation.classifyError("安全策略拒绝：非 HTTPS"),
+        )
+        assertEquals(
+            CommunityOperationError.NETWORK,
+            CommunityDiscoveryPresentation.classifyError("网络超时"),
+        )
+        assertTrue(CommunityDiscoveryPresentation.errorLabel(CommunityOperationError.HASH_MISMATCH).contains("SHA256"))
+    }
+
+    @Test
+    fun hashUnverifiedFlagIsShownInPresentation() {
+        val candidate = org.feeluown.mobile.sourceupdate.DiscoveredCandidate(
+            id = "a", name = "A", rawUrl = "u", normalizedUrl = "u", repoPath = "p", hashUnverified = true,
+        )
+        assertTrue(candidate.hashUnverified, "无预期哈希下载的候选被标记，UI 据此提示不可信")
+    }
 }

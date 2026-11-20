@@ -110,6 +110,37 @@ class CommunityDiscoveryRepositoryTest {
     }
 
     @Test
+    fun workerDispositionClassifiesSuccessRetryFailure() = runTest {
+        val repo = newRepo(mapOf(listUrl to listJson(Triple("a", "A", "$base/sources/a/a.js"))))
+        val ok = repo.refresh()
+        assertEquals(
+            org.feeluown.mobile.sourceupdate.CommunityDiscoveryRepository.RefreshDisposition.SUCCESS,
+            repo.workerDisposition(ok),
+        )
+        // 网络失败但用了缓存 → ok=true → 仍算 SUCCESS（缓存可用，不该 retry 无限）。
+        val cached = org.feeluown.mobile.sourceupdate.CommunityDiscoveryRepository.RefreshResult(
+            ok = true, candidateCount = 1, added = 0, sameIdUpdated = 0, merged = 0,
+            markedStale = 0, revivedFromStale = 0, usedCachedList = true, parseError = null,
+        )
+        assertEquals(
+            org.feeluown.mobile.sourceupdate.CommunityDiscoveryRepository.RefreshDisposition.SUCCESS,
+            repo.workerDisposition(cached),
+        )
+        // 清单读取失败且无缓存 → retry。
+        val retry = cached.copy(ok = false, usedCachedList = false)
+        assertEquals(
+            org.feeluown.mobile.sourceupdate.CommunityDiscoveryRepository.RefreshDisposition.RETRY,
+            repo.workerDisposition(retry),
+        )
+        // 结构非法（parseError 非空）→ failure，不无限重试。
+        val failure = retry.copy(parseError = "清单 sources 为空")
+        assertEquals(
+            org.feeluown.mobile.sourceupdate.CommunityDiscoveryRepository.RefreshDisposition.FAILURE,
+            repo.workerDisposition(failure),
+        )
+    }
+
+    @Test
     fun deleteCandidateOnlyTouchesQuarantineSubtree() = runTest {
         val fileStore = InMemorySourceFileStore()
         // 放一个"正式脚本"键，确认删除候选不会碰它。
