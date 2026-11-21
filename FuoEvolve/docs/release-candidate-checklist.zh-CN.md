@@ -82,3 +82,9 @@
 - Windows 桌面包 SHA256：BLOCKED（缺 cargo）
 - 配置版本 / Provider 清单版本：内置公钥 `fuoevolve-2026-11`，正式目录 `sources` 为空（未签发）
 - 测试报告版本：desktop 1049 / androidHost 925 / App 34 / iOS 编译 PASS（2026-11-21）
+
+### K3 交接更新（2026-11-21）
+- Debug APK SHA256 已用四重独立方法复核，确认对应完整 36,861,777 字节文件（流式/整读/sha256sum 一致，前 29 字节哈希不同），apksigner 显示签名者 `CN=Android Debug`（非 Release）。
+- `RELEASE_SIGNING = BLOCKED`：`FUO_SIGNING_*` 环境变量与本地签名密钥均缺失；未生成自签名冒充正式签名，未上传/提交密钥。
+- `WINDOWS_INSTALLER = BLOCKED`：cargo/rustc 缺失（同 K2）。
+- K3.1 真机/家庭宽带/SIM/听音人员全部缺失 → K3.2–K3.7 全 NOT_RUN；**K3 未完成，不宣布开箱即用达标**。详见 `docs/k3-real-device-cn-acceptance.zh-CN.md`。

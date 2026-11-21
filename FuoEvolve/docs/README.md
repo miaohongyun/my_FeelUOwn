@@ -20,6 +20,7 @@
 | [jamendo-cn-device-network-acceptance.zh-CN.md](jamendo-cn-device-network-acceptance.zh-CN.md) | 阶段 K1.1/K1.2 中国大陆设备与网络验收：Android 真机/家庭宽带/移动数据 NOT_RUN、resolve 重试审计、空结果率观测与估算订正、K1.2 五项真实资源缺口与取得安排 |
 | [k2-product-readiness-audit.zh-CN.md](k2-product-readiness-audit.zh-CN.md) | 阶段 K2 产品功能盘点与发布候选审计：17 模块成熟度、结构化许可模型+下载门控、全量质量门禁（2008 项 0 失败）、12 问最终审计 |
 | [release-candidate-checklist.zh-CN.md](release-candidate-checklist.zh-CN.md) | 阶段 K2 发布候选清单：已完成能力、构建产物 SHA256、Release 签名/Windows 包 BLOCKED、已知限制、K3 冻结交接 |
+| [k3-real-device-cn-acceptance.zh-CN.md](k3-real-device-cn-acceptance.zh-CN.md) | 阶段 K3 冻结版本真实验收：APK SHA256 四重核验、Release 签名独立门禁、真机/家庭宽带/SIM/听音资源缺失 NOT_RUN、阶段未完成判定 |
 | [cast-dlna.zh-CN.md](cast-dlna.zh-CN.md) | 投屏模块的分层、SSDP/SOAP 链路、连播判定、代理流、手机静音、已知限制 |
 
 ## 我想改架构
