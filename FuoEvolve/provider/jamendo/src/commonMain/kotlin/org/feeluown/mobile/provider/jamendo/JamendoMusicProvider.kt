@@ -2,6 +2,7 @@ package org.feeluown.mobile.provider.jamendo
 
 import io.ktor.client.HttpClient
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import org.feeluown.mobile.MusicTrack
 import org.feeluown.mobile.PlaybackPayload
 import org.feeluown.mobile.ProviderFailure
@@ -88,15 +89,23 @@ class JamendoMusicProvider(
     override suspend fun resolve(track: MusicTrack, qualityPolicy: String): PlaybackPayload? {
         val identifier = (track.providerId ?: track.id).removePrefix("$ID:")
         if (identifier.isBlank()) return null
-        // 重新取一次地址：搜索时拿到的 audio URL 可能已过期。
-        val fresh = try {
-            api.trackById(identifier)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            return null
-        } ?: return null
-        if (fresh.audioUrl.isBlank()) return null
+        // 重新取地址：搜索时拿到的 audio URL 可能已过期。
+        // K1 实测 Jamendo 公开 API 的 /tracks/?id= 端点偶发返回空（同一 id 有时 results_count=0），
+        // 单次尝试会让用户点播放偶发失败。这里做有限重试（与 E2E 取证一致的容忍度）；
+        // 仍重取、不使用旧 URL，不改变权限/来源/默认策略。取消立即传播，全部失败才返回 null。
+        var fresh: org.feeluown.mobile.provider.jamendo.JamendoTrack? = null
+        for (attempt in 1..TRACK_BY_ID_MAX_ATTEMPTS) {
+            try {
+                fresh = api.trackById(identifier)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                fresh = null
+            }
+            if (fresh != null && fresh.audioUrl.isNotBlank()) break
+            if (attempt < TRACK_BY_ID_MAX_ATTEMPTS) delay(TRACK_BY_ID_RETRY_DELAY_MS)
+        }
+        if (fresh == null || fresh.audioUrl.isBlank()) return null
         return PlaybackPayload(
             url = fresh.audioUrl,
             title = fresh.name.ifBlank { track.title },
@@ -133,6 +142,10 @@ class JamendoMusicProvider(
 
         /** 不标具体码率：Jamendo 返回的是 mp3 流，客户端无法据此宣称 320k 或无损。 */
         const val QUALITY_LABEL = "jamendo-mp3"
+
+        /** K1 最小修复：/tracks/?id= 偶发空结果，重取有限重试，仍不使用旧 URL。 */
+        const val TRACK_BY_ID_MAX_ATTEMPTS = 3
+        const val TRACK_BY_ID_RETRY_DELAY_MS = 300L
 
         val INFO = ProviderInfo(providerId = ID, providerName = NAME)
         val CAPABILITIES = ProviderCapabilities(providerId = ID, providerName = NAME)
