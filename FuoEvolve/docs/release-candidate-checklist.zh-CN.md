@@ -95,3 +95,9 @@
 - **资源类目标全 BLOCKED**：Release 构建、实体机（adb devices 空）、家庭宽带（192.168.6.x 公司内网）、SIM、人工听音/普通用户、Release 安装均未取得。`K3_READY=BLOCKED`（8 项全缺）。
 - 安全回归 PASS（无业务代码改动，冻结边界未变，引用 K2 结论）；Windows 包仍 BLOCKED（缺 cargo）。
 - **K4 判定：部分完成/BLOCKED**；不混淆开发完成度与交付完成度，不生成/提交密钥，不伪造 PASS。详见 `docs/k4-release-artifact-and-test-resources.zh-CN.md`。
+
+### K5 交接（2026-11-21）
+- 冻结基线现查一致：HEAD=`dc196ff`、远端 work=`dc196ff`、master=`fc05530` 未动、K2/K3/K4 提交均在、工作区干净。
+- **资源门禁五类全 BLOCKED**：签名四变量 UNSET 且无 keystore/local.properties；`adb devices` 无设备；仅公司内网 192.168.6.x 且 WlanSvc=Stopped 无 WLAN；无 SIM；无人值守无真人 → `K5_RESOURCE_GATE=BLOCKED`。
+- 未构建 Release、未安装、未搜索、未播放；九级验证全 NOT_RUN，不用 HTTP 200/206、Playing 状态、position、ID 一致、代理或内网结果冒充。`RELEASE_ARTIFACT/ANDROID_DEVICE/CN_HOME_WIFI/CN_MOBILE_DATA=BLOCKED`，`REAL_PLAYBACK_AUDIO_OUTPUT/ORDINARY_USER_ACCEPTANCE=NOT_RUN`。
+- **K5_FINAL=BLOCKED**，未宣布 K3 完成。详见 `docs/k5-release-and-real-world-acceptance.zh-CN.md`。

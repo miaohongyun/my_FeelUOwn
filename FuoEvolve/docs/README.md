@@ -22,6 +22,7 @@
 | [release-candidate-checklist.zh-CN.md](release-candidate-checklist.zh-CN.md) | 阶段 K2 发布候选清单：已完成能力、构建产物 SHA256、Release 签名/Windows 包 BLOCKED、已知限制、K3 冻结交接 |
 | [k3-real-device-cn-acceptance.zh-CN.md](k3-real-device-cn-acceptance.zh-CN.md) | 阶段 K3 冻结版本真实验收：APK SHA256 四重核验、Release 签名独立门禁、真机/家庭宽带/SIM/听音资源缺失 NOT_RUN、阶段未完成判定 |
 | [k4-release-artifact-and-test-resources.zh-CN.md](k4-release-artifact-and-test-resources.zh-CN.md) | 阶段 K4 正式发布制品与真实验收资源落实：签名环境/Release 构建 BLOCKED、真机/家庭宽带/SIM/真人 BLOCKED、K3_READY=BLOCKED、解除条件与十二问结论 |
+| [k5-release-and-real-world-acceptance.zh-CN.md](k5-release-and-real-world-acceptance.zh-CN.md) | 阶段 K5 正式 Release 交付与真实验收：五类资源门禁现查全 BLOCKED、K5_RESOURCE_GATE=BLOCKED、九级验证全 NOT_RUN、K5_FINAL=BLOCKED、解除条件 |
 | [cast-dlna.zh-CN.md](cast-dlna.zh-CN.md) | 投屏模块的分层、SSDP/SOAP 链路、连播判定、代理流、手机静音、已知限制 |
 
 ## 我想改架构
