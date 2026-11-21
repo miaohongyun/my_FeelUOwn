@@ -51,6 +51,14 @@ interface DownloadActionPort {
         get() = EMPTY_DOWNLOAD_MANAGER_FLOW
 
     fun download(track: MusicTrack)
+
+    /**
+     * K5-D.5：返回当前曲目的下载可用性（可下载 / 待核实 / 来源禁止），供 UI 区分展示。
+     * 默认走统一逐曲许可决策；UI 点击被拒时仍以 download() 的可读反馈为准。
+     */
+    fun downloadPermission(track: MusicTrack): DownloadPermissionUi =
+        evaluateDownloadPermission(track).toUi()
+
     fun deleteDownload(track: MusicTrack)
     fun pause(taskId: String) = Unit
     fun resume(taskId: String) = Unit

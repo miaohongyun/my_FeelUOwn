@@ -31,6 +31,8 @@ internal class DesktopDownloadRepository(
     private val resolvePayload: suspend (MusicTrack) -> PlaybackPayload,
     private val storageRoot: Path = desktopDownloadStorageRoot(),
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    // K5-D.3 第二层门禁：默认走统一逐曲许可决策（fail-closed）；仅测试可显式注入。
+    override val downloadAuthorization: (MusicTrack) -> DownloadPermissionDecision = ::evaluateDownloadPermission,
 ) : DownloadRepository, AutoCloseable {
     private val mutableStates = MutableStateFlow<Map<String, DownloadState>>(emptyMap())
     private val mutableTasks = MutableStateFlow<List<DownloadTask>>(emptyList())
@@ -84,11 +86,14 @@ internal class DesktopDownloadRepository(
 
     override suspend fun download(track: MusicTrack) {
         if (track.sourceType != TrackSourceType.Provider) return
+        // K5-D.3 第二层门禁：绕过 Feature 直接调用 Repository 也在此拒绝未授权曲目。
+        if (isDownloadBlocked(track)) return
         enqueue(track, payload = null)
     }
 
     override suspend fun download(track: MusicTrack, payload: PlaybackPayload) {
         if (track.sourceType != TrackSourceType.Provider) return
+        if (isDownloadBlocked(track)) return
         enqueue(track, payload)
     }
 
@@ -188,10 +193,25 @@ internal class DesktopDownloadRepository(
     }
 
     private suspend fun restart(taskId: String) {
+        val task = mutex.withLock { taskRecords[taskId] } ?: return
+        if (task.status == DownloadTaskStatus.Completed && completedDownloadValidationFailure(task.completedUri) == null) return
+        // K5-D.4 恢复/重试重新核验当前许可；恢复的 track 携带许可快照，旧数据无 license → UNKNOWN 拒绝。
+        if (isDownloadBlocked(task.track)) {
+            mutex.withLock {
+                taskRecords[taskId]?.let { current -> taskRecords[taskId] = current.copy(
+                    status = DownloadTaskStatus.Failed,
+                    failureMessage = downloadAuthorization(task.track).reason ?: "下载权限尚未核实，已停止恢复",
+                    updatedAt = nowMillis(),
+                ) }
+                persistLocked()
+                publishLocked()
+            }
+            return
+        }
         mutex.withLock {
-            val task = taskRecords[taskId] ?: return
-            if (task.status == DownloadTaskStatus.Completed && completedDownloadValidationFailure(task.completedUri) == null) return
-            taskRecords[taskId] = task.copy(
+            val current = taskRecords[taskId] ?: return
+            if (current.status == DownloadTaskStatus.Completed && completedDownloadValidationFailure(current.completedUri) == null) return
+            taskRecords[taskId] = current.copy(
                 status = DownloadTaskStatus.Queued,
                 completedUri = null,
                 failureMessage = null,
@@ -238,6 +258,10 @@ internal class DesktopDownloadRepository(
                 persistLocked()
                 publishLocked()
                 downloading
+            }
+            // K5-D.3 最后一道防线：任何路径进入 runTask（含恢复、重试、换音质）在发起网络前重新核验许可。
+            if (isDownloadBlocked(task.track)) {
+                throw IllegalStateException(downloadAuthorization(task.track).reason ?: "下载权限尚未核实，已停止")
             }
             val payload = mutex.withLock { payloads.remove(taskId) } ?: resolvePayload(task.track)
             require(payload.url.isNotBlank()) { "播放地址为空" }
@@ -475,6 +499,65 @@ private data class DesktopDownloadResumeMetadata(
     val lastModified: String? = null,
 )
 
+/** K5-D.4：TrackLicense 的桌面持久化 DTO（领域类保持无序列化注解，此处显式映射）。 */
+@Serializable
+private data class DesktopLicenseSnapshot(
+    val licenseType: String = "UNKNOWN",
+    val licenseUrl: String? = null,
+    val attribution: String? = null,
+    val playLicense: Boolean = false,
+    val downloadLicense: Boolean = false,
+    val commercialUseAllowed: Boolean = false,
+    val derivativesAllowed: Boolean = false,
+    val redistributionAllowed: Boolean = false,
+    val licenseVerifiedAt: String? = null,
+    val licenseSource: String? = null,
+    val personalCopyAllowed: Boolean = false,
+    val platformDownloadAllowed: Boolean = false,
+    val downloadPermissionStatus: String = "UNKNOWN",
+    val downloadPermissionEvidence: String? = null,
+    val downloadPermissionReason: String? = null,
+) {
+    fun toLicense(): TrackLicense = TrackLicense(
+        licenseType = licenseType,
+        licenseUrl = licenseUrl,
+        attribution = attribution,
+        playLicense = playLicense,
+        downloadLicense = downloadLicense,
+        commercialUseAllowed = commercialUseAllowed,
+        derivativesAllowed = derivativesAllowed,
+        redistributionAllowed = redistributionAllowed,
+        licenseVerifiedAt = licenseVerifiedAt,
+        licenseSource = licenseSource,
+        personalCopyAllowed = personalCopyAllowed,
+        platformDownloadAllowed = platformDownloadAllowed,
+        downloadPermissionStatus = runCatching { DownloadPermissionStatus.valueOf(downloadPermissionStatus) }
+            .getOrDefault(DownloadPermissionStatus.UNKNOWN),
+        downloadPermissionEvidence = downloadPermissionEvidence,
+        downloadPermissionReason = downloadPermissionReason,
+    )
+
+    companion object {
+        fun from(license: TrackLicense) = DesktopLicenseSnapshot(
+            licenseType = license.licenseType,
+            licenseUrl = license.licenseUrl,
+            attribution = license.attribution,
+            playLicense = license.playLicense,
+            downloadLicense = license.downloadLicense,
+            commercialUseAllowed = license.commercialUseAllowed,
+            derivativesAllowed = license.derivativesAllowed,
+            redistributionAllowed = license.redistributionAllowed,
+            licenseVerifiedAt = license.licenseVerifiedAt,
+            licenseSource = license.licenseSource,
+            personalCopyAllowed = license.personalCopyAllowed,
+            platformDownloadAllowed = license.platformDownloadAllowed,
+            downloadPermissionStatus = license.downloadPermissionStatus.name,
+            downloadPermissionEvidence = license.downloadPermissionEvidence,
+            downloadPermissionReason = license.downloadPermissionReason,
+        )
+    }
+}
+
 @Serializable
 private data class DesktopDownloadTaskSnapshot(
     val id: String,
@@ -487,6 +570,7 @@ private data class DesktopDownloadTaskSnapshot(
     val durationMs: Long? = null,
     val providerId: String? = null,
     val providerName: String? = null,
+    val license: DesktopLicenseSnapshot? = null,
     val status: String,
     val createdAt: Long,
     val updatedAt: Long,
@@ -509,6 +593,7 @@ private data class DesktopDownloadTaskSnapshot(
             durationMs = durationMs,
             providerId = providerId,
             providerName = providerName,
+            license = license?.toLicense(),
         ),
         status = runCatching { DownloadTaskStatus.valueOf(status) }.getOrDefault(DownloadTaskStatus.Failed),
         createdAt = createdAt,
@@ -532,6 +617,7 @@ private data class DesktopDownloadTaskSnapshot(
                 durationMs = task.track.durationMs,
                 providerId = task.track.providerId,
                 providerName = task.track.providerName,
+                license = task.track.license?.let(DesktopLicenseSnapshot::from),
                 status = task.status.name,
                 createdAt = task.createdAt,
                 updatedAt = task.updatedAt,

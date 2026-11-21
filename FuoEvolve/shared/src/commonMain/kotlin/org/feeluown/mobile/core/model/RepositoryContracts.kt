@@ -56,6 +56,15 @@ interface DownloadRepository {
     val states: StateFlow<Map<String, DownloadState>>
     val tasks: StateFlow<List<DownloadTask>>
         get() = EMPTY_DOWNLOAD_TASKS
+
+    /**
+     * K5-D.3 第二层门禁：Repository 在真正入队/发起网络前必须执行逐曲许可决策。
+     * 默认实现即调用统一权威判断 [evaluateDownloadPermission]（fail-closed，未知许可拒绝），
+     * 任何实现都不得返回默认 true。测试可用显式注入覆盖，但生产三端一律走统一决策。
+     */
+    val downloadAuthorization: (MusicTrack) -> DownloadPermissionDecision
+        get() = ::evaluateDownloadPermission
+
     suspend fun load()
     suspend fun download(track: MusicTrack)
     suspend fun download(track: MusicTrack, payload: PlaybackPayload) = download(track)
@@ -66,6 +75,13 @@ interface DownloadRepository {
     suspend fun deleteTask(taskId: String, deleteFile: Boolean = true) = Unit
     suspend fun deleteDownloaded(track: MusicTrack)
 }
+
+/**
+ * K5-D.3 共享的许可守门辅助：入队前调用；被拒返回 true 表示"已拦截"，
+ * 调用方据此直接 return，不创建任务、不发网络请求、不尝试备用地址。
+ */
+fun DownloadRepository.isDownloadBlocked(track: MusicTrack): Boolean =
+    !downloadAuthorization(track).allowed
 
 private val EMPTY_DOWNLOAD_TASKS = MutableStateFlow<List<DownloadTask>>(emptyList())
 

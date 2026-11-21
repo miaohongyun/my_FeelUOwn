@@ -117,5 +117,7 @@ class DownloadFeatureQualityPolicyTest {
         override fun trackTitle(track: String): String = track
         override fun taskId(task: String): String = task
         override fun isCompleted(task: String): Boolean = false
+        // K5-D.3：默认改为拒绝，显式声明已授权以测试音质策略路径。
+        override fun canDownload(track: String): Boolean = true
     }
 }

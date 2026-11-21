@@ -153,7 +153,11 @@ internal class AndroidAppContainer(
     }
     private val localPlaylistRepository: AndroidLocalPlaylistRepository by lazy { AndroidLocalPlaylistRepository(context) }
     private val rawDownloadRepository: AndroidDownloadRepository by lazy {
-        AndroidDownloadRepository(context, playbackProvider) { tasks -> FuoDownloadService.update(context, tasks) }
+        AndroidDownloadRepository(
+            context = context,
+            providerRepository = playbackProvider,
+            onBackgroundWorkChanged = { tasks -> FuoDownloadService.update(context, tasks) },
+        )
     }
     private val downloadRepository: DownloadRepository by lazy {
         AndroidOfflineAwareDownloadRepository(delegate = rawDownloadRepository, assetStore = offlineAssetStore, scope = appScope)

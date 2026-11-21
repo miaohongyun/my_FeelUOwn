@@ -57,9 +57,10 @@ interface DownloadFeatureOperations<Track, Task> {
 
     /**
      * K2 下载许可门控：来源显式允许下载的曲目才返回 true。
-     * 默认实现放行，保证未知宿主/既有绑定不因新增门控而破坏；生产绑定必须覆写为逐曲许可判定。
+     * K5-D.3：默认实现改为保守拒绝（fail-closed），禁止默认放行的许可实现；
+     * 生产绑定覆写为逐曲许可判定，测试可显式覆写为 true 表达"已授权场景"。
      */
-    fun canDownload(track: Track): Boolean = true
+    fun canDownload(track: Track): Boolean = false
 
     /** 下载被许可拒绝时展示的可读原因。 */
     fun downloadDenialMessage(track: Track): String = "该曲目许可不允许下载，仅可在线播放"

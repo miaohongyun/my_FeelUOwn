@@ -37,6 +37,8 @@ class AndroidDownloadRepository(
     private val context: Context,
     private val providerRepository: PlaybackProviderPort,
     private val onBackgroundWorkChanged: (List<DownloadTask>) -> Unit = {},
+    // K5-D.3 第二层门禁：默认走统一逐曲许可决策（fail-closed）；仅测试可显式注入。
+    override val downloadAuthorization: (MusicTrack) -> DownloadPermissionDecision = ::evaluateDownloadPermission,
 ) : DownloadRepository {
     private val records = linkedMapOf<String, DownloadRecord>()
     private val taskRecords = linkedMapOf<String, DownloadTask>()
@@ -95,11 +97,14 @@ class AndroidDownloadRepository(
 
     override suspend fun download(track: MusicTrack) {
         if (track.sourceType != TrackSourceType.Provider) return
+        // K5-D.3 第二层门禁：即使绕过 Feature 直接调用 Repository，也在此拒绝未授权曲目。
+        if (isDownloadBlocked(track)) return
         enqueue(track, null)
     }
 
     override suspend fun download(track: MusicTrack, payload: PlaybackPayload) {
         if (track.sourceType != TrackSourceType.Provider) return
+        if (isDownloadBlocked(track)) return
         enqueue(track, payload)
     }
 
@@ -187,10 +192,24 @@ class AndroidDownloadRepository(
     }
 
     private suspend fun restart(taskId: String) {
+        val task = taskMutex.withLock { taskRecords[taskId] } ?: return
+        if (task.status == DownloadTaskStatus.Completed) return
+        // K5-D.4 恢复/重试必须重新核验当前许可，不得仅凭旧的 downloadLicense=true 快照继续。
+        // 恢复的 track 从持久化重建，携带许可快照；旧数据无 license 时 evaluate 按 UNKNOWN 拒绝。
+        if (isDownloadBlocked(task.track)) {
+            taskMutex.withLock {
+                taskRecords[taskId]?.let { current -> updateTask(current.copy(
+                    status = DownloadTaskStatus.Failed,
+                    failureMessage = downloadAuthorization(task.track).reason ?: "下载权限尚未核实，已停止恢复",
+                    updatedAt = System.currentTimeMillis(),
+                )) }
+            }
+            return
+        }
         taskMutex.withLock {
-            val task = taskRecords[taskId] ?: return
-            if (task.status == DownloadTaskStatus.Completed) return
-            updateTask(task.copy(status = DownloadTaskStatus.Queued, failureMessage = null, updatedAt = System.currentTimeMillis()))
+            val current = taskRecords[taskId] ?: return
+            if (current.status == DownloadTaskStatus.Completed) return
+            updateTask(current.copy(status = DownloadTaskStatus.Queued, failureMessage = null, updatedAt = System.currentTimeMillis()))
         }
         schedule()
     }
@@ -220,6 +239,11 @@ class AndroidDownloadRepository(
                 val downloading = current.copy(status = DownloadTaskStatus.Downloading, updatedAt = System.currentTimeMillis())
                 updateTask(downloading)
                 downloading
+            }
+            // K5-D.3 最后一道防线：任何路径进入 runTask（含持久化恢复、重试、换音质）在发起网络前
+            // 都必须重新通过逐曲许可决策；被拒则不 resolve、不发起任何下载请求。
+            if (isDownloadBlocked(task.track)) {
+                throw IllegalStateException(downloadAuthorization(task.track).reason ?: "下载权限尚未核实，已停止")
             }
             val payload = taskMutex.withLock { taskPayloads.remove(taskId) } ?: providerRepository.resolve(task.track)
             val extension = extension(payload.url)
@@ -734,6 +758,49 @@ class AndroidDownloadRepository(
         completedUri = uri,
     )
 
+    // K5-D.4：TrackLicense 是纯领域类（无序列化注解），此处显式持久化完整许可快照，
+    // 使恢复任务能按当前许可重新判断；旧数据缺字段时 jsonToLicense 返回 null（→ UNKNOWN 拒绝）。
+    private fun TrackLicense.toJson(): JSONObject = JSONObject()
+        .put("licenseType", licenseType)
+        .put("licenseUrl", licenseUrl ?: "")
+        .put("attribution", attribution ?: "")
+        .put("playLicense", playLicense)
+        .put("downloadLicense", downloadLicense)
+        .put("commercialUseAllowed", commercialUseAllowed)
+        .put("derivativesAllowed", derivativesAllowed)
+        .put("redistributionAllowed", redistributionAllowed)
+        .put("licenseVerifiedAt", licenseVerifiedAt ?: "")
+        .put("licenseSource", licenseSource ?: "")
+        .put("personalCopyAllowed", personalCopyAllowed)
+        .put("platformDownloadAllowed", platformDownloadAllowed)
+        .put("downloadPermissionStatus", downloadPermissionStatus.name)
+        .put("downloadPermissionEvidence", downloadPermissionEvidence ?: "")
+        .put("downloadPermissionReason", downloadPermissionReason ?: "")
+
+    private fun JSONObject.jsonToLicense(): TrackLicense? {
+        if (!has("licenseType")) return null
+        val status = runCatching {
+            DownloadPermissionStatus.valueOf(optString("downloadPermissionStatus"))
+        }.getOrDefault(DownloadPermissionStatus.UNKNOWN)
+        return TrackLicense(
+            licenseType = optString("licenseType"),
+            licenseUrl = optString("licenseUrl").takeIf { it.isNotBlank() },
+            attribution = optString("attribution").takeIf { it.isNotBlank() },
+            playLicense = optBoolean("playLicense"),
+            downloadLicense = optBoolean("downloadLicense"),
+            commercialUseAllowed = optBoolean("commercialUseAllowed"),
+            derivativesAllowed = optBoolean("derivativesAllowed"),
+            redistributionAllowed = optBoolean("redistributionAllowed"),
+            licenseVerifiedAt = optString("licenseVerifiedAt").takeIf { it.isNotBlank() },
+            licenseSource = optString("licenseSource").takeIf { it.isNotBlank() },
+            personalCopyAllowed = optBoolean("personalCopyAllowed"),
+            platformDownloadAllowed = optBoolean("platformDownloadAllowed"),
+            downloadPermissionStatus = status,
+            downloadPermissionEvidence = optString("downloadPermissionEvidence").takeIf { it.isNotBlank() },
+            downloadPermissionReason = optString("downloadPermissionReason").takeIf { it.isNotBlank() },
+        )
+    }
+
     private fun DownloadTask.toJson(): JSONObject = JSONObject()
         .put("id", id)
         .put("trackId", track.id)
@@ -746,6 +813,7 @@ class AndroidDownloadRepository(
         .put("durationMs", track.durationMs ?: 0)
         .put("providerId", track.providerId ?: "")
         .put("providerName", track.providerName ?: "")
+        .put("license", track.license?.toJson())
         .put("status", status.name)
         .put("createdAt", createdAt)
         .put("updatedAt", updatedAt)
@@ -756,6 +824,8 @@ class AndroidDownloadRepository(
 
     private fun JSONObject.toTask(): DownloadTask {
         val trackId = optString("trackId").ifBlank { getString("id") }
+        // K5-D.4：恢复许可快照；旧任务无此字段 → null → 决策按 UNKNOWN 拒绝，不沿用旧授权继续下载。
+        val restoredLicense = optJSONObject("license")?.jsonToLicense()
         return DownloadTask(
             id = getString("id"),
             track = MusicTrack(
@@ -767,6 +837,7 @@ class AndroidDownloadRepository(
                 durationMs = optLong("durationMs").takeIf { it > 0 },
                 providerId = optString("providerId").takeIf { it.isNotBlank() },
                 providerName = optString("providerName").takeIf { it.isNotBlank() },
+                license = restoredLicense,
             ),
             status = runCatching { DownloadTaskStatus.valueOf(optString("status")) }.getOrDefault(DownloadTaskStatus.Paused),
             createdAt = optLong("createdAt").takeIf { it > 0 } ?: System.currentTimeMillis(),

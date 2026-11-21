@@ -14,6 +14,8 @@ import kotlin.coroutines.resume
 class IosDownloadRepository(
     private val providerRepository: PlaybackProviderPort,
     private val output: IosDownloadOutput,
+    // K5-D.3 第二层门禁：默认走统一逐曲许可决策（fail-closed）；仅测试可显式注入。
+    override val downloadAuthorization: (MusicTrack) -> DownloadPermissionDecision = ::evaluateDownloadPermission,
 ) : DownloadRepository {
     private val mutableStates = MutableStateFlow<Map<String, DownloadState>>(emptyMap())
     private val mutableTasks = MutableStateFlow<List<DownloadTask>>(emptyList())
@@ -51,11 +53,14 @@ class IosDownloadRepository(
 
     override suspend fun download(track: MusicTrack) {
         if (track.sourceType != TrackSourceType.Provider) return
+        // K5-D.3 第二层门禁：绕过 Feature 直接调用 Repository 也在此拒绝未授权曲目。
+        if (isDownloadBlocked(track)) return
         enqueue(track, null)
     }
 
     override suspend fun download(track: MusicTrack, payload: PlaybackPayload) {
         if (track.sourceType != TrackSourceType.Provider) return
+        if (isDownloadBlocked(track)) return
         enqueue(track, payload)
     }
 
@@ -89,6 +94,16 @@ class IosDownloadRepository(
 
     private suspend fun runTask(taskId: String) {
         val task = taskRecords[taskId] ?: return
+        // K5-D.3 最后一道防线：任何路径进入 runTask（含恢复/重试）在发起网络前重新核验许可。
+        if (isDownloadBlocked(task.track)) {
+            updateTask(task.copy(
+                status = DownloadTaskStatus.Failed,
+                failureMessage = downloadAuthorization(task.track).reason ?: "下载权限尚未核实，已停止",
+            ))
+            activeTaskIds -= taskId
+            schedule()
+            return
+        }
         updateTask(task.copy(status = DownloadTaskStatus.Downloading, failureMessage = null))
         val payload = taskPayloads.remove(taskId) ?: runCatching { providerRepository.resolve(task.track) }.getOrElse { throwable ->
             updateTask(taskRecords.getValue(taskId).copy(status = DownloadTaskStatus.Failed, failureMessage = throwable.message ?: "下载解析失败"))

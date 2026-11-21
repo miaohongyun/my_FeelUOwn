@@ -100,6 +100,8 @@ class DownloadFeatureTest {
         override fun trackTitle(track: Track) = track.title
         override fun taskId(task: Task) = task.id
         override fun isCompleted(task: Task) = task.completed
+        // K5-D.3：默认已改为拒绝，此处显式声明"已授权"以测试正常下载路径。
+        override fun canDownload(track: Track) = true
     }
 
     private object DenyOperations : DownloadFeatureOperations<Track, Task> {
