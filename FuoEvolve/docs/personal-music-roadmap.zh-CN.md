@@ -1311,3 +1311,19 @@ UI 闭环：REAL_SEARCH_UI **NOT_RUN**(无 adb 真机/GUI 自动化/Xcode，不�
 
 **结论：不建议 Audiomack 进入默认音源候选**——直连不可用(DNS 污染+SNI 阻断)仅代理可达、播放域名 music.audiomack.com 仍 DENIED、播放/音频/身份未验证，与"家人打开就能用"终点相悖。遗留风险：家庭/移动/真机网络未实测、SNI 阻断客户端无法规避也不应放宽 Gateway、代理单次样本不承诺长期稳定、iOS 模拟器测试未执行。详见 audit §27。
 
+## §33 阶段 K0：来源就绪度审计（2026-11-21）
+
+目标不变：家人不配置/不写 JS/不配服务器，打开就能搜能播。K0 成功=找到授权明确+大陆直连+真实播放+身份核验的来源，或用充分证据确认均不满足并给方向；不为完成降标准。基线 HEAD=8e8c428(J2.5) 父=e68681a，工作区干净，远端 work=8e8c428/master=fc05530 一致；相对 master ahead/behind 因 shallow clone(边界 6d92d0b, master 对象不在本地)无法本地算，如实记录。
+
+K0.1 审计：Jamendo 有完整 Provider(provider/jamendo)且默认启用，真实网络测试为 opt-in 默认 SKIP；Internet Archive 无 Provider、仅 lossless FLAC 增强器(默认开、无许可采集/无测试)；Subsonic/WebDAV 无独立 Provider(直连绕过 Gateway/插件 deny-all)。项目有两套网络层(MusicFree 沙箱 Gateway + 原生 ProviderHttpClient)，不可统称统一出口。全仓 278 测试零 Compose UI/截图测试。
+
+K0.2 授权四权分离：Jamendo 官方 About 明确 CC 平台、免费流媒体+可下载支持艺术家、商业走 Jamendo Licensing；开发者页公开 API 非商业 35k/月；实测单曲 CC BY-NC-ND 3.0(禁商业/禁演绎,适合个人听)。App 解析 license_ccurl→CC 类型+摘要写入 providerTags 并在播放页/详情/弹窗展示，但无独立署名/许可字段、下载未开放(单独审批)。Internet Archive 逐 item 许可不同(实测 CC0/BY/BY-NC-ND 2.5HU)，现有实现不采集 licenseurl→授权不可映射，不进默认。
+
+K0.3 网络实测(内网 Windows DNS 192.168.6.1,非确认家庭宽带)：**Jamendo 直连 API 200/8118B + 音频 206(audio/mpeg, Range 0-15/14125568) 全可达、无 DNS 污染/SNI 阻断**；Internet Archive 直连 DNS 污染(31.13.96.195 Facebook 段)+TCP 超时=失败；Audiomack 历史失败保留。家庭宽带/移动网/真机 NOT_RUN。不推断长期稳定。
+
+K0.4 七级(Jamendo 为唯一合格候选)：REAL_INIT/SEARCH/RESULT_MAPPING/URL_RESOLVE/AUDIO_RESPONSE PASS；**REAL_PLAYBACK NOT_RUN(未驱动正式播放器)、身份核验 PASS(有限,仅 id==URL trackid 非音频指纹)**。真实性反证：错误 client_id 使两个 opt-in 用例 FAILED，证明 PASS 非 SKIP 假象；正确 key 重跑恢复 2 项 0 失败；音频仅 Range 16B 不下载整曲。
+
+K0.5 模型：MusicTrack 有 providerId/originalId/标题/歌手/专辑/封面/时长/providerUrl，但**无 license/attribution/playLicense/downloadLicense 独立字段**，许可靠 providerTags 字符串约定，播放/下载许可未分离；本阶段不重构。
+
+**结论**：Jamendo 维持默认启用(已是默认,不新增下载)——授权明确+目标网络直连+五级 PASS,契合家庭目标；IA/Audiomack 直连失败不进默认；Subsonic/WebDAV 属自有曲库不计公共来源。诚实边界：REAL_PLAYBACK NOT_RUN、目标网络非确认家庭宽带、许可多 NC/ND、无独立许可字段。下一步：①补 REAL_PLAYBACK(桌面 libmpv/真机)关闭级别6/7；②补家庭宽带/移动/真机直连样本；③补结构化许可字段(独立任务)；④继续找"授权明确+大陆直连+可播放"来源,找不到如实说。详见 docs/source-readiness-audit.zh-CN.md。
+
