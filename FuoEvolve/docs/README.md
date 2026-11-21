@@ -23,6 +23,7 @@
 | [k3-real-device-cn-acceptance.zh-CN.md](k3-real-device-cn-acceptance.zh-CN.md) | 阶段 K3 冻结版本真实验收：APK SHA256 四重核验、Release 签名独立门禁、真机/家庭宽带/SIM/听音资源缺失 NOT_RUN、阶段未完成判定 |
 | [k4-release-artifact-and-test-resources.zh-CN.md](k4-release-artifact-and-test-resources.zh-CN.md) | 阶段 K4 正式发布制品与真实验收资源落实：签名环境/Release 构建 BLOCKED、真机/家庭宽带/SIM/真人 BLOCKED、K3_READY=BLOCKED、解除条件与十二问结论 |
 | [k5-release-and-real-world-acceptance.zh-CN.md](k5-release-and-real-world-acceptance.zh-CN.md) | 阶段 K5 正式 Release 交付与真实验收：五类资源门禁现查全 BLOCKED、K5_RESOURCE_GATE=BLOCKED、九级验证全 NOT_RUN、K5_FINAL=BLOCKED、解除条件 |
+| [personal-download-license-audit.zh-CN.md](personal-download-license-audit.zh-CN.md) | 阶段 K5-D 个人下载许可审计：TrackLicense 逐曲决策模型、Feature+Repository 双层门禁、Android/Desktop 恢复许可重查、Jamendo 六种 CC 精确识别（下载保持 UNKNOWN）、UI 三态、PERSONAL_DOWNLOAD=PARTIAL |
 | [cast-dlna.zh-CN.md](cast-dlna.zh-CN.md) | 投屏模块的分层、SSDP/SOAP 链路、连播判定、代理流、手机静音、已知限制 |
 
 ## 我想改架构
