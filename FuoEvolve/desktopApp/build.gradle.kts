@@ -402,6 +402,8 @@ dependencies {
     implementation("dev.nucleusframework:composenativetray:2.1.6")
 
     testImplementation(kotlin("test"))
+    testImplementation(project(":provider:jamendo"))
+    testImplementation(libs.kotlinx.coroutines.test)
 }
 
 // Nucleus feeds native-image a repackaged uber JAR rather than the original dependency JARs.
