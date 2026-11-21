@@ -17,6 +17,22 @@ package org.feeluown.mobile
  * 该模型为纯领域类（无序列化注解），可安全地作为 [MusicTrack] 的带默认值字段加入，
  * 不破坏既有构造点与新生代序列化布局。
  */
+/**
+ * K5-D 下载权限状态。个人下载必须逐曲判断，不能用单一布尔值表达全部法律/平台条件。
+ *
+ * - [ALLOWED_PERSONAL]：来源与作品许可均核实，允许个人非商业原样保存。
+ * - [CONDITIONAL_NONCOMMERCIAL]：作品许可允许非商业复制，但需满足署名/禁止演绎等条件；
+ *   仅在条件核验通过且来源无额外下载限制时才放行，且绝不推导商业授权。
+ * - [UNKNOWN]：许可未知、缺失、无法解析，或来源下载接口/平台条款未核实。默认拒绝。
+ * - [DENIED]：来源或许可明确禁止下载，或存在平台技术/条款限制。拒绝且不尝试绕开。
+ */
+enum class DownloadPermissionStatus {
+    ALLOWED_PERSONAL,
+    CONDITIONAL_NONCOMMERCIAL,
+    UNKNOWN,
+    DENIED,
+}
+
 data class TrackLicense(
     /** 许可类型及版本，例如 "CC BY-NC-ND 3.0"；未知时为 "UNKNOWN"。 */
     val licenseType: String = "UNKNOWN",
@@ -32,15 +48,107 @@ data class TrackLicense(
     val commercialUseAllowed: Boolean = false,
     /** 是否允许演绎（改编/混音/铃声制作）。 */
     val derivativesAllowed: Boolean = false,
-    /** 是否允许原样再分发。 */
+    /** 是否允许原样再分发（不等于允许演绎）。 */
     val redistributionAllowed: Boolean = false,
     /** 许可证据的核验时间（ISO-8601 字符串），未核验为 null。 */
     val licenseVerifiedAt: String? = null,
     /** 许可证据来源，例如 "jamendo-api:license_ccurl" 或 "providerTags"。 */
     val licenseSource: String? = null,
+
+    // ---- K5-D.1：下载权限多维字段（默认均为保守值，未知按 UNKNOWN）----
+    /** 是否允许个人非商业原样复制保存。默认 false，须来源逐曲核实后显式放行。 */
+    val personalCopyAllowed: Boolean = false,
+    /** 来源平台是否提供官方下载接口且条款允许当前下载方式。默认 false（未核实）。 */
+    val platformDownloadAllowed: Boolean = false,
+    /** 下载权限状态；默认 UNKNOWN，不可自行推测为允许。 */
+    val downloadPermissionStatus: DownloadPermissionStatus = DownloadPermissionStatus.UNKNOWN,
+    /** 下载权限证据（许可链接/API 字段/条款出处），无证据为 null。 */
+    val downloadPermissionEvidence: String? = null,
+    /** 拒绝或未核实的简短原因，供 UI 展示。 */
+    val downloadPermissionReason: String? = null,
 ) {
     /** 是否为明确许可（而非 UNKNOWN）。 */
     val isKnown: Boolean get() = licenseType != "UNKNOWN" && licenseType.isNotBlank()
+}
+
+/**
+ * K5-D 统一下载许可决策结果。Feature 层与 Repository 层必须共用此唯一权威判断。
+ *
+ * [allowed] 只代表"允许个人非商业原样保存"，不代表商业授权、可再分发或可演绎。
+ * [status] 与 [reason] 供 UI 区分"可下载/待核实/来源禁止"三种状态。
+ */
+data class DownloadPermissionDecision(
+    val allowed: Boolean,
+    val status: DownloadPermissionStatus,
+    val reason: String?,
+)
+
+/** K5-D.5 面向普通用户的三态下载标签，不含版权术语。 */
+enum class DownloadAvailabilityUiLabel {
+    /** 可以个人下载。 */
+    CAN_DOWNLOAD,
+    /** 下载权限待核实。 */
+    VERIFYING,
+    /** 来源明确禁止下载。 */
+    NOT_AVAILABLE,
+}
+
+data class DownloadPermissionUi(
+    val label: DownloadAvailabilityUiLabel,
+    val reason: String?,
+)
+
+/** 把统一决策映射为 UI 三态；普通用户无需理解 CC/NC/ND 等术语。 */
+fun DownloadPermissionDecision.toUi(): DownloadPermissionUi = DownloadPermissionUi(
+    label = when {
+        allowed -> DownloadAvailabilityUiLabel.CAN_DOWNLOAD
+        status == DownloadPermissionStatus.DENIED -> DownloadAvailabilityUiLabel.NOT_AVAILABLE
+        else -> DownloadAvailabilityUiLabel.VERIFYING
+    },
+    reason = if (allowed) null else reason,
+)
+
+/**
+ * K5-D 统一下载许可决策：逐曲判断，未知默认拒绝，且个人非商业与商业/演绎/再分发相互独立。
+ *
+ * 判断顺序（任一不满足即拒绝，绝不通过播放地址推导下载权）：
+ * 1. 无结构化许可 → UNKNOWN 拒绝。
+ * 2. 明确禁止（DENIED）→ 拒绝，不尝试备用地址或重定向绕开。
+ * 3. 允许下载必须同时满足：来源显式 [downloadLicense]、允许个人复制 [personalCopyAllowed]、
+ *    来源平台下载许可 [platformDownloadAllowed]，且状态为 ALLOWED_PERSONAL 或 CONDITIONAL_NONCOMMERCIAL。
+ * 4. CONDITIONAL_NONCOMMERCIAL 分支额外要求非商业（!commercialUseAllowed）且保留署名；
+ *    ND 只限制演绎，不因 redistributionAllowed=false 之外的原因额外放行演绎权。
+ * 5. commercialUseAllowed=false 既不能推出可下载，也不能推出不可下载——它只影响商业用途判定。
+ *
+ * 注意：本函数是下载许可的**唯一权威判断**。它刻意不读取 playLicense——可播放与可下载彻底分离。
+ */
+fun evaluateDownloadPermission(track: MusicTrack): DownloadPermissionDecision {
+    val license = track.license
+        ?: return DownloadPermissionDecision(
+            false, DownloadPermissionStatus.UNKNOWN, "该曲目未提供下载许可，暂不支持下载",
+        )
+    if (license.downloadPermissionStatus == DownloadPermissionStatus.DENIED) {
+        return DownloadPermissionDecision(
+            false, DownloadPermissionStatus.DENIED,
+            license.downloadPermissionReason ?: "来源明确禁止下载",
+        )
+    }
+    val statusOk = license.downloadPermissionStatus == DownloadPermissionStatus.ALLOWED_PERSONAL ||
+        license.downloadPermissionStatus == DownloadPermissionStatus.CONDITIONAL_NONCOMMERCIAL
+    val conditionalOk = license.downloadPermissionStatus != DownloadPermissionStatus.CONDITIONAL_NONCOMMERCIAL ||
+        (!license.commercialUseAllowed && !license.attribution.isNullOrBlank())
+    val allConditions = license.downloadLicense && license.personalCopyAllowed &&
+        license.platformDownloadAllowed && statusOk && conditionalOk
+    if (allConditions) {
+        return DownloadPermissionDecision(true, license.downloadPermissionStatus, null)
+    }
+    val reason = license.downloadPermissionReason
+        ?: if (license.downloadPermissionStatus == DownloadPermissionStatus.UNKNOWN) {
+            "该曲目下载权限尚未核实，暂不支持下载"
+        } else {
+            "该曲目许可不允许下载，仅可在线播放"
+        }
+    return DownloadPermissionDecision(false, license.downloadPermissionStatus, reason)
 }
 
 /**
@@ -113,11 +221,7 @@ fun trackLicenseFromTags(tags: List<String>, source: String = "providerTags"): T
  * 写入 `license = TrackLicense(downloadLicense = true, ...)`；在此之前其下载同样被默认拒绝，
  * 这是"默认拒绝未知许可"的必然结果，而非功能退化（没有证据证明那些来源允许下载）。
  */
-fun canDownloadTrack(track: MusicTrack): Boolean = track.license?.downloadLicense == true
+fun canDownloadTrack(track: MusicTrack): Boolean = evaluateDownloadPermission(track).allowed
 
 /** 下载被拒时的可读原因，供 UI 展示，不涉及技术细节。 */
-fun downloadDenialReason(track: MusicTrack): String? = when {
-    track.license?.downloadLicense == false -> "该曲目许可不允许下载，仅可在线播放"
-    track.license == null -> "该曲目未提供下载许可，暂不支持下载"
-    else -> null
-}
+fun downloadDenialReason(track: MusicTrack): String? = evaluateDownloadPermission(track).reason
