@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DownloadFeatureTest {
@@ -39,6 +40,36 @@ class DownloadFeatureTest {
         assertEquals("已加入下载队列：Song", owner.state.value.queueFeedback)
     }
 
+    @Test
+    fun licenseDeniedTrackIsNotResolvedOrEnqueued() = runTest {
+        val repository = FakeRepository()
+        val localLibrary = FakeLocalLibrary()
+        var resolveCalls = 0
+        val owner = createDownloadFeatureOwner(
+            repository = repository,
+            resolver = object : DownloadMediaResolver<Track, String> {
+                override suspend fun resolve(track: Track): String {
+                    resolveCalls += 1
+                    return "payload:${track.id}"
+                }
+            },
+            localLibrary = localLibrary,
+            operations = DenyOperations,
+            scope = backgroundScope,
+            shouldShowLocalMusicLoading = { true },
+            persistParallelism = {},
+        )
+
+        owner.start()
+        runCurrent()
+        owner.download(Track("2", "Restricted", provider = true))
+        runCurrent()
+
+        assertEquals(0, resolveCalls, "许可拒绝时不得发起 resolve")
+        assertNull(repository.lastPayload, "许可拒绝时不得入队")
+        assertEquals("该曲目许可不允许下载，仅可在线播放", owner.state.value.queueFeedback)
+    }
+
     private data class Track(val id: String, val title: String, val provider: Boolean)
     private data class Task(val id: String, val completed: Boolean)
 
@@ -69,5 +100,14 @@ class DownloadFeatureTest {
         override fun trackTitle(track: Track) = track.title
         override fun taskId(task: Task) = task.id
         override fun isCompleted(task: Task) = task.completed
+    }
+
+    private object DenyOperations : DownloadFeatureOperations<Track, Task> {
+        override fun isProviderTrack(track: Track) = track.provider
+        override fun trackTitle(track: Track) = track.title
+        override fun taskId(task: Task) = task.id
+        override fun isCompleted(task: Task) = task.completed
+        override fun canDownload(track: Track) = false
+        override fun downloadDenialMessage(track: Track) = "该曲目许可不允许下载，仅可在线播放"
     }
 }

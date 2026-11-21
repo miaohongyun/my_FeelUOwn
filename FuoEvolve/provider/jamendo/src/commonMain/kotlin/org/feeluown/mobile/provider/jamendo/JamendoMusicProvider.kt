@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import org.feeluown.mobile.MusicTrack
+import org.feeluown.mobile.TrackLicense
 import org.feeluown.mobile.PlaybackPayload
 import org.feeluown.mobile.ProviderFailure
 import org.feeluown.mobile.ProviderFailureKind
@@ -133,6 +134,21 @@ class JamendoMusicProvider(
             if (licenseCcUrl.isNotBlank()) add("license-url:$licenseCcUrl")
             add(licenseSummary)
         },
+        // K2 结构化许可：从 API 的 license_ccurl 逐曲构造，替代"仅靠 cc: 字符串展示"。
+        // Jamendo 允许在线播放，但本阶段不开放下载：downloadLicense 恒为 false（默认拒绝），
+        // ND 曲目 derivativesAllowed=false，NC 曲目 commercialUseAllowed=false，全部如实编码。
+        license = TrackLicense(
+            licenseType = if (licenseCode.isNotEmpty()) "CC ${licenseCode.uppercase()}" else "UNKNOWN",
+            licenseUrl = licenseCcUrl.takeIf { it.isNotBlank() },
+            attribution = licenseSummary.takeIf { it.isNotBlank() },
+            playLicense = true,
+            downloadLicense = false,
+            commercialUseAllowed = licenseCode.isNotEmpty() && "NC" !in licenseCode.uppercase(),
+            derivativesAllowed = licenseCode.isNotEmpty() && "ND" !in licenseCode.uppercase(),
+            redistributionAllowed = false,
+            licenseVerifiedAt = null,
+            licenseSource = "jamendo-api:license_ccurl",
+        ),
     )
 
     companion object {

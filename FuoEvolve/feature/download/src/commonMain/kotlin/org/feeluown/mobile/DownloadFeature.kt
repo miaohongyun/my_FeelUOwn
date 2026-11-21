@@ -54,6 +54,15 @@ interface DownloadFeatureOperations<Track, Task> {
     fun trackTitle(track: Track): String
     fun taskId(task: Task): String
     fun isCompleted(task: Task): Boolean
+
+    /**
+     * K2 下载许可门控：来源显式允许下载的曲目才返回 true。
+     * 默认实现放行，保证未知宿主/既有绑定不因新增门控而破坏；生产绑定必须覆写为逐曲许可判定。
+     */
+    fun canDownload(track: Track): Boolean = true
+
+    /** 下载被许可拒绝时展示的可读原因。 */
+    fun downloadDenialMessage(track: Track): String = "该曲目许可不允许下载，仅可在线播放"
 }
 
 interface DownloadFeatureOwner<Track, Task, DownloadState> {
@@ -174,6 +183,11 @@ private class DefaultDownloadFeatureOwner<Track, Payload, Task, DownloadState>(
 
     override fun download(track: Track, qualityPolicy: String?) {
         if (!operations.isProviderTrack(track)) return
+        // K2 许可门控：未知许可 / 许可不允许下载时，拒绝入队并给出可读原因，不发起 resolve。
+        if (!operations.canDownload(track)) {
+            publishFeedback(operations.downloadDenialMessage(track))
+            return
+        }
         publishFeedback("已加入下载队列：${operations.trackTitle(track)}")
         scope.launch {
             runCatching {

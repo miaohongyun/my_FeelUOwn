@@ -132,6 +132,8 @@ data class MusicTrack(
     val artistItems: List<MediaRef> = emptyList(),
     val providerUrl: String? = null,
     val providerTags: List<String> = emptyList(),
+    /** K2 结构化许可。默认 null（未知许可），由来源在映射时显式填充。下载门控默认拒绝 null。 */
+    val license: TrackLicense? = null,
 ) {
     val artistRefs: List<MediaRef>
         get() = artistItems

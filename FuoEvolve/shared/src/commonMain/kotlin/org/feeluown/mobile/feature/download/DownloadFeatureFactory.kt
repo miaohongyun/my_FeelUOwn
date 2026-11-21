@@ -75,6 +75,10 @@ fun createDownloadActionPort(
         override fun trackTitle(track: MusicTrack): String = track.title
         override fun taskId(task: DownloadTask): String = task.id
         override fun isCompleted(task: DownloadTask): Boolean = task.status == DownloadTaskStatus.Completed
+        // K2：生产绑定接入逐曲许可门控。未知许可 / 不允许下载的曲目无法进入下载队列。
+        override fun canDownload(track: MusicTrack): Boolean = canDownloadTrack(track)
+        override fun downloadDenialMessage(track: MusicTrack): String =
+            downloadDenialReason(track) ?: "该曲目许可不允许下载，仅可在线播放"
     }
 
     val owner = createDownloadFeatureOwner(
