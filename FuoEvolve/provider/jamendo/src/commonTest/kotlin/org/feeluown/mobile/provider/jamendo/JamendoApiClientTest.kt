@@ -247,4 +247,43 @@ class JamendoApiClientTest {
         ).licenseSummary
         assertTrue(none.contains("未知"), "无许可证应保守提示未知: $none")
     }
+
+    @Test
+    fun k5dLicenseKindRecognizesSixCcVariantsExactly() {
+        fun kind(url: String) = JamendoTrack(
+            id = "1", name = "n", artist = "a", album = "", durationSeconds = 1,
+            audioUrl = "https://x", downloadUrl = "", imageUrl = "", shareUrl = "",
+            licenseCcUrl = url,
+        ).licenseKind
+        assertEquals("BY", kind("https://creativecommons.org/licenses/by/4.0/"))
+        assertEquals("BY-SA", kind("https://creativecommons.org/licenses/by-sa/3.0/"))
+        assertEquals("BY-NC", kind("https://creativecommons.org/licenses/by-nc/3.0/"))
+        assertEquals("BY-NC-SA", kind("https://creativecommons.org/licenses/by-nc-sa/4.0/"))
+        assertEquals("BY-ND", kind("https://creativecommons.org/licenses/by-nd/4.0/"))
+        assertEquals("BY-NC-ND", kind("https://creativecommons.org/licenses/by-nc-nd/3.0/"))
+    }
+
+    @Test
+    fun k5dLicenseKindRejectsUnknownAndForeignHost() {
+        fun kind(url: String) = JamendoTrack(
+            id = "1", name = "n", artist = "a", album = "", durationSeconds = 1,
+            audioUrl = "https://x", downloadUrl = "", imageUrl = "", shareUrl = "",
+            licenseCcUrl = url,
+        ).licenseKind
+        assertNull(kind(""))
+        assertNull(kind("https://example.com/licenses/by/4.0/"), "非 creativecommons.org 域名不得识别为 CC")
+        assertNull(kind("https://creativecommons.org/licenses/by-weird/4.0/"), "未知组合保持 null")
+    }
+
+    @Test
+    fun k5dLicenseVersionIsExtracted() {
+        fun version(url: String) = JamendoTrack(
+            id = "1", name = "n", artist = "a", album = "", durationSeconds = 1,
+            audioUrl = "https://x", downloadUrl = "", imageUrl = "", shareUrl = "",
+            licenseCcUrl = url,
+        ).licenseVersion
+        assertEquals("3.0", version("https://creativecommons.org/licenses/by-nc-nd/3.0/"))
+        assertEquals("4.0", version("https://creativecommons.org/licenses/by/4.0/"))
+        assertNull(version(""))
+    }
 }

@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import org.feeluown.mobile.MusicTrack
 import org.feeluown.mobile.TrackLicense
+import org.feeluown.mobile.DownloadPermissionStatus
 import org.feeluown.mobile.PlaybackPayload
 import org.feeluown.mobile.ProviderFailure
 import org.feeluown.mobile.ProviderFailureKind
@@ -134,20 +135,31 @@ class JamendoMusicProvider(
             if (licenseCcUrl.isNotBlank()) add("license-url:$licenseCcUrl")
             add(licenseSummary)
         },
-        // K2 结构化许可：从 API 的 license_ccurl 逐曲构造，替代"仅靠 cc: 字符串展示"。
-        // Jamendo 允许在线播放，但本阶段不开放下载：downloadLicense 恒为 false（默认拒绝），
-        // ND 曲目 derivativesAllowed=false，NC 曲目 commercialUseAllowed=false，全部如实编码。
+        // K2 结构化许可 + K5-D.2 逐曲精确映射：从 API 的 license_ccurl 构造，六种标准 CC 许可逐一识别。
+        // 作品许可（播放/署名/非商业/演绎/原样分享）如实编码；但"下载权限"与"作品许可"分离：
+        // Jamendo 的 audioUrl 来自在线流接口，downloadUrl 是否对当前曲目授权、平台条款是否允许该下载方式，
+        // 尚未逐曲取得充分证据，故 downloadLicense=false、downloadPermissionStatus=UNKNOWN（待核实），
+        // 绝不因作品是 CC、或存在下载 URL 就推导下载权。
         license = TrackLicense(
-            licenseType = if (licenseCode.isNotEmpty()) "CC ${licenseCode.uppercase()}" else "UNKNOWN",
+            licenseType = licenseKind?.let { kind ->
+                licenseVersion?.let { version -> "CC $kind $version" } ?: "CC $kind"
+            } ?: "UNKNOWN",
             licenseUrl = licenseCcUrl.takeIf { it.isNotBlank() },
             attribution = licenseSummary.takeIf { it.isNotBlank() },
-            playLicense = true,
+            playLicense = licenseKind != null,
             downloadLicense = false,
-            commercialUseAllowed = licenseCode.isNotEmpty() && "NC" !in licenseCode.uppercase(),
-            derivativesAllowed = licenseCode.isNotEmpty() && "ND" !in licenseCode.uppercase(),
-            redistributionAllowed = false,
+            commercialUseAllowed = licenseKind != null && "NC" !in licenseKind.orEmpty(),
+            derivativesAllowed = licenseKind != null && "ND" !in licenseKind.orEmpty(),
+            // K5-D.2：ND 仅禁止演绎，不等于禁止原样分享。标准 CC 许可在署名前提下允许原样再分发。
+            redistributionAllowed = licenseKind != null,
             licenseVerifiedAt = null,
             licenseSource = "jamendo-api:license_ccurl",
+            // K5-D：下载权限逐曲判断。平台下载接口授权未核实 → UNKNOWN，默认拒绝；保留证据出处。
+            personalCopyAllowed = false,
+            platformDownloadAllowed = false,
+            downloadPermissionStatus = DownloadPermissionStatus.UNKNOWN,
+            downloadPermissionEvidence = licenseCcUrl.takeIf { it.isNotBlank() },
+            downloadPermissionReason = "Jamendo 提供 CC 作品许可与在线播放，但当前下载方式的平台授权尚未逐曲核实",
         ),
     )
 

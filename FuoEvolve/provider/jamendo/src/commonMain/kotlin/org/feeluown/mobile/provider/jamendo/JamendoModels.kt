@@ -31,6 +31,37 @@ data class JamendoTrack(
         get() = Regex("""/licenses/([^/]+)/""", RegexOption.IGNORE_CASE)
             .find(licenseCcUrl)?.groupValues?.get(1)?.uppercase().orEmpty()
 
+    /** 许可版本（如 "3.0"/"4.0"），从 license_ccurl 路径提取；无版本返回 null。 */
+    val licenseVersion: String?
+        get() = Regex("""/licenses/[^/]+/([^/]+)""", RegexOption.IGNORE_CASE)
+            .find(licenseCcUrl)?.groupValues?.get(1)?.takeIf { it.isNotBlank() }
+
+    /**
+     * 精确 CC 许可类型（K5-D.2）：按标准六种 CC 许可逐一匹配，不靠 contains("NC"/"ND") 粗略判断。
+     *
+     * 返回规范化代码（BY / BY-SA / BY-NC / BY-NC-SA / BY-ND / BY-NC-ND / CC0 / PD）；
+     * 无法识别（空 URL、非 creativecommons.org 域、未知组合）返回 null，由调用方保持 UNKNOWN。
+     */
+    val licenseKind: String?
+        get() {
+            if (licenseCcUrl.isBlank()) return null
+            val hostOk = Regex("""^https?://creativecommons\.org/licenses/""", RegexOption.IGNORE_CASE)
+                .containsMatchIn(licenseCcUrl)
+            if (!hostOk) return null
+            val code = licenseCode.replace("-", "").replace(" ", "")
+            return when (code) {
+                "BY" -> "BY"
+                "BYSA" -> "BY-SA"
+                "BYNC" -> "BY-NC"
+                "BYNCSA" -> "BY-NC-SA"
+                "BYND" -> "BY-ND"
+                "BYNCND" -> "BY-NC-ND"
+                "CC0", "ZERO" -> "CC0"
+                "PD" -> "PD"
+                else -> null
+            }
+        }
+
     /**
      * 可读的授权条件说明，供 UI 展示。
      *
