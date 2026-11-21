@@ -10,7 +10,7 @@
 
 FuoEvolve 是一个围绕 [FeelUOwn](https://github.com/feeluown/FeelUOwn) 生态构建的开源跨平台音乐播放器，将在线音乐、本地音乐、歌词、下载和视频整合到一个现代化应用中。
 
-使用说明见 [USAGE.md](USAGE.md)，文档索引见 [docs/README.md](docs/README.md)。
+使用说明见 [USAGE.md](USAGE.md)，文档索引见 [docs/README.md](docs/README.md)。开发侧产品完整性与发布候选状态见 [K2 产品就绪审计](docs/k2-product-readiness-audit.zh-CN.md) 与 [发布候选清单](docs/release-candidate-checklist.zh-CN.md)；真机/真实网络验收仍在 K3 进行，尚未验证的能力均以 NOT_RUN 标注。
 
 ## 下载
 
