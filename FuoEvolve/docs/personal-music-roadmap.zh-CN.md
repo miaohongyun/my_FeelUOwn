@@ -1347,3 +1347,6 @@ K1.6回归:jamendo desktopTest14项0失败/androidHost10项0失败/shared deskto
 
 **结论:K1部分完成**——Desktop正式播放>30s+ID关联+pause/resume/stop+失败恢复 PASS,但Android真机/家庭宽带/移动数据三大目标环境NOT_RUN;不能宣布K1完成,不能称Jamendo为已验证开箱即用播放来源,只能说Desktop正式链路已真实解码验证。下一步:①Android真机正式路径30s ②家庭宽带/移动数据重复搜索播放 ③声学指纹 ④人工听音 ⑤多时段稳定性。下载仍关闭,不改铃声/混音/演绎;K2独立建模licenseType/licenseUrl/attribution/playLicense/downloadLicense/commercialUseAllowed/derivativesAllowed/redistributionAllowed/licenseVerifiedAt+licenseSource,默认拒绝未知许可下载,K2完成前只保留当前播放能力。详见 docs/jamendo-playback-verification.zh-CN.md。
 
+## 阶段 K1.1：中国大陆设备与网络最终验收（2026-11-21，K1.1 未完成）
+基线 ab349de(K1最终)父 f035695,远端work=ab349de/master=fc05530/工作区干净,K1三提交在历史。**无代码改动**(审计未发现需修复项):resolve三次重试有上限3/退避300ms/超时8s/CancellationException立即传播/永久错误退化null不有害重试/播放与搜索侧generation latest-wins防并发覆盖,Desktop K1证据可复现。**Android真机NOT_RUN**(adb无设备,不拿模拟器/HostTest/编译冒充)。**家庭宽带NOT_RUN**(本机192.168.6.12/网关DNS192.168.6.1/后缀dev.internal为公司内网,禁止代替)。**移动数据NOT_RUN**(无真机无SIM)。**空结果专项(本阶段唯一新增真实证据)**:直连3关键词各10次,ambient/piano/love各**4/10空结果(HTTP200+105B+results=0)**,代理7897为2-3/10;60次全HTTP200零网络失败/4xx/5xx/解析失败=Jamendo服务端高频波动非客户端bug,三次重试后仍有约6.4%全空概率,如实量化不伪造。Desktop保留ao=null无声解码(REAL_PLAYBACK_DECODE PASS),AUDIO_OUTPUT/ACOUSTIC_IDENTITY均NOT_RUN。判定**K1.1未完成(A/B/C全NOT_RUN,仅D稳定性部分完成)**,不宣布开箱即用播放验收达标,不降标准。详见 docs/jamendo-cn-device-network-acceptance.zh-CN.md。
+
