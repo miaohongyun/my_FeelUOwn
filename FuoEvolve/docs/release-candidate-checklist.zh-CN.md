@@ -88,3 +88,10 @@
 - `RELEASE_SIGNING = BLOCKED`：`FUO_SIGNING_*` 环境变量与本地签名密钥均缺失；未生成自签名冒充正式签名，未上传/提交密钥。
 - `WINDOWS_INSTALLER = BLOCKED`：cargo/rustc 缺失（同 K2）。
 - K3.1 真机/家庭宽带/SIM/听音人员全部缺失 → K3.2–K3.7 全 NOT_RUN；**K3 未完成，不宣布开箱即用达标**。详见 `docs/k3-real-device-cn-acceptance.zh-CN.md`。
+
+### K4 交接（2026-11-21）
+- 冻结基线再核验 PASS：分支 `work/android-community-discovery`、HEAD=`03e4839`、master=`fc05530` 未动、工作区干净、K2/K3 报告完整。
+- **签名接线就绪但密钥缺失**：`FUO_SIGNING_*` 四变量全 UNSET、项目内无 keystore、`local.properties` 不存在 → `RELEASE_SIGNING=BLOCKED`；`androidApp/build.gradle.kts:49-118` 的 `fuo` signingConfig 仅在四项齐备时挂到 release，缺一不误签。
+- **资源类目标全 BLOCKED**：Release 构建、实体机（adb devices 空）、家庭宽带（192.168.6.x 公司内网）、SIM、人工听音/普通用户、Release 安装均未取得。`K3_READY=BLOCKED`（8 项全缺）。
+- 安全回归 PASS（无业务代码改动，冻结边界未变，引用 K2 结论）；Windows 包仍 BLOCKED（缺 cargo）。
+- **K4 判定：部分完成/BLOCKED**；不混淆开发完成度与交付完成度，不生成/提交密钥，不伪造 PASS。详见 `docs/k4-release-artifact-and-test-resources.zh-CN.md`。

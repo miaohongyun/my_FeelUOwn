@@ -10,7 +10,7 @@
 
 FuoEvolve 是一个围绕 [FeelUOwn](https://github.com/feeluown/FeelUOwn) 生态构建的开源跨平台音乐播放器，将在线音乐、本地音乐、歌词、下载和视频整合到一个现代化应用中。
 
-使用说明见 [USAGE.md](USAGE.md)，文档索引见 [docs/README.md](docs/README.md)。开发侧产品完整性与发布候选状态见 [K2 产品就绪审计](docs/k2-product-readiness-audit.zh-CN.md) 与 [发布候选清单](docs/release-candidate-checklist.zh-CN.md)；[K3 真实验收报告](docs/k3-real-device-cn-acceptance.zh-CN.md) 如实记录：Android 真机、家庭宽带、移动数据与人工听音条件尚未具备，相关能力均为 NOT_RUN，尚未达到"普通人开箱即用"验收标准。
+使用说明见 [USAGE.md](USAGE.md)，文档索引见 [docs/README.md](docs/README.md)。开发侧产品完整性与发布候选状态见 [K2 产品就绪审计](docs/k2-product-readiness-audit.zh-CN.md) 与 [发布候选清单](docs/release-candidate-checklist.zh-CN.md)；[K3 真实验收报告](docs/k3-real-device-cn-acceptance.zh-CN.md) 如实记录：Android 真机、家庭宽带、移动数据与人工听音条件尚未具备，相关能力均为 NOT_RUN，尚未达到"普通人开箱即用"验收标准。[K4 发布制品与验收资源落实报告](docs/k4-release-artifact-and-test-resources.zh-CN.md) 进一步说明：正式 Release 签名密钥、实体机、家庭宽带、SIM 与真人均未取得，`K3_READY=BLOCKED`；开发完成度（K2）与交付完成度是两件事，不混为一谈。
 
 ## 下载
 
