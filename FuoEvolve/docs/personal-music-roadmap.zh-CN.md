@@ -1327,3 +1327,23 @@ K0.5 模型：MusicTrack 有 providerId/originalId/标题/歌手/专辑/封面/�
 
 **结论**：Jamendo 维持默认启用(已是默认,不新增下载)——授权明确+目标网络直连+五级 PASS,契合家庭目标；IA/Audiomack 直连失败不进默认；Subsonic/WebDAV 属自有曲库不计公共来源。诚实边界：REAL_PLAYBACK NOT_RUN、目标网络非确认家庭宽带、许可多 NC/ND、无独立许可字段。下一步：①补 REAL_PLAYBACK(桌面 libmpv/真机)关闭级别6/7；②补家庭宽带/移动/真机直连样本；③补结构化许可字段(独立任务)；④继续找"授权明确+大陆直连+可播放"来源,找不到如实说。详见 docs/source-readiness-audit.zh-CN.md。
 
+## §34 阶段 K1：Jamendo 正式播放闭环与中国大陆网络验收（2026-11-21）
+
+基线 HEAD=73368bf(K0) 父=8e8c428，工作区干净，K0 包含在 HEAD，远端 work=73368bf/master=fc05530 一致。目标不变：家人不配置打开就能搜能播；本阶段不接新源/不开下载/不改默认。
+
+环境搭建(为真实解码,非放宽策略):本机无C编译器/7z/native bridge,下载并SHA校验 clang+LLVM20.1.8便携包(f229769f)/libmpv dev(273c079b)/runtime(f259b5fd),clang编译生产 native bridge(fuoevolve_mpv_bridge.dll 184KB),按生产preload顺序加载DLL;工具装用户目录不写系统目录,不改Gateway/TLS/SSRF。
+
+K1.1 Desktop正式播放(opt-in FUOE_K1_REAL_PLAYBACK=1默认SKIP):正式JamendoMusicProvider.search真实搜索→正式resolve(trackById重取)→生产DesktopMpvPlaybackEngine+生产FfmMpvBackend+native libmpv→真实解码,ao=null无声解码不下载整曲不用Mock不直接喂URL。证据(desktopApp/build/k1-evidence.txt两次一致):ambient 20条首条jamendo:1348698/Music vast vast sky/Alexander Morozov;URL host=prod-1.storage.jamendo.com trackid=1348698;**status=Playing position 53→30113 推进30060ms(二次117→30212/30095ms)**;events=[StartFile,FileLoaded,PlaybackRestart] statuses=[Loading,Playing,Paused];pause/resume/stop全过;finally释放。诚实边界:正式引擎层驱动未走App搜索页→PlaybackStartCoordinator GUI入口(headless无法组装),不冒充UI端到端;ao=null解码非音频输出非人工听音。
+
+K1.2身份关联:搜索原始ID/track.id与providerId(jamendo:1348698,普通搜索无独立originalId)/trackById重取ID/播放URL trackid/播放器实际加载URL/播放期间关联MusicTrack 全一致→REAL_TRACK_IDENTITY_VERIFIED PASS(ID关联级);ACOUSTIC_IDENTITY NOT_RUN(无音频指纹),不夸大URL trackid一致为声学级。
+
+K1.3 Android真机 NOT_RUN(adb devices空,不以HostTest/编译替代;生产链AndroidNativeAudioEngine→FuoPlaybackService ExoPlayer+AudioFocus+耳机监听已审计)。K1.4网络矩阵:本机内网Windows非确认家庭宽带,家庭宽带/Android Wi-Fi/移动数据/另一网络/iOS真机全NOT_RUN;能测的内网直连(无代理):DNS api.jamendo.com→Cloudflare无污染,TCP/TLS 0.23/0.46s,搜索2轮×3关键词全HTTP200(ambient5/5 piano5/5 love轮1=0轮2=5→证实偶发空),音频206 a/mpeg,正式播放真实解码>30s。直连与代理严格分开(本阶段链路全直连,代理仅用于下载工具链)。单次样本不承诺长期稳定。
+
+最小修复:生产resolve()仅调一次trackById而该端点偶发空→用户点播放偶发失败(真实缺陷),resolve内加重试(最多3次间隔300ms)保留取消/仍重取不用旧URL/不改权限来源默认;修复后单测+真实播放全过。
+
+K1.5失败体验(静态+单测):网络/HTTP失败分类、URL重取失败不用旧URL、音频失败libmpv EndFile(ERROR)/Failure→status=Error+errorMessage不永久Loading、取消切歌generation latest-wins、播放结束Ended、Provider不可用supervisorScope隔离不伪造;无Compose UI自动化测试NOT_RUN。
+
+K1.6回归:jamendo desktopTest14项0失败/androidHost10项0失败/shared desktopTest388项0失败/desktopApp真实播放1项0失败;iOS主代码+测试源码+shared编译--rerun-tasks BUILD SUCCESSFUL;Android compileDebugKotlin BUILD SUCCESSFUL;Android完整APK与真机/iOS Simulator NOT_RUN(无cargo/真机/Xcode)。
+
+**结论:K1部分完成**——Desktop正式播放>30s+ID关联+pause/resume/stop+失败恢复 PASS,但Android真机/家庭宽带/移动数据三大目标环境NOT_RUN;不能宣布K1完成,不能称Jamendo为已验证开箱即用播放来源,只能说Desktop正式链路已真实解码验证。下一步:①Android真机正式路径30s ②家庭宽带/移动数据重复搜索播放 ③声学指纹 ④人工听音 ⑤多时段稳定性。下载仍关闭,不改铃声/混音/演绎;K2独立建模licenseType/licenseUrl/attribution/playLicense/downloadLicense/commercialUseAllowed/derivativesAllowed/redistributionAllowed/licenseVerifiedAt+licenseSource,默认拒绝未知许可下载,K2完成前只保留当前播放能力。详见 docs/jamendo-playback-verification.zh-CN.md。
+
